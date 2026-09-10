@@ -27,8 +27,33 @@ if(MT5BRIDGE_BUILD_RUNTIME)
     target_include_directories(mt5_bridge PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
     target_link_libraries(mt5_bridge PRIVATE Python3::Python)
+    if(Python3_RUNTIME_LIBRARY_RELEASE)
+        add_custom_command(TARGET mt5_bridge POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${Python3_RUNTIME_LIBRARY_RELEASE}"
+                    "$<TARGET_FILE_DIR:mt5_bridge>"
+            COMMENT "Staging the Python runtime beside mt5_bridge.dll")
+    endif()
 
     if(BUILD_TESTING)
+        add_executable(mt5bridge_owned_runtime_smoke tests/owned_runtime_smoke.cpp)
+        target_link_libraries(mt5bridge_owned_runtime_smoke PRIVATE mt5bridge::client)
+        get_filename_component(MT5BRIDGE_PYTHON_RUNTIME_DIR
+                               "${Python3_RUNTIME_LIBRARY_RELEASE}" DIRECTORY)
+        set(MT5BRIDGE_TEST_PATH
+            "${MT5BRIDGE_PYTHON_RUNTIME_DIR};$ENV{PATH}")
+        add_test(
+            NAME mt5bridge_owned_runtime
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_mt5_module"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_RUNTIME_DIR}"
+                    "PATH=${MT5BRIDGE_TEST_PATH}"
+                    "$<TARGET_FILE:mt5bridge_owned_runtime_smoke>"
+                    "$<TARGET_FILE:mt5_bridge>"
+        )
+        set_tests_properties(mt5bridge_owned_runtime PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
         add_test(
             NAME mt5bridge_fake_runtime
             COMMAND ${CMAKE_COMMAND} -E env

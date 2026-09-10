@@ -59,14 +59,23 @@ typedef struct Mt5RatesRequest {
     int32_t reserved;        ///< Reserved for ABI-compatible extensions; must be zero.
 } Mt5RatesRequest;
 
-/// \enum Mt5FetchStatus
-/// \brief Describes the semantic outcome of a market-data read.
-typedef enum Mt5FetchStatus {
-    MT5_FETCH_COMPLETE = 0,       ///< The requested read completed with data.
-    MT5_FETCH_EMPTY = 1,          ///< The read completed successfully without data.
-    MT5_FETCH_RETRY_EXHAUSTED = 2, ///< Transient recovery attempts were exhausted.
-    MT5_FETCH_FATAL_ERROR = 3     ///< A non-recoverable error stopped the read.
-} Mt5FetchStatus;
+/// \typedef Mt5FetchStatus
+/// \brief Fixed-width semantic outcome of a market-data read.
+typedef int32_t Mt5FetchStatus;
+
+/// \name Mt5FetchStatus values
+/// \{
+/// \brief The requested read completed with data.
+#define MT5_FETCH_COMPLETE ((Mt5FetchStatus)0)
+/// \brief The read completed successfully without data.
+#define MT5_FETCH_EMPTY ((Mt5FetchStatus)1)
+/// \brief Transient recovery attempts were exhausted.
+#define MT5_FETCH_RETRY_EXHAUSTED ((Mt5FetchStatus)2)
+/// \brief A non-recoverable error stopped the read.
+#define MT5_FETCH_FATAL_ERROR ((Mt5FetchStatus)3)
+/// \brief Data was returned but the terminal could not prove range completeness.
+#define MT5_FETCH_PARTIAL ((Mt5FetchStatus)4)
+/// \}
 
 /// \struct Mt5FetchDiagnostics
 /// \brief Reports recovery activity and completeness for a market-data read.
@@ -210,6 +219,12 @@ MT5BRIDGE_EXPORT void mt5bridge_rate_buffer_free(Mt5RateBuffer *buffer);
 /// \return Zero on success; non-zero when an argument is NULL.
 MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_diagnostics(const Mt5RateBuffer *buffer,
                                                        Mt5FetchDiagnostics *diagnostics);
+
+/// \brief Retrieves diagnostics for the most recent market-data call on this thread.
+/// \param[out] diagnostics Destination for the diagnostic snapshot.
+/// \return Zero on success; non-zero when \p diagnostics is NULL.
+/// \note This accessor is useful when a query fails before returning a buffer.
+MT5BRIDGE_EXPORT int mt5bridge_last_fetch_diagnostics(Mt5FetchDiagnostics *diagnostics);
 
 #ifdef __cplusplus
 }

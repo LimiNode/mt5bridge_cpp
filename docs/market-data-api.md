@@ -15,7 +15,8 @@ data:    ticks / rates                           -> POD buffer or chunks
 The public types live in [include/mt5bridge/data.h](../include/mt5bridge/data.h)
 and are C-compatible. `mt5bridge::Client` exposes `copy_ticks_range()` and
 `copy_rates_range()` returning ordinary C++ vectors, while the C API exposes
-DLL-owned buffers and an optional tick-chunk callback.
+DLL-owned buffers, an optional tick-chunk callback, and
+`mt5bridge_last_fetch_diagnostics()` for failures that do not produce a buffer.
 
 `Mt5Tick` preserves both volume representations returned by MT5: integer
 `volume` (`uint64_t`) and exchange-provided `volume_real` (`double`). The
@@ -35,13 +36,19 @@ Every buffer is owned by the DLL and must be released with its matching
 `*_buffer_free()` function. Callback memory is valid only during the callback;
 copy it to application-owned storage if it must outlive the call.
 
+Rates use the same bounded transient-error recovery as ticks. Because
+`copy_rates_range()` has no page-size contract, the bridge confirms two stable
+successive NumPy results (including two stable empty results) before marking a
+rate buffer complete.
+
 ## Reliability contract
 
 History reads are retrieved through bounded `copy_ticks_from()` pages and
-retried up to three times with bounded backoff when MT5 returns no result
-during history warm-up. An empty array is a valid `MT5_FETCH_EMPTY` result; it
-is not treated as an error. Diagnostics record attempts, retries, warm-up
-detection, and completion status. The callback API delivers each page outside
+retried up to three times with bounded backoff when MT5 returns no result or a
+classified partial page during history warm-up. Empty and short successful
+pages receive bounded confirmation probes before the reader declares the range
+complete. Diagnostics record attempts, retries, warm-up detection, and
+completion status. The callback API delivers each page outside
 the Python/GIL and runtime-mutex critical sections, so a consumer does not need
 to retain a year-sized NumPy allocation in the DLL. Callbacks may return
 non-zero to cancel delivery and may call another bridge operation; shutting
@@ -60,7 +67,7 @@ reconnect, traversal resumes from the last committed cursor.
 ## Realtime boundary
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
-range. ABI 3 does not expose `subscribe_ticks()` and must not be described as a
+range. ABI 4 does not expose `subscribe_ticks()` and must not be described as a
 live subscription API. A future realtime layer must persist the committed
 `(time_msc, ordinal)` cursor, poll the history tail, reconnect, catch up the
 missing interval, suppress only the intentional overlap, and then resume live
@@ -74,9 +81,9 @@ Python 3.11.9 and NumPy 2.4.6 were:
 
 | Ticks | Structured array | Pages | Slice baseline | DLL buffer | DLL callback |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100,000 | 5.7 MiB | 2 | 0.475 ms | 8.416 ms (11.9 M ticks/s) | 5.961 ms (16.8 M ticks/s) |
-| 1,000,000 | 57.2 MiB | 16 | 6.532 ms | 124.288 ms (8.0 M ticks/s) | 59.479 ms (16.8 M ticks/s) |
-| 5,000,000 | 286.1 MiB | 77 | 30.600 ms | 541.882 ms (9.2 M ticks/s) | 299.147 ms (16.7 M ticks/s) |
+| 100,000 | 5.7 MiB | 3 | 0.513 ms | 73.253 ms (1.4 M ticks/s) | 58.977 ms (1.7 M ticks/s) |
+| 1,000,000 | 57.2 MiB | 17 | 6.652 ms | 191.439 ms (5.2 M ticks/s) | 124.443 ms (8.0 M ticks/s) |
+| 5,000,000 | 286.1 MiB | 78 | 30.998 ms | 617.722 ms (8.1 M ticks/s) | 345.027 ms (14.5 M ticks/s) |
 
 The slice number is the fake fetch baseline. DLL columns include Python-call,
 pagination, native field-copy conversion, and delivery overhead; they exclude
@@ -92,11 +99,16 @@ $env:MT5BRIDGE_DLL = (Resolve-Path 'build\bin\Release\mt5_bridge.dll').Path
 python tests\benchmark_numpy_to_pod.py
 ```
 
+`ctest --test-dir build -C Release --output-on-failure` also runs a native
+owned-interpreter smoke test with a dependency-free fake `MetaTrader5` module.
+
 ## Safety rules
 
 - Retry reads and synchronization; never blindly retry `order_send` after a
   timeout because the broker may already have accepted the order.
-- A partial result must carry diagnostics and must not be reported as complete.
+- A partial result carries diagnostics and is never reported as complete; a
+  failed query's snapshot is available through
+  `mt5bridge_last_fetch_diagnostics()`.
 - Keep callback execution outside the Python/GIL and runtime-mutex sections.
 - Prefer callback delivery when the complete range need not be retained; the
   buffer API intentionally accumulates the full result.

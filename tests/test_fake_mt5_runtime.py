@@ -34,6 +34,18 @@ class Mt5TicksRequest(Structure):
     ]
 
 
+class Mt5RatesRequest(Structure):
+    """Matches the versioned C ABI rate request."""
+
+    _fields_ = [
+        ("symbol_utf8", c_char_p),
+        ("from_msc", c_int64),
+        ("to_msc", c_int64),
+        ("timeframe", c_int32),
+        ("reserved", c_int32),
+    ]
+
+
 class Mt5FetchDiagnostics(Structure):
     """Matches the versioned C ABI diagnostics record."""
 
@@ -101,8 +113,37 @@ def page_with_tail() -> np.ndarray:
     return values
 
 
+RATE_DTYPE = np.dtype(
+    [
+        ("time", "<i8"),
+        ("open", "<f8"),
+        ("high", "<f8"),
+        ("low", "<f8"),
+        ("close", "<f8"),
+        ("tick_volume", "<i8"),
+        ("spread", "<i4"),
+        ("real_volume", "<i8"),
+    ]
+)
+
+
+def rate_page(count: int) -> np.ndarray:
+    """Builds deterministic OHLC rows for rates recovery tests."""
+    values = np.zeros(count, dtype=RATE_DTYPE)
+    values["time"] = np.arange(count, dtype=np.int64)
+    values["open"] = 1.1
+    values["high"] = 1.2
+    values["low"] = 1.0
+    values["close"] = 1.15
+    values["tick_volume"] = 10
+    values["spread"] = 2
+    values["real_volume"] = 20
+    return values
+
+
 def fake_module(
-    sequence: list[object], *, order_error: BaseException | None = None
+    sequence: list[object], *, order_error: BaseException | None = None,
+    rate_sequence: list[object] | None = None, initialize_result: bool = True
 ) -> types.ModuleType:
     """Creates a fake MetaTrader5 module consuming a scripted sequence."""
     module = types.ModuleType("MetaTrader5")
@@ -115,7 +156,7 @@ def fake_module(
 
     def initialize() -> bool:
         module.initialize_calls += 1
-        return True
+        return initialize_result
 
     def shutdown() -> bool:
         module.shutdown_calls += 1
@@ -127,7 +168,7 @@ def fake_module(
     def copy_ticks_from(symbol: str, when: object, count: int, flags: int) -> object:
         del symbol, when, flags
         module.calls += 1
-        result = sequence.pop(0) if sequence else page(2000, min(count, 2))
+        result = sequence.pop(0) if sequence else page(2000, 0)
         if isinstance(result, tuple):
             result, code, message = result
             module.last = (code, message)
@@ -147,12 +188,26 @@ def fake_module(
     def terminal_info() -> dict[str, bool]:
         return {"connected": True}
 
+    def copy_rates_range(symbol: str, timeframe: int, start: object, end: object) -> object:
+        del symbol, timeframe, start, end
+        result = rate_sequence.pop(0) if rate_sequence else rate_page(0)
+        if isinstance(result, tuple):
+            result, code, message = result
+            module.last = (code, message)
+        elif result is None:
+            module.last = (-4, "History timeout")
+        else:
+            module.last = (1, "Success")
+        return result
+
     module.initialize = initialize
     module.shutdown = shutdown
     module.last_error = last_error
     module.copy_ticks_from = copy_ticks_from
     module.order_send = order_send
     module.terminal_info = terminal_info
+    if rate_sequence is not None:
+        module.copy_rates_range = copy_rates_range
     return module
 
 
@@ -163,7 +218,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Loads the DLL and installs the deterministic fake module."""
         if ctypes.sizeof(Mt5TicksRequest) != 32 or ctypes.sizeof(Mt5Tick) != 56:
-            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 3")
+            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 4")
         dll_path = os.environ.get("MT5BRIDGE_DLL")
         if not dll_path:
             raise unittest.SkipTest("set MT5BRIDGE_DLL to a built mt5_bridge.dll")
@@ -192,6 +247,17 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             POINTER(Mt5FetchDiagnostics),
         ]
         cls.module.mt5bridge_tick_buffer_free.argtypes = [c_void_p]
+        cls.module.mt5bridge_query_rates.argtypes = [POINTER(Mt5RatesRequest), POINTER(c_void_p)]
+        cls.module.mt5bridge_query_rates.restype = c_int
+        cls.module.mt5bridge_rate_buffer_size.argtypes = [c_void_p]
+        cls.module.mt5bridge_rate_buffer_size.restype = c_size_t
+        cls.module.mt5bridge_rate_buffer_diagnostics.argtypes = [
+            c_void_p,
+            POINTER(Mt5FetchDiagnostics),
+        ]
+        cls.module.mt5bridge_rate_buffer_free.argtypes = [c_void_p]
+        cls.module.mt5bridge_last_fetch_diagnostics.argtypes = [POINTER(Mt5FetchDiagnostics)]
+        cls.module.mt5bridge_last_fetch_diagnostics.restype = c_int
         cls.tick_callback_type = ctypes.CFUNCTYPE(
             c_int, POINTER(Mt5Tick), c_size_t, c_void_p
         )
@@ -202,8 +268,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             c_void_p,
         ]
         cls.module.mt5bridge_copy_ticks_range.restype = c_int
-        if cls.module.mt5bridge_abi_version() != 3:
-            raise unittest.SkipTest("test DLL does not expose ABI version 3")
+        if cls.module.mt5bridge_abi_version() != 4:
+            raise unittest.SkipTest("test DLL does not expose ABI version 4")
 
     def tearDown(self) -> None:
         """Restores the module registry after each scenario."""
@@ -229,6 +295,27 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             size = self.module.mt5bridge_tick_buffer_size(result)
             self.module.mt5bridge_tick_buffer_diagnostics(result, byref(diagnostics))
             self.module.mt5bridge_tick_buffer_free(result)
+        else:
+            self.module.mt5bridge_last_fetch_diagnostics(byref(diagnostics))
+        error = self.last_error()
+        self.module.mt5bridge_shutdown()
+        return status, size, diagnostics, error
+
+    def query_rates(
+        self, fake: types.ModuleType
+    ) -> tuple[int, int, Mt5FetchDiagnostics, str]:
+        """Runs one rate query and returns status, size, diagnostics, and error."""
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        native_request = Mt5RatesRequest(b"EURUSD", 0, 3000, 1, 0)
+        result = c_void_p()
+        status = self.module.mt5bridge_query_rates(byref(native_request), byref(result))
+        diagnostics = Mt5FetchDiagnostics()
+        size = 0
+        if result.value:
+            size = self.module.mt5bridge_rate_buffer_size(result)
+            self.module.mt5bridge_rate_buffer_diagnostics(result, byref(diagnostics))
+            self.module.mt5bridge_rate_buffer_free(result)
         error = self.last_error()
         self.module.mt5bridge_shutdown()
         return status, size, diagnostics, error
@@ -263,16 +350,53 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         status, size, diagnostics, error = self.query(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
-        self.assertEqual(diagnostics.attempts, 3)
+        self.assertEqual(diagnostics.attempts, 4)
         self.assertEqual(diagnostics.retries, 2)
+
+    def test_empty_partial_full_history_is_confirmed(self) -> None:
+        """A short success is probed again before the reader declares completion."""
+        fake = fake_module(
+            [
+                page(2000, 0),
+                (page(2000, 2), -10005, "IPC timeout"),
+                page(2000, 2),
+            ]
+        )
+        status, size, diagnostics, error = self.query(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertGreaterEqual(diagnostics.reconnects, 1)
+
+    def test_initialize_false_is_rejected(self) -> None:
+        """A false MetaTrader initialize result is not accepted as success."""
+        fake = fake_module([], initialize_result=False)
+        sys.modules["MetaTrader5"] = fake
+        status = self.module.mt5bridge_initialize(None)
+        error = self.last_error()
+        self.module.mt5bridge_shutdown()
+        self.assertNotEqual(status, 0)
+        self.assertIn("initialize", error.lower())
+
+    def test_rates_recover_and_confirm_stable_result(self) -> None:
+        """Rates use transient recovery and a bounded stable-result confirmation."""
+        fake = fake_module(
+            [],
+            rate_sequence=[None, rate_page(2), rate_page(2)],
+        )
+        status, size, diagnostics, error = self.query_rates(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(diagnostics.retries, 2)
+        self.assertTrue(diagnostics.history_warmup_detected)
 
     def test_repeated_page_fails_no_progress(self) -> None:
         """A repeated page cannot spin forever."""
         fake = fake_module([page(2000, 65536), page(2000, 65536)])
-        status, _, _, error = self.query(fake)
+        status, _, diagnostics, error = self.query(fake)
         self.assertNotEqual(status, 0)
         self.assertLessEqual(fake.calls, 2)
         self.assertIn("non-progressing", error)
+        self.assertEqual(diagnostics.status, 3)
 
     def test_partial_page_continues_from_committed_cursor(self) -> None:
         """Partial data is retained and followed by an inclusive cursor retry."""
@@ -285,7 +409,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         status, size, diagnostics, error = self.query(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 3)
-        self.assertEqual(diagnostics.attempts, 2)
+        self.assertEqual(diagnostics.attempts, 3)
         self.assertEqual(diagnostics.retries, 1)
         self.assertEqual(diagnostics.reconnects, 1)
         self.assertTrue(diagnostics.complete)

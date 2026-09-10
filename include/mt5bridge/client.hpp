@@ -11,7 +11,10 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -25,6 +28,7 @@ namespace mt5bridge {
 ///
 /// The client depends only on C++17 and WinAPI. Python, NumPy, MetaTrader5, and
 /// the DLL import library remain runtime implementation details.
+/// Only one initialized Client may own the process-global runtime at a time.
 class Client {
 public:
     /// \brief Constructs an unloaded client.
@@ -85,10 +89,13 @@ public:
         rate_size_ = resolve<RateSize>("mt5bridge_rate_buffer_size");
         rate_free_ = resolve<RateFree>("mt5bridge_rate_buffer_free");
         rate_diagnostics_ = resolve<RateDiagnostics>("mt5bridge_rate_buffer_diagnostics");
+        last_fetch_diagnostics_ =
+            resolve<LastFetchDiagnostics>("mt5bridge_last_fetch_diagnostics");
         if (!abi_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
-            !rate_free_ || !rate_diagnostics_ || !copy_ticks_chunks_ ||
+            !rate_free_ || !rate_diagnostics_ || !last_fetch_diagnostics_ ||
+            !copy_ticks_chunks_ ||
             abi_version_() != MT5BRIDGE_ABI_VERSION) {
             unload();
             throw std::runtime_error("incompatible mt5_bridge.dll ABI");
@@ -99,6 +106,8 @@ public:
     void unload() noexcept {
         if (initialized_ && shutdown_)
             shutdown_();
+        Client *expected = this;
+        active_client_.compare_exchange_strong(expected, nullptr);
         if (module_)
             FreeLibrary(module_);
         module_ = nullptr;
@@ -119,6 +128,7 @@ public:
         rate_size_ = nullptr;
         rate_free_ = nullptr;
         rate_diagnostics_ = nullptr;
+        last_fetch_diagnostics_ = nullptr;
         initialized_ = false;
     }
 
@@ -131,9 +141,13 @@ public:
     /// \throws std::runtime_error If no DLL is loaded or initialization fails.
     void initialize(const wchar_t *python_home = nullptr) {
         check_loaded();
+        std::lock_guard<std::mutex> lock(ownership_mutex_);
+        if (active_client_ && active_client_ != this)
+            throw std::runtime_error("another mt5bridge::Client already owns the runtime");
         if (initialize_(python_home) != 0)
             throw std::runtime_error(error_message());
         initialized_ = true;
+        active_client_ = this;
     }
 
     /// \brief Shuts down an initialized runtime while keeping the DLL loaded.
@@ -141,6 +155,8 @@ public:
         if (shutdown_)
             shutdown_();
         initialized_ = false;
+        Client *expected = this;
+        active_client_.compare_exchange_strong(expected, nullptr);
     }
 
     /// \brief Executes a control-plane JSON request.
@@ -150,18 +166,32 @@ public:
     std::string eval(const std::string &request_json) {
         check_loaded();
         char *response = nullptr;
-        if (eval_json_(request_json.c_str(), &response) != 0)
+        const int status = eval_json_(request_json.c_str(), &response);
+        struct ResponseGuard {
+            void (*release)(char *);
+            void operator()(char *value) const noexcept {
+                if (value && release)
+                    release(value);
+            }
+        };
+        std::unique_ptr<char, ResponseGuard> owned(response, ResponseGuard{free_});
+        if (status != 0)
             throw std::runtime_error(error_message());
-        if (!response)
+        if (!owned)
             throw std::runtime_error("mt5bridge returned an empty response");
-        std::string result(response);
-        free_(response);
-        return result;
+        return std::string(owned.get());
     }
 
     /// \brief Returns diagnostic text from the loaded runtime.
     /// \return Borrowed UTF-8 text, or nullptr when unavailable.
     const char *last_error() const noexcept { return last_error_ ? last_error_() : nullptr; }
+
+    /// \brief Copies diagnostics from the most recent market-data call on this thread.
+    /// \param[out] diagnostics Destination for the diagnostic snapshot.
+    /// \return True when the runtime supplied a diagnostic snapshot.
+    bool last_fetch_diagnostics(Mt5FetchDiagnostics *diagnostics) const noexcept {
+        return last_fetch_diagnostics_ && last_fetch_diagnostics_(diagnostics) == 0;
+    }
 
     /// \brief Retrieves an inclusive tick range into an application-owned vector.
     /// \param request Symbol, range, and tick flags.
@@ -282,6 +312,7 @@ private:
     using RateSize = std::size_t (*)(const Mt5RateBuffer *);
     using RateFree = void (*)(Mt5RateBuffer *);
     using RateDiagnostics = int (*)(const Mt5RateBuffer *, Mt5FetchDiagnostics *);
+    using LastFetchDiagnostics = int (*)(Mt5FetchDiagnostics *);
 
     /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
     /// \param path Caller-provided DLL path.
@@ -346,7 +377,10 @@ private:
         rate_size_ = other.rate_size_;
         rate_free_ = other.rate_free_;
         rate_diagnostics_ = other.rate_diagnostics_;
+        last_fetch_diagnostics_ = other.last_fetch_diagnostics_;
         initialized_ = other.initialized_;
+        Client *expected = &other;
+        active_client_.compare_exchange_strong(expected, this);
         other.module_ = nullptr;
         other.abi_version_ = nullptr;
         other.initialize_ = nullptr;
@@ -365,6 +399,7 @@ private:
         other.rate_size_ = nullptr;
         other.rate_free_ = nullptr;
         other.rate_diagnostics_ = nullptr;
+        other.last_fetch_diagnostics_ = nullptr;
         other.initialized_ = false;
     }
 
@@ -386,7 +421,10 @@ private:
     RateSize rate_size_ = nullptr;
     RateFree rate_free_ = nullptr;
     RateDiagnostics rate_diagnostics_ = nullptr;
+    LastFetchDiagnostics last_fetch_diagnostics_ = nullptr;
     bool initialized_ = false;
+    inline static std::mutex ownership_mutex_;
+    inline static std::atomic<Client *> active_client_{nullptr};
 };
 
 } // namespace mt5bridge

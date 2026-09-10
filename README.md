@@ -87,7 +87,7 @@ are tracked in [`docs/mt5-quirks.md`](docs/mt5-quirks.md).
 
 ## Notes
 
-- The current public contract is ABI 3. Tick POD records preserve separate
+- The current public contract is ABI 4. Tick POD records preserve separate
   integer `volume` and floating-point `volume_real` fields.
 - Only 64‑bit Windows builds are supported.
 - Python 3.11+ is required.

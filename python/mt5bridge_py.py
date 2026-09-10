@@ -32,7 +32,7 @@ import json
 from ctypes import POINTER, byref, c_char_p, c_int, c_void_p, c_wchar_p
 
 ## \brief ABI version required by this ctypes adapter.
-_ABI_VERSION = 3
+_ABI_VERSION = 4
 
 # Load the mt5bridge shared library.
 _lib = ctypes.WinDLL("mt5_bridge.dll")

@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 /// \struct Mt5TickBuffer
@@ -38,7 +39,17 @@ std::mutex g_mutex;
 bool g_initialized = false;
 bool g_owns_interpreter = false;
 PyThreadState *g_main_thread_state = nullptr;
+std::thread::id g_owner_thread;
 thread_local std::string g_last_error;
+thread_local Mt5FetchDiagnostics g_last_fetch_diagnostics{};
+
+/// \brief Clears the calling thread's latest market-data diagnostics.
+void clear_fetch_diagnostics() { g_last_fetch_diagnostics = Mt5FetchDiagnostics{}; }
+
+/// \brief Saves market-data diagnostics for retrieval after a failed query.
+void save_fetch_diagnostics(const Mt5FetchDiagnostics &diagnostics) {
+    g_last_fetch_diagnostics = diagnostics;
+}
 
 /// \brief Replaces the calling thread's bridge diagnostic.
 /// \param message Null-terminated message, or nullptr for a generic fallback.
@@ -444,6 +455,10 @@ bool valid_range(const char *symbol, int64_t from_msc, int64_t to_msc) {
 
 /// \brief Maximum number of ticks requested from Python in one bounded page.
 constexpr int kTickPageSize = 65536;
+/// \brief Maximum number of successful short-page confirmations before ending a read.
+constexpr uint32_t kShortPageConfirmations = 2;
+/// \brief Maximum number of partial pages accepted while recovering history.
+constexpr uint32_t kPartialPageLimit = 3;
 
 /// \brief Gets the numeric status reported by the MetaTrader Python module.
 /// \param mt5 Borrowed MetaTrader5 module.
@@ -552,12 +567,20 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
             const int code = mt5_last_error_code(mt5);
             if (diagnostics && code != 1)
                 diagnostics->last_mt5_error = code;
-            if (partial && is_partial_read_error(code)) {
-                *partial = true;
+            const bool transient_page = is_partial_read_error(code);
+            if (partial)
+                *partial = transient_page;
+            if (transient_page) {
                 if (diagnostics)
                     diagnostics->history_warmup_detected = 1;
                 if (is_ipc_error(code) && reinitialize_terminal(mt5) && diagnostics)
                     ++diagnostics->reconnects;
+                if (attempt < 3) {
+                    if (diagnostics)
+                        ++diagnostics->retries;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50u << (attempt - 1)));
+                    continue;
+                }
             }
             return true;
         }
@@ -610,6 +633,9 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
 
     int64_t cursor_msc = request->from_msc;
     std::size_t skipped_at_cursor = 0;
+    uint32_t short_page_confirmations = 0;
+    uint32_t partial_page_count = 0;
+    bool confirming_short_page = false;
     for (;;) {
         std::vector<Mt5Tick> page;
         bool page_ok = false;
@@ -638,8 +664,18 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         }
         if (!page_ok)
             return false;
-        if (page.empty())
-            break;
+        if (page.empty()) {
+            if (partial_page) {
+                set_error("MetaTrader returned no ticks during history recovery");
+                return false;
+            }
+            if (confirming_short_page || short_page_confirmations >= kShortPageConfirmations)
+                break;
+            ++short_page_confirmations;
+            confirming_short_page = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+            continue;
+        }
 
         const std::size_t previously_consumed_at_cursor = skipped_at_cursor;
         std::vector<Mt5Tick> deliver;
@@ -650,6 +686,8 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             ++last_timestamp_count;
         for (const Mt5Tick &tick : page) {
             if (tick.time_msc < request->from_msc || tick.time_msc > request->to_msc)
+                continue;
+            if (tick.time_msc < cursor_msc)
                 continue;
             if (tick.time_msc == cursor_msc && skipped_at_cursor != 0) {
                 --skipped_at_cursor;
@@ -666,17 +704,34 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         if (last_timestamp < cursor_msc ||
             (last_timestamp == cursor_msc &&
              last_timestamp_count <= previously_consumed_at_cursor)) {
+            if (confirming_short_page && !partial_page)
+                break;
             set_error("MetaTrader returned a non-progressing tick page");
             return false;
         }
         cursor_msc = last_timestamp;
         skipped_at_cursor = last_timestamp_count;
-        if (partial_page && diagnostics)
-            ++diagnostics->retries;
-        if (!partial_page &&
-            (last_timestamp > request->to_msc ||
-             page.size() < static_cast<std::size_t>(page_size)))
-            break;
+        if (partial_page) {
+            ++partial_page_count;
+            confirming_short_page = false;
+            if (partial_page_count > kPartialPageLimit) {
+                set_error("MetaTrader history remained partial after recovery");
+                return false;
+            }
+            continue;
+        }
+        partial_page_count = 0;
+        const bool short_page = page.size() < static_cast<std::size_t>(page_size);
+        if (short_page) {
+            if (last_timestamp > request->to_msc || short_page_confirmations >= kShortPageConfirmations)
+                break;
+            ++short_page_confirmations;
+            confirming_short_page = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+        } else {
+            short_page_confirmations = 0;
+            confirming_short_page = false;
+        }
     }
     return true;
 }
@@ -695,10 +750,21 @@ MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home) try {
 
     g_owns_interpreter = !Py_IsInitialized();
     if (g_owns_interpreter) {
-        Py_SetProgramName(const_cast<wchar_t *>(L"mt5bridge"));
-        if (python_home)
-            Py_SetPythonHome(const_cast<wchar_t *>(python_home));
-        Py_Initialize();
+        PyConfig config;
+        PyConfig_InitPythonConfig(&config);
+        PyStatus status = PyConfig_SetString(&config, &config.program_name, L"mt5bridge");
+        if (!PyStatus_Exception(status) && python_home)
+            status = PyConfig_SetString(&config, &config.home, python_home);
+        if (!PyStatus_Exception(status))
+            status = Py_InitializeFromConfig(&config);
+        if (PyStatus_Exception(status)) {
+            set_error(status.err_msg ? status.err_msg : "Py_InitializeFromConfig failed");
+            PyConfig_Clear(&config);
+            g_owns_interpreter = false;
+            return -1;
+        }
+        PyConfig_Clear(&config);
+        g_owner_thread = std::this_thread::get_id();
     }
     if (!Py_IsInitialized()) {
         set_error("Py_Initialize failed");
@@ -758,6 +824,26 @@ MT5BRIDGE_API void mt5bridge_shutdown() try {
     clear_error();
     if (!g_initialized)
         return;
+
+    const bool wrong_owner_thread =
+        g_owns_interpreter && std::this_thread::get_id() != g_owner_thread;
+    if (wrong_owner_thread) {
+        // Py_FinalizeEx must run on the interpreter owner thread.  Shut down
+        // MT5 safely from this thread, detach bridge ownership, and leave the
+        // host-owned interpreter alive rather than unloading under it.
+        PyGILState_STATE external_gil = PyGILState_Ensure();
+        PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+        if (mt5)
+            PyRef(PyObject_CallMethod(mt5.get(), "shutdown", nullptr));
+        else
+            PyErr_Clear();
+        PyGILState_Release(external_gil);
+        g_main_thread_state = nullptr;
+        g_owns_interpreter = false;
+        g_initialized = false;
+        set_error("runtime shutdown deferred: initialize thread required for CPython finalization");
+        return;
+    }
 
     if (g_owns_interpreter) {
         // Restore the thread state saved immediately after Py_Initialize.
@@ -893,6 +979,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_ticks(const Mt5TicksRequest *request,
                                             Mt5TickBuffer **result) try {
     if (result)
         *result = nullptr;
+    clear_fetch_diagnostics();
     if (!result || !request || !valid_range(request->symbol_utf8, request->from_msc,
                                             request->to_msc))
         return -1;
@@ -903,20 +990,23 @@ MT5BRIDGE_EXPORT int mt5bridge_query_ticks(const Mt5TicksRequest *request,
         return 0;
     };
     if (!visit_ticks_range(request, &buffer->diagnostics, append)) {
+        buffer->diagnostics.status = buffer->diagnostics.history_warmup_detected
+                                         ? (buffer->values.empty() ? MT5_FETCH_RETRY_EXHAUSTED
+                                                                    : MT5_FETCH_PARTIAL)
+                                         : MT5_FETCH_FATAL_ERROR;
         if (g_last_error.empty()) {
-            if (buffer->diagnostics.history_warmup_detected) {
-                buffer->diagnostics.status = MT5_FETCH_RETRY_EXHAUSTED;
+            if (buffer->diagnostics.status != MT5_FETCH_FATAL_ERROR)
                 set_error("MetaTrader5 history is unavailable after retries");
-            } else {
-                buffer->diagnostics.status = MT5_FETCH_FATAL_ERROR;
+            else
                 set_error("MetaTrader5 tick query failed");
-            }
         }
+        save_fetch_diagnostics(buffer->diagnostics);
         return -1;
     }
     buffer->diagnostics.status = buffer->values.empty() ? MT5_FETCH_EMPTY
                                                           : MT5_FETCH_COMPLETE;
     buffer->diagnostics.complete = 1;
+    save_fetch_diagnostics(buffer->diagnostics);
     *result = buffer.release();
     return 0;
 } catch (...) {
@@ -946,6 +1036,7 @@ MT5BRIDGE_EXPORT int mt5bridge_copy_ticks_range(const Mt5TicksRequest *request,
                                                 size_t chunk_size,
                                                 Mt5TickChunkCallback callback,
                                                 void *user_data) try {
+    clear_fetch_diagnostics();
     if (!request || !valid_range(request->symbol_utf8, request->from_msc, request->to_msc) ||
         !callback || chunk_size == 0) {
         set_error("callback and chunk_size are required");
@@ -964,8 +1055,16 @@ MT5BRIDGE_EXPORT int mt5bridge_copy_ticks_range(const Mt5TicksRequest *request,
         }
         return 0;
     };
-    if (visit_ticks_range(request, nullptr, deliver))
+    Mt5FetchDiagnostics diagnostics{};
+    if (visit_ticks_range(request, &diagnostics, deliver)) {
+        diagnostics.status = MT5_FETCH_COMPLETE;
+        diagnostics.complete = 1;
+        save_fetch_diagnostics(diagnostics);
         return 0;
+    }
+    diagnostics.status = diagnostics.history_warmup_detected ? MT5_FETCH_RETRY_EXHAUSTED
+                                                               : MT5_FETCH_FATAL_ERROR;
+    save_fetch_diagnostics(diagnostics);
     if (g_last_error.empty())
         set_error("MetaTrader5 history is unavailable after retries");
     return -1;
@@ -978,6 +1077,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                                             Mt5RateBuffer **result) try {
     if (result)
         *result = nullptr;
+    clear_fetch_diagnostics();
     if (!result || !request || !valid_range(request->symbol_utf8, request->from_msc,
                                             request->to_msc))
         return -1;
@@ -992,41 +1092,93 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
         PyRef mt5(PyImport_ImportModule("MetaTrader5"));
         if (!mt5) {
             set_python_error();
+            Mt5FetchDiagnostics diagnostics{};
+            diagnostics.status = MT5_FETCH_FATAL_ERROR;
+            save_fetch_diagnostics(diagnostics);
             return -1;
         }
         auto buffer = std::make_unique<Mt5RateBuffer>();
+        std::vector<Mt5Rate> previous_values;
+        bool saw_values = false;
         for (uint32_t attempt = 1; attempt <= 3; ++attempt) {
             buffer->diagnostics.attempts = attempt;
             PyRef from(make_datetime(request->from_msc));
             PyRef to(make_datetime(request->to_msc));
             if (!from || !to) {
                 set_python_error();
+                save_fetch_diagnostics(buffer->diagnostics);
                 return -1;
             }
             PyRef rates(PyObject_CallMethod(mt5.get(), "copy_rates_range", "siOO",
                                              request->symbol_utf8, request->timeframe,
                                              from.get(), to.get()));
             if (rates && rates.get() != Py_None) {
-                if (!copy_rates_array(rates.get(), &buffer->values)) {
+                std::vector<Mt5Rate> current_values;
+                if (!copy_rates_array(rates.get(), &current_values)) {
                     set_error("MetaTrader5 returned an unsupported rate layout");
+                    save_fetch_diagnostics(buffer->diagnostics);
                     return -1;
                 }
-                buffer->diagnostics.status = buffer->values.empty() ? MT5_FETCH_EMPTY
-                                                                      : MT5_FETCH_COMPLETE;
-                buffer->diagnostics.complete = 1;
-                buffer->diagnostics.retries = attempt - 1;
-                *result = buffer.release();
-                return 0;
+                const int code = mt5_last_error_code(mt5.get());
+                if (code != 1)
+                    buffer->diagnostics.last_mt5_error = code;
+                if (is_partial_read_error(code)) {
+                    saw_values = saw_values || !current_values.empty();
+                    buffer->diagnostics.history_warmup_detected = 1;
+                    if (attempt < 3) {
+                        if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
+                            ++buffer->diagnostics.reconnects;
+                        ++buffer->diagnostics.retries;
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(50u << (attempt - 1)));
+                        continue;
+                    }
+                    break;
+                }
+                const bool stable =
+                    previous_values.size() == current_values.size() &&
+                    (current_values.empty() ||
+                     std::memcmp(previous_values.data(), current_values.data(),
+                                 current_values.size() * sizeof(Mt5Rate)) == 0);
+                buffer->values = std::move(current_values);
+                if (stable) {
+                    buffer->diagnostics.status = buffer->values.empty() ? MT5_FETCH_EMPTY
+                                                                          : MT5_FETCH_COMPLETE;
+                    buffer->diagnostics.complete = 1;
+                    save_fetch_diagnostics(buffer->diagnostics);
+                    *result = buffer.release();
+                    return 0;
+                }
+                previous_values = buffer->values;
+                if (attempt < 3) {
+                    ++buffer->diagnostics.retries;
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(50u << (attempt - 1)));
+                    continue;
+                }
+                break;
             }
             if (PyErr_Occurred())
                 PyErr_Clear();
+            const int code = mt5_last_error_code(mt5.get());
+            if (code != 1)
+                buffer->diagnostics.last_mt5_error = code;
+            if (!is_transient_read_error(code)) {
+                set_error("MetaTrader5 rate request failed");
+                buffer->diagnostics.status = MT5_FETCH_FATAL_ERROR;
+                save_fetch_diagnostics(buffer->diagnostics);
+                return -1;
+            }
             buffer->diagnostics.history_warmup_detected = 1;
             if (attempt < 3) {
+                if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
+                    ++buffer->diagnostics.reconnects;
                 ++buffer->diagnostics.retries;
                 std::this_thread::sleep_for(std::chrono::milliseconds(50u << (attempt - 1)));
             }
         }
-        buffer->diagnostics.status = MT5_FETCH_RETRY_EXHAUSTED;
+        buffer->diagnostics.status = saw_values ? MT5_FETCH_PARTIAL : MT5_FETCH_RETRY_EXHAUSTED;
+        save_fetch_diagnostics(buffer->diagnostics);
         set_error("MetaTrader5 history is unavailable after retries");
         return -1;
     }();
@@ -1058,6 +1210,13 @@ MT5BRIDGE_API void mt5bridge_free(char *response_json) { std::free(response_json
 
 MT5BRIDGE_API const char *mt5bridge_last_error() {
     return g_last_error.empty() ? nullptr : g_last_error.c_str();
+}
+
+MT5BRIDGE_EXPORT int mt5bridge_last_fetch_diagnostics(Mt5FetchDiagnostics *diagnostics) {
+    if (!diagnostics)
+        return -1;
+    *diagnostics = g_last_fetch_diagnostics;
+    return 0;
 }
 
 } // extern "C"

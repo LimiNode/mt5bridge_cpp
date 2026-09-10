@@ -828,20 +828,7 @@ MT5BRIDGE_API void mt5bridge_shutdown() try {
     const bool wrong_owner_thread =
         g_owns_interpreter && std::this_thread::get_id() != g_owner_thread;
     if (wrong_owner_thread) {
-        // Py_FinalizeEx must run on the interpreter owner thread.  Shut down
-        // MT5 safely from this thread, detach bridge ownership, and leave the
-        // host-owned interpreter alive rather than unloading under it.
-        PyGILState_STATE external_gil = PyGILState_Ensure();
-        PyRef mt5(PyImport_ImportModule("MetaTrader5"));
-        if (mt5)
-            PyRef(PyObject_CallMethod(mt5.get(), "shutdown", nullptr));
-        else
-            PyErr_Clear();
-        PyGILState_Release(external_gil);
-        g_main_thread_state = nullptr;
-        g_owns_interpreter = false;
-        g_initialized = false;
-        set_error("runtime shutdown deferred: initialize thread required for CPython finalization");
+        set_error("runtime shutdown requires initialize owner thread");
         return;
     }
 
@@ -1098,10 +1085,18 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
             return -1;
         }
         auto buffer = std::make_unique<Mt5RateBuffer>();
-        std::vector<Mt5Rate> previous_values;
+        constexpr uint32_t kRateRecoveryFailures = 3;
+        constexpr uint32_t kRateConfirmationProbes = 2;
+        std::vector<Mt5Rate> candidate_values;
+        bool have_candidate = false;
         bool saw_values = false;
-        for (uint32_t attempt = 1; attempt <= 3; ++attempt) {
-            buffer->diagnostics.attempts = attempt;
+        uint32_t recovery_failures = 0;
+        uint32_t confirmation_probes = 0;
+        for (;;) {
+            if (recovery_failures >= kRateRecoveryFailures ||
+                confirmation_probes >= kRateConfirmationProbes)
+                break;
+            ++buffer->diagnostics.attempts;
             PyRef from(make_datetime(request->from_msc));
             PyRef to(make_datetime(request->to_msc));
             if (!from || !to) {
@@ -1125,20 +1120,28 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                 if (is_partial_read_error(code)) {
                     saw_values = saw_values || !current_values.empty();
                     buffer->diagnostics.history_warmup_detected = 1;
-                    if (attempt < 3) {
-                        if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
-                            ++buffer->diagnostics.reconnects;
-                        ++buffer->diagnostics.retries;
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(50u << (attempt - 1)));
-                        continue;
-                    }
-                    break;
+                    ++recovery_failures;
+                    if (recovery_failures >= kRateRecoveryFailures)
+                        break;
+                    if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
+                        ++buffer->diagnostics.reconnects;
+                    ++buffer->diagnostics.retries;
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(50u << (recovery_failures - 1)));
+                    continue;
                 }
-                const bool stable =
-                    previous_values.size() == current_values.size() &&
+                saw_values = saw_values || !current_values.empty();
+                if (!have_candidate) {
+                    candidate_values = std::move(current_values);
+                    buffer->values = candidate_values;
+                    have_candidate = true;
+                    ++buffer->diagnostics.retries;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+                    continue;
+                }
+                const bool stable = candidate_values.size() == current_values.size() &&
                     (current_values.empty() ||
-                     std::memcmp(previous_values.data(), current_values.data(),
+                     std::memcmp(candidate_values.data(), current_values.data(),
                                  current_values.size() * sizeof(Mt5Rate)) == 0);
                 buffer->values = std::move(current_values);
                 if (stable) {
@@ -1149,14 +1152,13 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                     *result = buffer.release();
                     return 0;
                 }
-                previous_values = buffer->values;
-                if (attempt < 3) {
+                candidate_values = buffer->values;
+                ++confirmation_probes;
+                if (confirmation_probes < kRateConfirmationProbes) {
                     ++buffer->diagnostics.retries;
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(50u << (attempt - 1)));
-                    continue;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50u));
                 }
-                break;
+                continue;
             }
             if (PyErr_Occurred())
                 PyErr_Clear();
@@ -1170,12 +1172,14 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                 return -1;
             }
             buffer->diagnostics.history_warmup_detected = 1;
-            if (attempt < 3) {
-                if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
-                    ++buffer->diagnostics.reconnects;
-                ++buffer->diagnostics.retries;
-                std::this_thread::sleep_for(std::chrono::milliseconds(50u << (attempt - 1)));
-            }
+            ++recovery_failures;
+            if (recovery_failures >= kRateRecoveryFailures)
+                break;
+            if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
+                ++buffer->diagnostics.reconnects;
+            ++buffer->diagnostics.retries;
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(50u << (recovery_failures - 1)));
         }
         buffer->diagnostics.status = saw_values ? MT5_FETCH_PARTIAL : MT5_FETCH_RETRY_EXHAUSTED;
         save_fetch_diagnostics(buffer->diagnostics);

@@ -39,7 +39,9 @@ copy it to application-owned storage if it must outlive the call.
 Rates use the same bounded transient-error recovery as ticks. Because
 `copy_rates_range()` has no page-size contract, the bridge confirms two stable
 successive NumPy results (including two stable empty results) before marking a
-rate buffer complete.
+rate buffer complete. The transient-failure budget and confirmation-probe
+budget are independent, so a clean result received after recovery still gets
+its confirmation probe.
 
 ## Reliability contract
 

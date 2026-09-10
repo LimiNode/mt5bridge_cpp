@@ -17,6 +17,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 /// \namespace mt5bridge
@@ -103,11 +104,19 @@ public:
     }
 
     /// \brief Shuts down the runtime when needed and releases the DLL handle.
+    /// \note An initialized client can only be unloaded from its initialize() thread.
     void unload() noexcept {
+        if (initialized_ && std::this_thread::get_id() != owner_thread_) {
+            Client *expected = this;
+            active_client_.compare_exchange_strong(expected, nullptr);
+            return;
+        }
         if (initialized_ && shutdown_)
             shutdown_();
         Client *expected = this;
         active_client_.compare_exchange_strong(expected, nullptr);
+        if (initialized_)
+            runtime_claimed_ = false;
         if (module_)
             FreeLibrary(module_);
         module_ = nullptr;
@@ -144,19 +153,29 @@ public:
         std::lock_guard<std::mutex> lock(ownership_mutex_);
         if (active_client_ && active_client_ != this)
             throw std::runtime_error("another mt5bridge::Client already owns the runtime");
+        if (runtime_claimed_ && active_client_ != this)
+            throw std::runtime_error("another mt5bridge::Client already owns the runtime");
         if (initialize_(python_home) != 0)
             throw std::runtime_error(error_message());
         initialized_ = true;
+        owner_thread_ = std::this_thread::get_id();
         active_client_ = this;
+        runtime_claimed_ = true;
     }
 
     /// \brief Shuts down an initialized runtime while keeping the DLL loaded.
-    void shutdown() noexcept {
+    /// \throws std::runtime_error If called from a different thread than initialize().
+    void shutdown() {
+        if (!initialized_)
+            return;
+        if (std::this_thread::get_id() != owner_thread_)
+            throw std::runtime_error("mt5bridge shutdown requires initialize owner thread");
         if (shutdown_)
             shutdown_();
         initialized_ = false;
         Client *expected = this;
         active_client_.compare_exchange_strong(expected, nullptr);
+        runtime_claimed_ = false;
     }
 
     /// \brief Executes a control-plane JSON request.
@@ -379,6 +398,9 @@ private:
         rate_diagnostics_ = other.rate_diagnostics_;
         last_fetch_diagnostics_ = other.last_fetch_diagnostics_;
         initialized_ = other.initialized_;
+        owner_thread_ = other.owner_thread_;
+        if (other.initialized_)
+            runtime_claimed_ = true;
         Client *expected = &other;
         active_client_.compare_exchange_strong(expected, this);
         other.module_ = nullptr;
@@ -401,6 +423,7 @@ private:
         other.rate_diagnostics_ = nullptr;
         other.last_fetch_diagnostics_ = nullptr;
         other.initialized_ = false;
+        other.owner_thread_ = std::thread::id{};
     }
 
     HMODULE module_ = nullptr;
@@ -423,8 +446,10 @@ private:
     RateDiagnostics rate_diagnostics_ = nullptr;
     LastFetchDiagnostics last_fetch_diagnostics_ = nullptr;
     bool initialized_ = false;
+    std::thread::id owner_thread_;
     inline static std::mutex ownership_mutex_;
     inline static std::atomic<Client *> active_client_{nullptr};
+    inline static std::atomic<bool> runtime_claimed_{false};
 };
 
 } // namespace mt5bridge

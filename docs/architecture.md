@@ -80,9 +80,9 @@ in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
 Calling `mt5bridge_initialize()` again while the bridge is already initialized
 is supported. The thread that creates an owned interpreter is its lifecycle
 owner. `mt5bridge_shutdown()` finalizes CPython only on that thread; a
-cross-thread shutdown closes MT5, relinquishes bridge finalization ownership,
-and leaves the interpreter alive so unloading the DLL remains safe. The caller
-must then not assume that this interpreter was finalized by the bridge.
+cross-thread shutdown is rejected without touching Python and reports an error
+through `mt5bridge_last_error()`. The C++ facade enforces the same rule and
+keeps the DLL loaded until the owner thread performs shutdown.
 
 Owned initialization uses CPython's `PyConfig` API, so `python_home` is copied
 into CPython configuration rather than retained as a borrowed ABI pointer.

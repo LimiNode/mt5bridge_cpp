@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include <mt5bridge/client.hpp>
 
@@ -24,9 +25,24 @@ int wmain(int argc, wchar_t **argv) {
             return 4;
         } catch (const std::runtime_error &) {
         }
+        competing_client.shutdown();
         const std::string response = bridge.eval(R"({"method":"terminal_info"})");
         if (response.find("owned_interpreter") == std::string::npos)
             return 3;
+        bool rejected_cross_thread_shutdown = false;
+        std::thread wrong_owner([&bridge, &rejected_cross_thread_shutdown] {
+            try {
+                bridge.shutdown();
+            } catch (const std::runtime_error &) {
+                rejected_cross_thread_shutdown = true;
+            }
+        });
+        wrong_owner.join();
+        if (!rejected_cross_thread_shutdown)
+            return 5;
+        if (bridge.eval(R"({"method":"terminal_info"})").find("owned_interpreter") ==
+            std::string::npos)
+            return 6;
         bridge.shutdown();
         return 0;
     } catch (const std::exception &error) {

@@ -389,6 +389,19 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(diagnostics.retries, 2)
         self.assertTrue(diagnostics.history_warmup_detected)
 
+    def test_rates_recovery_and_confirmation_have_separate_budgets(self) -> None:
+        """A clean result after recovery still receives its confirmation probe."""
+        fake = fake_module(
+            [],
+            rate_sequence=[None, None, rate_page(2), rate_page(2)],
+        )
+        status, size, diagnostics, error = self.query_rates(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(diagnostics.attempts, 4)
+        self.assertEqual(diagnostics.retries, 3)
+        self.assertTrue(diagnostics.history_warmup_detected)
+
     def test_repeated_page_fails_no_progress(self) -> None:
         """A repeated page cannot spin forever."""
         fake = fake_module([page(2000, 65536), page(2000, 65536)])

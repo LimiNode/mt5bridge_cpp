@@ -32,9 +32,14 @@ version-independent.
 - `mt5bridge_eval_json()` accepts one JSON object and returns one allocated JSON
   string. The caller releases it with `mt5bridge_free()`.
 - `mt5bridge_shutdown()` is idempotent and completes before unloading the DLL.
-- `mt5bridge_abi_version()` is checked by `mt5bridge::Client` before use.
+- ABI 3 is checked by both `mt5bridge::Client` and the ctypes adapter before
+  use. POD sizes and field offsets are compile-time assertions in `data.h`.
 - Calls that touch Python are serialized. Diagnostics are thread-local and are
   valid until the next call on the same thread.
+- Native callbacks run without the Python GIL or runtime mutex held. Exported
+  operations catch C++ exceptions before returning through the C ABI.
+- The C++ client resolves the requested DLL to an absolute path and uses
+  `LoadLibraryExW` with restricted dependency search directories.
 - New transports (named pipe, worker process, or another host) may be added
   behind the same request/response contract; they must not leak Python types.
 
@@ -66,6 +71,17 @@ consumer-facing, while
 
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
+
+## Runtime lifecycle limit
+
+Calling `mt5bridge_initialize()` again while the bridge is already initialized
+is supported. Repeated `initialize → query → shutdown → initialize` cycles
+after an owned `Py_FinalizeEx()` are not yet a production guarantee: CPython
+extension modules such as NumPy and MetaTrader5 may retain process-global
+state. Release acceptance must run at least 100 cycles against the packaged
+Python runtime and a live terminal. If that test is unstable, the supported
+contract becomes one embedded-runtime lifetime per process, or the runtime
+moves to a restartable worker process.
 
 ## Migration path
 

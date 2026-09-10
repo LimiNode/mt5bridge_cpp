@@ -60,12 +60,12 @@ public:
     }
 
     /// \brief Loads a runtime DLL, resolves its API, and validates its ABI version.
-    /// \param path DLL path; defaults to mt5_bridge.dll in the process search path.
+    /// \param path DLL path; defaults to mt5_bridge.dll resolved from the working directory.
     /// \throws std::runtime_error If loading, symbol resolution, or ABI validation fails.
     void load(const wchar_t *path = L"mt5_bridge.dll") {
         if (module_)
             return;
-        module_ = LoadLibraryW(path);
+        module_ = load_module(path);
         if (!module_)
             throw std::runtime_error("failed to load mt5_bridge.dll");
         abi_version_ = resolve<AbiVersion>("mt5bridge_abi_version");
@@ -201,7 +201,7 @@ public:
     std::vector<Mt5Tick> copy_ticks_range(const std::string &symbol, std::int64_t from_msc,
                                           std::int64_t to_msc, std::uint32_t flags = 0,
                                           Mt5FetchDiagnostics *diagnostics = nullptr) {
-        return copy_ticks_range(Mt5TicksRequest{symbol.c_str(), from_msc, to_msc, flags},
+        return copy_ticks_range(Mt5TicksRequest{symbol.c_str(), from_msc, to_msc, flags, 0},
                                 diagnostics);
     }
 
@@ -282,6 +282,25 @@ private:
     using RateSize = std::size_t (*)(const Mt5RateBuffer *);
     using RateFree = void (*)(Mt5RateBuffer *);
     using RateDiagnostics = int (*)(const Mt5RateBuffer *, Mt5FetchDiagnostics *);
+
+    /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
+    /// \param path Caller-provided DLL path.
+    /// \return Loaded module handle, or nullptr when the module cannot be loaded.
+    HMODULE load_module(const wchar_t *path) const {
+        if (!path || !*path)
+            return nullptr;
+        const DWORD capacity = GetFullPathNameW(path, 0, nullptr, nullptr);
+        if (!capacity)
+            return nullptr;
+        std::vector<wchar_t> absolute_path(static_cast<std::size_t>(capacity) + 1);
+        const DWORD length = GetFullPathNameW(path, static_cast<DWORD>(absolute_path.size()),
+                                               absolute_path.data(), nullptr);
+        if (!length || length >= absolute_path.size())
+            return nullptr;
+        return LoadLibraryExW(absolute_path.data(), nullptr,
+                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                  LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    }
 
     /// \brief Resolves a DLL symbol and converts it to the requested function type.
     /// \tparam Function Function-pointer type associated with the symbol.

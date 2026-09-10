@@ -19,9 +19,10 @@ typedef struct Mt5Tick {
     double bid;        ///< Best bid price.
     double ask;        ///< Best ask price.
     double last;       ///< Last trade price.
-    double volume;     ///< Real volume when supplied, otherwise integer tick volume.
-    uint32_t flags;    ///< MetaTrader 5 tick flags bit mask.
-    uint32_t reserved; ///< Reserved for ABI-compatible extensions; must be zero.
+    uint64_t volume;    ///< Integer tick volume reported by MetaTrader 5.
+    double volume_real; ///< Exchange-reported real volume when available.
+    uint32_t flags;     ///< MetaTrader 5 tick flags bit mask.
+    uint32_t reserved;  ///< Reserved for ABI-compatible extensions; must be zero.
 } Mt5Tick;
 
 /// \struct Mt5Rate
@@ -45,6 +46,7 @@ typedef struct Mt5TicksRequest {
     int64_t from_msc;        ///< Inclusive range start as Unix milliseconds.
     int64_t to_msc;          ///< Inclusive range end as Unix milliseconds.
     uint32_t flags;          ///< COPY_TICKS_* mask, or zero for COPY_TICKS_ALL.
+    uint32_t reserved;       ///< Reserved for ABI-compatible extensions; must be zero.
 } Mt5TicksRequest;
 
 /// \struct Mt5RatesRequest
@@ -78,6 +80,52 @@ typedef struct Mt5FetchDiagnostics {
     uint8_t reserved[2];             ///< Reserved for ABI-compatible extensions; must be zero.
     Mt5FetchStatus status;           ///< Final semantic status of the read.
 } Mt5FetchDiagnostics;
+
+#if defined(__cplusplus)
+static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
+static_assert(offsetof(Mt5Tick, time_msc) == 0, "Mt5Tick::time_msc ABI offset changed");
+static_assert(offsetof(Mt5Tick, bid) == 8, "Mt5Tick::bid ABI offset changed");
+static_assert(offsetof(Mt5Tick, ask) == 16, "Mt5Tick::ask ABI offset changed");
+static_assert(offsetof(Mt5Tick, last) == 24, "Mt5Tick::last ABI offset changed");
+static_assert(offsetof(Mt5Tick, volume) == 32, "Mt5Tick::volume ABI offset changed");
+static_assert(offsetof(Mt5Tick, volume_real) == 40,
+              "Mt5Tick::volume_real ABI offset changed");
+static_assert(offsetof(Mt5Tick, flags) == 48, "Mt5Tick::flags ABI offset changed");
+static_assert(offsetof(Mt5Tick, reserved) == 52, "Mt5Tick::reserved ABI offset changed");
+static_assert(sizeof(Mt5Rate) == 64, "Mt5Rate ABI size changed");
+static_assert(offsetof(Mt5Rate, time) == 0, "Mt5Rate::time ABI offset changed");
+static_assert(offsetof(Mt5Rate, tick_volume) == 40,
+              "Mt5Rate::tick_volume ABI offset changed");
+static_assert(offsetof(Mt5Rate, spread) == 48, "Mt5Rate::spread ABI offset changed");
+static_assert(offsetof(Mt5Rate, real_volume) == 56,
+              "Mt5Rate::real_volume ABI offset changed");
+static_assert(sizeof(Mt5TicksRequest) == 32, "Mt5TicksRequest ABI size changed");
+static_assert(offsetof(Mt5TicksRequest, flags) == 24,
+              "Mt5TicksRequest::flags ABI offset changed");
+static_assert(offsetof(Mt5TicksRequest, reserved) == 28,
+              "Mt5TicksRequest::reserved ABI offset changed");
+static_assert(sizeof(Mt5RatesRequest) == 32, "Mt5RatesRequest ABI size changed");
+static_assert(offsetof(Mt5RatesRequest, timeframe) == 24,
+              "Mt5RatesRequest::timeframe ABI offset changed");
+static_assert(sizeof(Mt5FetchStatus) == 4, "Mt5FetchStatus ABI size changed");
+static_assert(sizeof(Mt5FetchDiagnostics) == 24,
+              "Mt5FetchDiagnostics ABI size changed");
+static_assert(offsetof(Mt5FetchDiagnostics, status) == 20,
+              "Mt5FetchDiagnostics::status ABI offset changed");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
+_Static_assert(offsetof(Mt5Tick, volume) == 32, "Mt5Tick ABI offsets changed");
+_Static_assert(offsetof(Mt5Tick, volume_real) == 40, "Mt5Tick ABI offsets changed");
+_Static_assert(sizeof(Mt5Rate) == 64, "Mt5Rate ABI size changed");
+_Static_assert(offsetof(Mt5Rate, real_volume) == 56, "Mt5Rate ABI offsets changed");
+_Static_assert(sizeof(Mt5TicksRequest) == 32, "Mt5TicksRequest ABI size changed");
+_Static_assert(offsetof(Mt5TicksRequest, reserved) == 28,
+               "Mt5TicksRequest ABI offsets changed");
+_Static_assert(sizeof(Mt5RatesRequest) == 32, "Mt5RatesRequest ABI size changed");
+_Static_assert(sizeof(Mt5FetchStatus) == 4, "Mt5FetchStatus ABI size changed");
+_Static_assert(sizeof(Mt5FetchDiagnostics) == 24,
+               "Mt5FetchDiagnostics ABI size changed");
+#endif
 
 /// \struct Mt5TickBuffer
 /// \brief Opaque DLL-owned collection of Mt5Tick values.
@@ -128,7 +176,8 @@ MT5BRIDGE_EXPORT int mt5bridge_tick_buffer_diagnostics(const Mt5TickBuffer *buff
 /// \param callback Consumer invoked outside the Python GIL critical section.
 /// \param user_data Opaque context passed unchanged to \p callback.
 /// \return Zero after complete delivery; non-zero on query failure or cancellation.
-/// \warning The callback must not re-enter the bridge.
+/// \note The callback runs without the Python GIL or runtime mutex and may re-enter the bridge.
+/// \warning Shutting down the bridge from a callback cancels the outer traversal.
 MT5BRIDGE_EXPORT int mt5bridge_copy_ticks_range(const Mt5TicksRequest *request,
                                                 size_t chunk_size,
                                                 Mt5TickChunkCallback callback,

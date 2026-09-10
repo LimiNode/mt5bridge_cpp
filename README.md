@@ -87,7 +87,13 @@ are tracked in [`docs/mt5-quirks.md`](docs/mt5-quirks.md).
 
 ## Notes
 
+- The current public contract is ABI 3. Tick POD records preserve separate
+  integer `volume` and floating-point `volume_real` fields.
 - Only 64‑bit Windows builds are supported.
 - Python 3.11+ is required.
+- The C++ client resolves the DLL to an absolute path and restricts dependency
+  lookup to the DLL directory and default safe Windows directories.
 - The DLL must be shut down before `FreeLibrary`.
+- Reinitialization after an owned CPython shutdown requires the documented
+  live 100-cycle acceptance test; it is not yet a release guarantee.
 - Issues and pull requests are welcome.

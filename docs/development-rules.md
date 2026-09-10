@@ -40,3 +40,8 @@ and future changes more expensive without adding behavior.
 The goal is not a particular line count. The goal is one source of truth per
 rule, a short path from request to result, and code whose complexity reflects
 real product behavior.
+
+## Source
+
+- PVS-Studio, [«Опухший C++ код»](https://habr.com/ru/companies/pvs-studio/articles/1072264/),
+  published 2026-08-19 and reviewed for this project on 2026-09-09.

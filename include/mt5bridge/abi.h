@@ -20,7 +20,7 @@
 
 /// \def MT5BRIDGE_ABI_VERSION
 /// \brief Identifies the exact public ABI layout expected by the client.
-#define MT5BRIDGE_ABI_VERSION 2u
+#define MT5BRIDGE_ABI_VERSION 3u
 
 /// \def MT5BRIDGE_API
 /// \brief Backward-compatible alias for MT5BRIDGE_EXPORT.

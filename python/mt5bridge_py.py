@@ -31,10 +31,15 @@ import ctypes
 import json
 from ctypes import POINTER, byref, c_char_p, c_int, c_void_p, c_wchar_p
 
+## \brief ABI version required by this ctypes adapter.
+_ABI_VERSION = 3
+
 # Load the mt5bridge shared library.
 _lib = ctypes.WinDLL("mt5_bridge.dll")
 
 # Configure argument and result types for exported functions.
+_lib.mt5bridge_abi_version.argtypes = []
+_lib.mt5bridge_abi_version.restype = ctypes.c_uint32
 _lib.mt5bridge_initialize.argtypes = [c_wchar_p]
 _lib.mt5bridge_initialize.restype = c_int
 _lib.mt5bridge_shutdown.argtypes = []
@@ -45,6 +50,9 @@ _lib.mt5bridge_free.argtypes = [c_void_p]
 _lib.mt5bridge_free.restype = None
 _lib.mt5bridge_last_error.argtypes = []
 _lib.mt5bridge_last_error.restype = c_char_p
+
+if _lib.mt5bridge_abi_version() != _ABI_VERSION:
+    raise RuntimeError("incompatible mt5_bridge.dll ABI version")
 
 
 ## \brief Raises the current DLL error when an ABI call fails.

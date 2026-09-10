@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.15)
 
 project(mt5bridge_cpp LANGUAGES CXX)
 
+include(CTest)
+
 option(MT5BRIDGE_BUILD_RUNTIME "Build the CPython-backed mt5_bridge.dll" ON)
 option(BUILD_EXAMPLES "Build example programs" ON)
 
@@ -19,12 +21,24 @@ target_include_directories(mt5bridge_client INTERFACE ${PROJECT_SOURCE_DIR}/incl
 add_library(mt5bridge::client ALIAS mt5bridge_client)
 
 if(MT5BRIDGE_BUILD_RUNTIME)
-    find_package(Python3 REQUIRED COMPONENTS Development)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 
     add_library(mt5_bridge SHARED src/runtime/mt5_bridge.cpp)
     target_include_directories(mt5_bridge PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
     target_link_libraries(mt5_bridge PRIVATE Python3::Python)
+
+    if(BUILD_TESTING)
+        add_test(
+            NAME mt5bridge_fake_runtime
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "MT5BRIDGE_DLL=$<TARGET_FILE:mt5_bridge>"
+                    "${Python3_EXECUTABLE}" -m unittest tests.test_fake_mt5_runtime -v
+        )
+        set_tests_properties(mt5bridge_fake_runtime PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
+    endif()
 endif()
 
 if(BUILD_EXAMPLES)

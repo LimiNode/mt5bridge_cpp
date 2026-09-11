@@ -73,6 +73,17 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         set_tests_properties(mt5bridge_fake_runtime PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
+        add_test(
+            NAME mt5bridge_python_adapter
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/python"
+                    "MT5BRIDGE_DLL=$<TARGET_FILE:mt5_bridge>"
+                    "PATH=${MT5BRIDGE_PYTHON_RUNTIME_DIR};$<TARGET_FILE_DIR:mt5_bridge>;$ENV{PATH}"
+                    "${Python3_EXECUTABLE}" -m unittest tests.test_python_adapter -v
+        )
+        set_tests_properties(mt5bridge_python_adapter PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
     endif()
 endif()
 

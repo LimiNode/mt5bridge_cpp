@@ -91,7 +91,7 @@ remains the diagnostic fallback for development and clean-machine testing.
 
 ## Delivery sequence
 
-1. Stabilize realtime subscriptions and assign ABI v6 (completed in the
+1. Stabilize realtime subscriptions and assign ABI v7 (completed in the
    realtime branch).
 2. Build and validate an external runtime ZIP on a clean Windows machine.
 3. Split the current implementation into bootstrap and

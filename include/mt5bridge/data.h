@@ -181,6 +181,25 @@ typedef struct Mt5SubscriptionDiagnostics {
 typedef int (*Mt5SubscriptionEventCallback)(const Mt5SubscriptionEvent *event,
                                             void *user_data);
 
+/// \struct Mt5SnapshotItem
+/// \brief Reserved coherent-snapshot item representation for ABI-compatible evolution.
+typedef struct Mt5SnapshotItem {
+    uint32_t source_index; ///< Source index within the subscription request.
+    uint32_t flags;        ///< Item flags; reserved for future snapshot states.
+    Mt5Tick tick;          ///< Latest tick observed for the source.
+} Mt5SnapshotItem;
+
+/// \struct Mt5SnapshotView
+/// \brief Reserved borrowed view for future coherent multi-source snapshots.
+struct Mt5SnapshotView {
+    const Mt5SnapshotItem *items; ///< Borrowed item array.
+    size_t count;                 ///< Number of items in \p items.
+    uint64_t watermark_msc;       ///< Common watermark in Unix milliseconds.
+    uint32_t stale_after_ms;      ///< Configured staleness threshold.
+    uint32_t stale_count;         ///< Number of stale sources.
+    uint32_t reserved[2];         ///< Reserved; must be zero.
+};
+
 #if defined(__cplusplus)
 static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
 static_assert(offsetof(Mt5Tick, time_msc) == 0, "Mt5Tick::time_msc ABI offset changed");
@@ -222,6 +241,10 @@ static_assert(sizeof(Mt5SubscriptionEvent) == 96,
               "Mt5SubscriptionEvent ABI size changed");
 static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
               "Mt5SubscriptionDiagnostics ABI size changed");
+static_assert(sizeof(Mt5SnapshotItem) == 64,
+              "Mt5SnapshotItem ABI size changed");
+static_assert(sizeof(Mt5SnapshotView) == 40,
+              "Mt5SnapshotView ABI size changed");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
 _Static_assert(offsetof(Mt5Tick, volume) == 32, "Mt5Tick ABI offsets changed");
@@ -245,26 +268,12 @@ _Static_assert(sizeof(Mt5SubscriptionEvent) == 96,
                "Mt5SubscriptionEvent ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
                "Mt5SubscriptionDiagnostics ABI size changed");
+_Static_assert(sizeof(Mt5SnapshotItem) == 64,
+               "Mt5SnapshotItem ABI size changed");
+_Static_assert(sizeof(Mt5SnapshotView) == 40,
+               "Mt5SnapshotView ABI size changed");
 #endif
 
-/// \struct Mt5SnapshotItem
-/// \brief Reserved coherent-snapshot item representation for ABI-compatible evolution.
-typedef struct Mt5SnapshotItem {
-    uint32_t source_index; ///< Source index within the subscription request.
-    uint32_t flags;        ///< Item flags; reserved for future snapshot states.
-    Mt5Tick tick;          ///< Latest tick observed for the source.
-} Mt5SnapshotItem;
-
-/// \struct Mt5SnapshotView
-/// \brief Reserved borrowed view for future coherent multi-source snapshots.
-struct Mt5SnapshotView {
-    const Mt5SnapshotItem *items; ///< Borrowed item array.
-    size_t count;                 ///< Number of items in \p items.
-    uint64_t watermark_msc;       ///< Common watermark in Unix milliseconds.
-    uint32_t stale_after_ms;      ///< Configured staleness threshold.
-    uint32_t stale_count;         ///< Number of stale sources.
-    uint32_t reserved[2];         ///< Reserved; must be zero.
-};
 
 /// \struct Mt5TickBuffer
 /// \brief Opaque DLL-owned collection of Mt5Tick values.

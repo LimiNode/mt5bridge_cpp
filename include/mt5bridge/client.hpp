@@ -226,6 +226,8 @@ public:
             throw std::runtime_error(error_message());
         initialized_ = true;
         owner_thread_ = std::this_thread::get_id();
+        if (subscription_state_)
+            subscription_state_->owner_thread = owner_thread_;
         active_client_ = this;
         runtime_claimed_ = true;
     }

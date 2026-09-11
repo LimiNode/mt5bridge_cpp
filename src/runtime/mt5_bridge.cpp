@@ -840,9 +840,10 @@ void realtime_poller() try {
             wake_at = now + std::chrono::hours(24);
             for (const auto &entry : g_realtime_sources) {
                 sources.push_back(entry.second);
-                wake_at = std::min(wake_at, entry.second->next_poll);
+                auto due = entry.second->next_poll;
                 if (entry.second->retry_at != std::chrono::steady_clock::time_point{})
-                    wake_at = std::min(wake_at, entry.second->retry_at);
+                    due = std::max(due, entry.second->retry_at);
+                wake_at = std::min(wake_at, due);
             }
             g_poller_cv.wait_until(lock, wake_at);
             if (g_poller_stop || g_runtime_state != RuntimeState::running)

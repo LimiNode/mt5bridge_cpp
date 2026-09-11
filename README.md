@@ -69,11 +69,13 @@ cmake --build build
 4. Run `build\bin\usage_example.exe` from the build directory to verify the setup.
 
 For a future distributable release, the supported one-file user experience is
-planned as a self-extracting `mt5_bridge.dll`. It will verify and extract a
-bundled embeddable Python/NumPy/MetaTrader5 runtime into a content-addressed
-per-user cache during initialization. The design and clean-machine acceptance
-checks are recorded in [ADR-0002](docs/adr/0002-self-contained-runtime-dll.md);
-the current development workflow still uses the explicit runtime directory.
+planned as a self-extracting `mt5_bridge.dll` bootstrap. The bootstrap itself
+will not link to CPython: it will verify and extract a bundled
+`mt5_bridge_runtime.dll` plus the embeddable Python/NumPy/MetaTrader5 runtime
+into a content-addressed per-user cache, then load the core during
+initialization. The design and clean-machine acceptance checks are recorded in
+[ADR-0002](docs/adr/0002-self-contained-runtime-dll.md); the current
+development workflow still uses the explicit runtime directory.
 
 ## Example usage
 

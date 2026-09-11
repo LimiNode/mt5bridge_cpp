@@ -76,10 +76,11 @@ consumer-facing, while
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
 The planned single-file runtime distribution is fixed in
-[ADR-0002](adr/0002-self-contained-runtime-dll.md): the release DLL embeds a
-verified payload and extracts it to a content-addressed per-user cache during
-`mt5bridge_initialize()`. With the realtime subscription ABI now defined, the
-next packaging milestone can implement this without changing the data plane.
+[ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
+embeds a verified payload, extracts it to a content-addressed per-user cache,
+and loads `mt5_bridge_runtime.dll` during `mt5bridge_initialize()`. With the
+realtime subscription ABI now defined, the next packaging milestone can
+implement this without changing the data plane.
 
 ## Runtime lifecycle limit
 
@@ -111,8 +112,9 @@ worker process.
    implementation behind the same C ABI; do not duplicate business methods.
 4. Add native or alternate MT5 backends only behind a backend interface after
    measuring lifecycle, error, and compatibility behavior.
-5. After realtime ABI stabilization, ship an external runtime ZIP and then the
-   self-extracting DLL described by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
+5. After realtime ABI stabilization, ship an external runtime ZIP, split the
+   bootstrap/core DLLs, and then produce the self-extracting artifact described
+   by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
 
 ## Sources
 

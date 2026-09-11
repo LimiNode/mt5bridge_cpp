@@ -80,9 +80,9 @@ in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
 
 Calling `mt5bridge_initialize()` again while the bridge is already initialized
 is supported. The thread that creates an owned interpreter is its lifecycle
-owner. `mt5bridge_shutdown()` returns a status and finalizes CPython only on that thread; a
-cross-thread shutdown is rejected without touching Python and reports an error
-through `mt5bridge_last_error()`. The C++ facade enforces the same rule and
+owner. `mt5bridge_shutdown()` returns a status and finalizes CPython only on
+that thread; a cross-thread shutdown is rejected without touching Python and
+reports an error through `mt5bridge_last_error()`. The C++ facade enforces the same rule and
 keeps the DLL loaded until the owner thread performs shutdown; destroying an
 initialized facade from another thread terminates the process rather than
 silently poisoning global ownership.

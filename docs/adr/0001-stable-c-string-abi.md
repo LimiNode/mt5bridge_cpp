@@ -23,7 +23,7 @@ signatures or POD layout requires a version bump and a coordinated client
 update.
 
 ABI 4 separated integer tick `volume` from `volume_real`, made request padding
-explicit, fixes public POD sizes and offsets with compile-time assertions, and
+explicit, fixed public POD sizes and offsets with compile-time assertions, and
 uses a fixed-width `Mt5FetchStatus` instead of an implementation-defined C enum.
 ABI 5 makes shutdown status-bearing so C and ctypes consumers can detect an
 owner-thread or finalization failure before unloading the DLL.

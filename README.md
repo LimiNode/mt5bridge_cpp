@@ -100,6 +100,19 @@ High-throughput ticks/rates use the typed POD data plane described in
 [`docs/market-data-api.md`](docs/market-data-api.md); known MT5 recovery cases
 are tracked in [`docs/mt5-quirks.md`](docs/mt5-quirks.md).
 
+With a logged-in terminal, run the bounded native market-data smoke check from
+the build output directory (optionally pass a broker-specific symbol):
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path ..\..\..\venv\Lib\site-packages).Path
+.\live_market_smoke.exe EURUSD
+```
+
+The check reads only the last ten minutes of ticks and one hour of M1 bars,
+prints recovery diagnostics, and shuts the bridge down before exiting. Set
+`PYTHONPATH` to the project environment that contains `MetaTrader5` when the
+embedded runtime cannot discover it automatically.
+
 ## Notes
 
 - The current public contract is ABI 5. Tick POD records preserve separate

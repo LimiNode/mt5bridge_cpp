@@ -68,6 +68,13 @@ cmake --build build
    ```
 4. Run `build\bin\usage_example.exe` from the build directory to verify the setup.
 
+For a future distributable release, the supported one-file user experience is
+planned as a self-extracting `mt5_bridge.dll`. It will verify and extract a
+bundled embeddable Python/NumPy/MetaTrader5 runtime into a content-addressed
+per-user cache during initialization. The design and clean-machine acceptance
+checks are recorded in [ADR-0002](docs/adr/0002-self-contained-runtime-dll.md);
+the current development workflow still uses the explicit runtime directory.
+
 ## Example usage
 
 ```cpp
@@ -99,6 +106,19 @@ AI-generated C++ live in [`docs/development-rules.md`](docs/development-rules.md
 High-throughput ticks/rates use the typed POD data plane described in
 [`docs/market-data-api.md`](docs/market-data-api.md); known MT5 recovery cases
 are tracked in [`docs/mt5-quirks.md`](docs/mt5-quirks.md).
+
+With a logged-in terminal, run the bounded native market-data smoke check from
+the build output directory (optionally pass a broker-specific symbol):
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path ..\..\..\venv\Lib\site-packages).Path
+.\live_market_smoke.exe EURUSD
+```
+
+The check reads only the last ten minutes of ticks and one hour of M1 bars,
+prints recovery diagnostics, and shuts the bridge down before exiting. Set
+`PYTHONPATH` to the project environment that contains `MetaTrader5` when the
+embedded runtime cannot discover it automatically.
 
 ## Notes
 

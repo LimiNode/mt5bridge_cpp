@@ -70,8 +70,11 @@ reconnect, traversal resumes from the last committed cursor.
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
 range. ABI 6 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`
-creates a logical subscription; equal `(symbol, flags)` requests share one
-physical `copy_ticks_from()` polling source. The source uses the smallest
+accepts an array of `Mt5TickSourceRequest`; one handle may group several
+symbols, while equal `(symbol, flags)` requests share one physical
+`copy_ticks_from()` polling source. A single symbol is a one-element array and
+every source-specific event carries `source_index`; no global chronological
+order is promised across symbols. The source uses the smallest
 requested interval and retains only a bounded ring of batches. Each poll
 re-reads a measured overlap window and reconciles full tick payloads as a
 multiset, because MT5 can insert late records, reorder same-time records, or
@@ -86,7 +89,8 @@ historical POD query from their last committed cursor before resuming.
 Handles include a runtime generation and stale handles are rejected. The
 contract is best-effort lossless relative to observable synchronized MT5
 history; it cannot promise recovery of records that MT5 later rewrites or
-removes.
+removes. `MT5_DELIVERY_COHERENT_SNAPSHOT` is reserved for the next snapshot
+phase and is rejected until watermark/staleness semantics are implemented.
 Shutdown signals and joins the poller before MetaTrader or CPython teardown.
 
 ## NumPy-to-POD benchmark

@@ -76,16 +76,24 @@ class Mt5Tick(Structure):
     ]
 
 
+class Mt5TickSourceRequest(Structure):
+    """Matches one ABI 6 physical source request."""
+
+    _fields_ = [("symbol_utf8", c_char_p), ("flags", c_uint32), ("reserved", c_uint32)]
+
+
 class Mt5SubscriptionRequest(Structure):
-    """Matches the ABI 6 realtime subscription request."""
+    """Matches the ABI 6 multi-source realtime subscription request."""
 
     _fields_ = [
-        ("symbol_utf8", c_char_p),
-        ("flags", c_uint32),
+        ("sources", POINTER(Mt5TickSourceRequest)),
+        ("source_count", c_size_t),
         ("interval_ms", c_uint32),
         ("max_batch", c_uint32),
-        ("queue_capacity", c_uint32),
-        ("reserved", c_uint32),
+        ("ring_capacity", c_uint32),
+        ("delivery_flags", c_uint32),
+        ("stale_after_ms", c_uint32),
+        ("reserved", c_uint32 * 2),
     ]
 
 
@@ -103,6 +111,7 @@ class Mt5SubscriptionEvent(Structure):
         ("status", c_int32),
         ("handle", Mt5SubscriptionHandle),
         ("sequence", c_uint64),
+        ("source_index", c_uint32),
         ("ticks", c_void_p),
         ("count", c_size_t),
         ("dropped", c_uint64),
@@ -554,7 +563,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         fake = fake_module([values] * 8)
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
-        request = Mt5SubscriptionRequest(b"EURUSD", 0, 10, 1, 8, 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 1, 8, 0, 0, (0, 0))
         handle = Mt5SubscriptionHandle()
         self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
         observed: list[int] = []

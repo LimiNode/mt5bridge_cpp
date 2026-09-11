@@ -378,6 +378,17 @@ public:
         return Subscription(subscription_state_, handle);
     }
 
+    /// \brief Convenience overload for one symbol while retaining the group ABI.
+    Subscription subscribe_ticks(const std::string &symbol, std::uint32_t flags = 0,
+                                 std::uint32_t interval_ms = 0,
+                                 std::uint32_t max_batch = 0,
+                                 std::uint32_t ring_capacity = 0) {
+        Mt5TickSourceRequest source{symbol.c_str(), flags, 0};
+        Mt5SubscriptionRequest request{&source, 1, interval_ms, max_batch,
+                                       ring_capacity, MT5_DELIVERY_TICK_BATCH, 0, {0, 0}};
+        return subscribe_ticks(request);
+    }
+
     /// \brief Removes a subscription by handle.
     void unsubscribe(Mt5SubscriptionHandle handle) {
         check_loaded();

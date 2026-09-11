@@ -26,7 +26,8 @@ int wmain(int argc, wchar_t **argv) {
         } catch (const std::runtime_error &) {
         }
         competing_client.shutdown();
-        Mt5SubscriptionRequest subscription_request{"EURUSD", 0, 10, 1, 4, 0};
+        Mt5TickSourceRequest source_request{"EURUSD", 0, 0};
+        Mt5SubscriptionRequest subscription_request{&source_request, 1, 10, 1, 4, 0, 0, {0, 0}};
         auto subscription = bridge.subscribe_ticks(subscription_request);
         bool saw_subscription_status = false;
         auto on_event = [](const Mt5SubscriptionEvent *event, void *context) {

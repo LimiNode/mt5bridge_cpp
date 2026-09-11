@@ -90,16 +90,29 @@ typedef struct Mt5FetchDiagnostics {
     Mt5FetchStatus status;           ///< Final semantic status of the read.
 } Mt5FetchDiagnostics;
 
-/// \struct Mt5SubscriptionRequest
-/// \brief Describes a realtime tick subscription.
-typedef struct Mt5SubscriptionRequest {
+/// \struct Mt5TickSourceRequest
+/// \brief Describes one physical symbol source in a subscription group.
+typedef struct Mt5TickSourceRequest {
     const char *symbol_utf8; ///< Borrowed UTF-8 symbol name.
     uint32_t flags;          ///< COPY_TICKS_* mask, or zero for all ticks.
-    uint32_t interval_ms;    ///< Polling cadence; zero selects the 250 ms default.
-    uint32_t max_batch;      ///< Maximum ticks fetched per poll; zero selects 1024.
-    uint32_t queue_capacity; ///< Maximum batches retained by the source; zero selects 64.
     uint32_t reserved;       ///< Reserved; must be zero.
+} Mt5TickSourceRequest;
+
+/// \struct Mt5SubscriptionRequest
+/// \brief Describes a single- or multi-symbol realtime subscription group.
+typedef struct Mt5SubscriptionRequest {
+    const Mt5TickSourceRequest *sources; ///< Borrowed source array.
+    size_t source_count;                 ///< Number of source entries; must be non-zero.
+    uint32_t interval_ms;                ///< Polling cadence; zero selects 250 ms.
+    uint32_t max_batch;                  ///< Maximum ticks per poll; zero selects 1024.
+    uint32_t ring_capacity;              ///< Maximum retained batches; zero selects 64.
+    uint32_t delivery_flags;             ///< MT5_DELIVERY_* bit mask.
+    uint32_t stale_after_ms;             ///< Snapshot staleness threshold; zero disables.
+    uint32_t reserved[2];                ///< Reserved; must be zero.
 } Mt5SubscriptionRequest;
+
+#define MT5_DELIVERY_TICK_BATCH 0x01u
+#define MT5_DELIVERY_COHERENT_SNAPSHOT 0x02u
 
 /// \struct Mt5SubscriptionHandle
 /// \brief Generation-qualified identity of a logical subscription.
@@ -131,6 +144,7 @@ typedef struct Mt5SubscriptionEvent {
     Mt5SubscriptionStatus status;  ///< Source status for status events.
     Mt5SubscriptionHandle handle;  ///< Logical subscription identity.
     uint64_t sequence;             ///< Batch sequence, or last observed sequence.
+    uint32_t source_index;         ///< Index in the request source array.
     const Mt5Tick *ticks;          ///< Borrowed tick batch for TICK_BATCH events.
     size_t count;                  ///< Number of elements in \p ticks.
     uint64_t dropped;              ///< Number of batches lost before a GAP event.
@@ -185,11 +199,13 @@ static_assert(sizeof(Mt5FetchDiagnostics) == 24,
               "Mt5FetchDiagnostics ABI size changed");
 static_assert(offsetof(Mt5FetchDiagnostics, status) == 20,
               "Mt5FetchDiagnostics::status ABI offset changed");
-static_assert(sizeof(Mt5SubscriptionRequest) == 32,
+static_assert(sizeof(Mt5TickSourceRequest) == 16,
+              "Mt5TickSourceRequest ABI size changed");
+static_assert(sizeof(Mt5SubscriptionRequest) == 48,
               "Mt5SubscriptionRequest ABI size changed");
 static_assert(sizeof(Mt5SubscriptionHandle) == 16,
               "Mt5SubscriptionHandle ABI size changed");
-static_assert(sizeof(Mt5SubscriptionEvent) == 64,
+static_assert(sizeof(Mt5SubscriptionEvent) == 72,
               "Mt5SubscriptionEvent ABI size changed");
 static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
               "Mt5SubscriptionDiagnostics ABI size changed");
@@ -206,11 +222,13 @@ _Static_assert(sizeof(Mt5RatesRequest) == 32, "Mt5RatesRequest ABI size changed"
 _Static_assert(sizeof(Mt5FetchStatus) == 4, "Mt5FetchStatus ABI size changed");
 _Static_assert(sizeof(Mt5FetchDiagnostics) == 24,
                "Mt5FetchDiagnostics ABI size changed");
-_Static_assert(sizeof(Mt5SubscriptionRequest) == 32,
+_Static_assert(sizeof(Mt5TickSourceRequest) == 16,
+               "Mt5TickSourceRequest ABI size changed");
+_Static_assert(sizeof(Mt5SubscriptionRequest) == 48,
                "Mt5SubscriptionRequest ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionHandle) == 16,
                "Mt5SubscriptionHandle ABI size changed");
-_Static_assert(sizeof(Mt5SubscriptionEvent) == 64,
+_Static_assert(sizeof(Mt5SubscriptionEvent) == 72,
                "Mt5SubscriptionEvent ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
                "Mt5SubscriptionDiagnostics ABI size changed");

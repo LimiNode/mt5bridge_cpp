@@ -269,7 +269,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             c_void_p,
         ]
         cls.module.mt5bridge_copy_ticks_range.restype = c_int
-        if cls.module.mt5bridge_abi_version() != 4:
+        if cls.module.mt5bridge_abi_version() != 5:
             raise unittest.SkipTest("test DLL does not expose ABI version 5")
 
     def tearDown(self) -> None:
@@ -351,7 +351,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         status, size, diagnostics, error = self.query(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
-        self.assertEqual(diagnostics.attempts, 4)
+        self.assertEqual(diagnostics.attempts, 5)
         self.assertEqual(diagnostics.retries, 2)
 
     def test_empty_partial_full_history_is_confirmed(self) -> None:
@@ -431,7 +431,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         status, size, diagnostics, error = self.query(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 3)
-        self.assertEqual(diagnostics.attempts, 3)
+        self.assertEqual(diagnostics.attempts, 4)
         self.assertEqual(diagnostics.retries, 1)
         self.assertEqual(diagnostics.reconnects, 1)
         self.assertTrue(diagnostics.complete)

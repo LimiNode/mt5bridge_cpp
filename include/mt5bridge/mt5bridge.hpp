@@ -24,61 +24,11 @@
 
 #pragma once
 
+/// \file mt5bridge.hpp
+/// \brief Provides the legacy umbrella include for the mt5bridge C ABI.
+
 #if !defined(_WIN32)
 #error "mt5bridge is only supported on Windows"
 #endif
 
-#include <jansson.h>
-#include <stdint.h>
-
-#ifdef MT5BRIDGE_BUILD
-#define MT5BRIDGE_API extern "C" __declspec(dllexport)
-#else
-#define MT5BRIDGE_API extern "C" __declspec(dllimport)
-#endif
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* Initializes the bridge runtime.
- * Returns 0 on success, non-zero on error.
- */
-MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home);
-
-/* Shuts down the bridge runtime, releasing all resources. */
-MT5BRIDGE_API void mt5bridge_shutdown();
-
-/* Evaluates a MetaTrader5 request given as JSON object.
- * Returns a newly allocated json_t* result that must be freed with json_decref().
- */
-MT5BRIDGE_API json_t *mt5bridge_eval(json_t *request);
-
-/* Returns last error message or nullptr if no error. */
-MT5BRIDGE_API const char *mt5bridge_last_error();
-
-#ifdef __cplusplus
-} /* extern "C" */
-#endif
-
-#ifdef __cplusplus
-struct ScopedJson {
-    json_t *ptr;
-
-    explicit ScopedJson(json_t *p = nullptr) : ptr(p) {}
-    ~ScopedJson() {
-        if (ptr)
-            json_decref(ptr);
-    }
-
-    json_t *get() const { return ptr; }
-    json_t *release() {
-        json_t *tmp = ptr;
-        ptr = nullptr;
-        return tmp;
-    }
-
-    operator json_t *() const { return ptr; }
-};
-#endif
-
+#include "abi.h"

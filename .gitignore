@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build*/
 dist/
 *.o
 *.obj
@@ -8,6 +9,7 @@ dist/
 *.exe
 
 # Python runtime directories
+venv/
 __pycache__/
 *.pyc
 *.pyo

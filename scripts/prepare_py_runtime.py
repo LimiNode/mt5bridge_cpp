@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## \file prepare_py_runtime.py
+#  \brief Downloads and assembles an embeddable Python runtime for mt5bridge.
+
 """Utility script to prepare an embeddable Python runtime.
 
 It downloads the Windows embeddable distribution of Python, unzips it to the
@@ -28,9 +31,13 @@ from pathlib import Path
 from zipfile import ZipFile
 
 
+## \brief Number of bytes transferred per download read.
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
+## \brief Downloads a URL to a local file while reporting basic progress.
+#  \param url Source URL.
+#  \param dest Destination file path.
 def download(url: str, dest: Path) -> None:
     """Download *url* to *dest* displaying basic progress."""
     with urllib.request.urlopen(url) as response, dest.open("wb") as fh:
@@ -48,18 +55,26 @@ def download(url: str, dest: Path) -> None:
     print()
 
 
+## \brief Extracts a Python distribution archive.
+#  \param archive Source ZIP file.
+#  \param dest Destination directory.
 def extract_zip(archive: Path, dest: Path) -> None:
     """Unzip *archive* into *dest*."""
     with ZipFile(archive) as zf:
         zf.extractall(dest)
 
 
+## \brief Extracts a wheel into the prepared site-packages directory.
+#  \param wheel Source wheel file.
+#  \param site_packages Destination site-packages directory.
 def extract_wheel(wheel: Path, site_packages: Path) -> None:
     """Extract *wheel* into *site_packages*."""
     with ZipFile(wheel) as zf:
         zf.extractall(site_packages)
 
 
+## \brief Parses command-line options and assembles the runtime directory.
+#  \param argv Optional argument list; None uses process arguments.
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python-url", required=True,

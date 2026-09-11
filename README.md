@@ -1,6 +1,6 @@
 # mt5bridge_cpp
 
-C++17 bridge embedding CPython to call the MetaTrader5 Python API from native apps (quotes, bars, orders). Ships with an embeddable Python runtime. Windows x64 only.
+C++17 bridge embedding CPython to call the MetaTrader5 Python API from native apps (quotes, bars, orders). The host-facing surface is the Windows x64 `mt5_bridge.dll` with a small UTF-8 JSON C ABI.
 
 ## Quickstart
 
@@ -29,6 +29,21 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
+## Project Python environment
+
+The live runtime and Windows smoke tests use the project-local Python 3.11
+environment. Create it and install the pinned MetaTrader5/NumPy dependencies
+with:
+
+```powershell
+.\setup_env.bat
+```
+
+Use `venv\Scripts\python.exe` for live checks. The embedded DLL must be built
+against the same Python major/minor version as the installed `MetaTrader5`
+wheel; configure CMake with `-DPython3_EXECUTABLE=...\venv\Scripts\python.exe`
+when more than one Python installation is present.
+
 ### MinGW
 
 ```bash
@@ -56,21 +71,44 @@ cmake --build build
 ## Example usage
 
 ```cpp
-#include <mt5bridge/mt5bridge.hpp>
+#include <mt5bridge/client.hpp>
+#include <iostream>
 
 int main() {
-    mt5::Bridge bridge;
-    bridge.initialize();
-    auto quotes = bridge.get_quotes("EURUSD");
-    // use quotes...
+    mt5bridge::Client bridge;
+    try {
+        bridge.load();
+        bridge.initialize();
+        std::cout << bridge.eval(R"({"method":"terminal_info"})") << '\n';
+    } catch (const std::exception &error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
 }
 ```
 
-See the `examples` directory for more.
+The `mt5bridge::Client` header dynamically loads the DLL and does not require
+Python, Jansson, or an import library. The plain C declarations are available
+in `mt5bridge/abi.h`; high-volume tick/rate POD contracts are in
+`mt5bridge/data.h`.
+
+See the `examples` directory for runnable DLL-loading examples and
+[`docs/architecture.md`](docs/architecture.md) for the layering and migration
+plan. Development rules adapted from the PVS-Studio review of bloated
+AI-generated C++ live in [`docs/development-rules.md`](docs/development-rules.md).
+High-throughput ticks/rates use the typed POD data plane described in
+[`docs/market-data-api.md`](docs/market-data-api.md); known MT5 recovery cases
+are tracked in [`docs/mt5-quirks.md`](docs/mt5-quirks.md).
 
 ## Notes
 
+- The current public contract is ABI 5. Tick POD records preserve separate
+  integer `volume` and floating-point `volume_real` fields.
 - Only 64‑bit Windows builds are supported.
 - Python 3.11+ is required.
+- The C++ client resolves the DLL to an absolute path and restricts dependency
+  lookup to the DLL directory and default safe Windows directories.
+- The DLL must be shut down before `FreeLibrary`.
+- Reinitialization after an owned CPython shutdown requires the documented
+  live 100-cycle acceptance test; it is not yet a release guarantee.
 - Issues and pull requests are welcome.
-

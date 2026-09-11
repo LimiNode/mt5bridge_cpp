@@ -1,0 +1,3 @@
+# Runtime and deterministic local smoke-test dependencies.
+MetaTrader5==5.0.6180
+numpy==1.26.4

@@ -29,6 +29,21 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
+## Project Python environment
+
+The live runtime and Windows smoke tests use the project-local Python 3.11
+environment. Create it and install the pinned MetaTrader5/NumPy dependencies
+with:
+
+```powershell
+.\setup_env.bat
+```
+
+Use `venv\Scripts\python.exe` for live checks. The embedded DLL must be built
+against the same Python major/minor version as the installed `MetaTrader5`
+wheel; configure CMake with `-DPython3_EXECUTABLE=...\venv\Scripts\python.exe`
+when more than one Python installation is present.
+
 ### MinGW
 
 ```bash

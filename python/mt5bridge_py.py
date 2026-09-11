@@ -32,7 +32,7 @@ import json
 from ctypes import POINTER, byref, c_char_p, c_int, c_void_p, c_wchar_p
 
 ## \brief ABI version required by this ctypes adapter.
-_ABI_VERSION = 4
+_ABI_VERSION = 5
 
 # Load the mt5bridge shared library.
 _lib = ctypes.WinDLL("mt5_bridge.dll")
@@ -43,7 +43,7 @@ _lib.mt5bridge_abi_version.restype = ctypes.c_uint32
 _lib.mt5bridge_initialize.argtypes = [c_wchar_p]
 _lib.mt5bridge_initialize.restype = c_int
 _lib.mt5bridge_shutdown.argtypes = []
-_lib.mt5bridge_shutdown.restype = None
+_lib.mt5bridge_shutdown.restype = c_int
 _lib.mt5bridge_eval_json.argtypes = [c_char_p, POINTER(c_void_p)]
 _lib.mt5bridge_eval_json.restype = c_int
 _lib.mt5bridge_free.argtypes = [c_void_p]
@@ -75,7 +75,7 @@ def init(python_home: str) -> None:
 ## \brief Shuts down the MetaTrader connection and embedded runtime.
 def shutdown() -> None:
     """Shut down the bridge runtime, freeing resources."""
-    _lib.mt5bridge_shutdown()
+    _check_error(_lib.mt5bridge_shutdown())
 
 
 ## \brief Executes a control-plane request and copies the DLL-owned response.

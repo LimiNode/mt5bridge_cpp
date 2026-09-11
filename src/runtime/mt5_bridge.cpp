@@ -455,8 +455,8 @@ bool valid_range(const char *symbol, int64_t from_msc, int64_t to_msc) {
 
 /// \brief Maximum number of ticks requested from Python in one bounded page.
 constexpr int kTickPageSize = 65536;
-/// \brief Maximum number of successful short-page confirmations before ending a read.
-constexpr uint32_t kShortPageConfirmations = 2;
+/// \brief Maximum number of additional short-page probes before ending a read.
+constexpr uint32_t kShortPageProbes = 2;
 /// \brief Maximum number of partial pages accepted while recovering history.
 constexpr uint32_t kPartialPageLimit = 3;
 
@@ -669,7 +669,7 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
                 set_error("MetaTrader returned no ticks during history recovery");
                 return false;
             }
-            if (confirming_short_page || short_page_confirmations >= kShortPageConfirmations)
+            if (short_page_confirmations >= kShortPageProbes)
                 break;
             ++short_page_confirmations;
             confirming_short_page = true;
@@ -704,8 +704,13 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         if (last_timestamp < cursor_msc ||
             (last_timestamp == cursor_msc &&
              last_timestamp_count <= previously_consumed_at_cursor)) {
-            if (confirming_short_page && !partial_page)
-                break;
+            if (confirming_short_page && !partial_page) {
+                if (short_page_confirmations >= kShortPageProbes)
+                    break;
+                ++short_page_confirmations;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+                continue;
+            }
             set_error("MetaTrader returned a non-progressing tick page");
             return false;
         }
@@ -723,7 +728,7 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         partial_page_count = 0;
         const bool short_page = page.size() < static_cast<std::size_t>(page_size);
         if (short_page) {
-            if (last_timestamp > request->to_msc || short_page_confirmations >= kShortPageConfirmations)
+            if (last_timestamp > request->to_msc || short_page_confirmations >= kShortPageProbes)
                 break;
             ++short_page_confirmations;
             confirming_short_page = true;
@@ -819,19 +824,20 @@ MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home) try {
     return -1;
 }
 
-MT5BRIDGE_API void mt5bridge_shutdown() try {
+MT5BRIDGE_API int mt5bridge_shutdown() try {
     std::lock_guard<std::mutex> lock(g_mutex);
     clear_error();
     if (!g_initialized)
-        return;
+        return 0;
 
     const bool wrong_owner_thread =
         g_owns_interpreter && std::this_thread::get_id() != g_owner_thread;
     if (wrong_owner_thread) {
         set_error("runtime shutdown requires initialize owner thread");
-        return;
+        return -1;
     }
 
+    int shutdown_status = 0;
     if (g_owns_interpreter) {
         // Restore the thread state saved immediately after Py_Initialize.
         // Finalizing while that state is detached is undefined behaviour.
@@ -846,21 +852,28 @@ MT5BRIDGE_API void mt5bridge_shutdown() try {
         PyRef mt5(PyImport_ImportModule("MetaTrader5"));
         if (mt5) {
             PyRef result(PyObject_CallMethod(mt5.get(), "shutdown", nullptr));
-            if (!result)
+            if (!result) {
                 set_python_error();
+                shutdown_status = -1;
+            }
         } else {
             PyErr_Clear();
         }
     }
     if (g_owns_interpreter) {
-        Py_FinalizeEx();
+        if (Py_FinalizeEx() != 0)
+            shutdown_status = -1;
     } else {
         PyGILState_Release(external_gil);
     }
     g_owns_interpreter = false;
     g_initialized = false;
+    if (shutdown_status != 0 && g_last_error.empty())
+        set_error("CPython finalization failed");
+    return shutdown_status;
 } catch (...) {
     set_current_exception_error();
+    return -1;
 }
 
 MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_json) try {

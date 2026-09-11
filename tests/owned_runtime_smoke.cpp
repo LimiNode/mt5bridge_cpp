@@ -29,6 +29,20 @@ int wmain(int argc, wchar_t **argv) {
         const std::string response = bridge.eval(R"({"method":"terminal_info"})");
         if (response.find("owned_interpreter") == std::string::npos)
             return 3;
+        const HMODULE module = LoadLibraryW(argv[1]);
+        const auto raw_shutdown = module
+            ? reinterpret_cast<int (*)()>(GetProcAddress(module, "mt5bridge_shutdown"))
+            : nullptr;
+        if (!raw_shutdown)
+            return 5;
+        int raw_shutdown_status = 0;
+        std::thread raw_wrong_owner([&raw_shutdown_status, raw_shutdown] {
+            raw_shutdown_status = raw_shutdown();
+        });
+        raw_wrong_owner.join();
+        FreeLibrary(module);
+        if (raw_shutdown_status == 0)
+            return 6;
         bool rejected_cross_thread_shutdown = false;
         std::thread wrong_owner([&bridge, &rejected_cross_thread_shutdown] {
             try {
@@ -39,10 +53,10 @@ int wmain(int argc, wchar_t **argv) {
         });
         wrong_owner.join();
         if (!rejected_cross_thread_shutdown)
-            return 5;
+            return 7;
         if (bridge.eval(R"({"method":"terminal_info"})").find("owned_interpreter") ==
             std::string::npos)
-            return 6;
+            return 8;
         bridge.shutdown();
         return 0;
     } catch (const std::exception &error) {

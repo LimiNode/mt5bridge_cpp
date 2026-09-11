@@ -20,7 +20,7 @@
 
 /// \def MT5BRIDGE_ABI_VERSION
 /// \brief Identifies the exact public ABI layout expected by the client.
-#define MT5BRIDGE_ABI_VERSION 4u
+#define MT5BRIDGE_ABI_VERSION 5u
 
 /// \def MT5BRIDGE_API
 /// \brief Backward-compatible alias for MT5BRIDGE_EXPORT.
@@ -40,9 +40,10 @@ MT5BRIDGE_EXPORT uint32_t mt5bridge_abi_version(void);
 /// \note Repeated calls after successful initialization are harmless.
 MT5BRIDGE_EXPORT int mt5bridge_initialize(const wchar_t *python_home);
 
-/// \brief Closes the MetaTrader 5 connection and releases runtime resources.
+/// \brief Shuts down MetaTrader and the owned interpreter.
+/// \return Zero on success; non-zero when shutdown is rejected or fails.
 /// \note The function is idempotent and must complete before unloading the DLL.
-MT5BRIDGE_EXPORT void mt5bridge_shutdown(void);
+MT5BRIDGE_EXPORT int mt5bridge_shutdown(void);
 
 /// \brief Executes a control-plane request encoded as UTF-8 JSON.
 /// \param request_json Null-terminated UTF-8 JSON object describing the operation.

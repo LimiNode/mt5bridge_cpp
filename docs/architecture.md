@@ -31,8 +31,9 @@ version-independent.
 - `mt5bridge_initialize()` is idempotent and owns interpreter startup.
 - `mt5bridge_eval_json()` accepts one JSON object and returns one allocated JSON
   string. The caller releases it with `mt5bridge_free()`.
-- `mt5bridge_shutdown()` is idempotent and completes before unloading the DLL.
-- ABI 4 is checked by both `mt5bridge::Client` and the ctypes adapter before
+- `mt5bridge_shutdown()` is idempotent, returns a status, and completes before
+  unloading the DLL.
+- ABI 5 is checked by both `mt5bridge::Client` and the ctypes adapter before
   use. POD sizes and field offsets are compile-time assertions in `data.h`.
 - Calls that touch Python are serialized. Diagnostics are thread-local and are
   valid until the next call on the same thread.
@@ -79,10 +80,12 @@ in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
 
 Calling `mt5bridge_initialize()` again while the bridge is already initialized
 is supported. The thread that creates an owned interpreter is its lifecycle
-owner. `mt5bridge_shutdown()` finalizes CPython only on that thread; a
+owner. `mt5bridge_shutdown()` returns a status and finalizes CPython only on that thread; a
 cross-thread shutdown is rejected without touching Python and reports an error
 through `mt5bridge_last_error()`. The C++ facade enforces the same rule and
-keeps the DLL loaded until the owner thread performs shutdown.
+keeps the DLL loaded until the owner thread performs shutdown; destroying an
+initialized facade from another thread terminates the process rather than
+silently poisoning global ownership.
 
 Owned initialization uses CPython's `PyConfig` API, so `python_home` is copied
 into CPython configuration rather than retained as a borrowed ABI pointer.

@@ -218,7 +218,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Loads the DLL and installs the deterministic fake module."""
         if ctypes.sizeof(Mt5TicksRequest) != 32 or ctypes.sizeof(Mt5Tick) != 56:
-            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 4")
+            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 5")
         dll_path = os.environ.get("MT5BRIDGE_DLL")
         if not dll_path:
             raise unittest.SkipTest("set MT5BRIDGE_DLL to a built mt5_bridge.dll")
@@ -232,6 +232,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         cls.module.mt5bridge_initialize.argtypes = [ctypes.c_wchar_p]
         cls.module.mt5bridge_initialize.restype = c_int
         cls.module.mt5bridge_shutdown.argtypes = []
+        cls.module.mt5bridge_shutdown.restype = c_int
         cls.module.mt5bridge_last_error.argtypes = []
         cls.module.mt5bridge_last_error.restype = c_char_p
         cls.module.mt5bridge_eval_json.argtypes = [c_char_p, POINTER(c_void_p)]
@@ -269,7 +270,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         ]
         cls.module.mt5bridge_copy_ticks_range.restype = c_int
         if cls.module.mt5bridge_abi_version() != 4:
-            raise unittest.SkipTest("test DLL does not expose ABI version 4")
+            raise unittest.SkipTest("test DLL does not expose ABI version 5")
 
     def tearDown(self) -> None:
         """Restores the module registry after each scenario."""
@@ -366,6 +367,14 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
         self.assertGreaterEqual(diagnostics.reconnects, 1)
+
+    def test_empty_successes_can_be_followed_by_history_data(self) -> None:
+        """Two empty success probes do not hide data arriving during warm-up."""
+        fake = fake_module([page(2000, 0), page(2000, 0), page(2000, 2)])
+        status, size, diagnostics, error = self.query(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertGreaterEqual(diagnostics.attempts, 3)
 
     def test_initialize_false_is_rejected(self) -> None:
         """A false MetaTrader initialize result is not accepted as success."""

@@ -18,13 +18,15 @@ bounded tick callback. Responses and buffers are allocated and released by the
 DLL. Keep all implementation libraries and Python objects private. The
 header-only `mt5bridge::Client` validates the version before resolving calls.
 
-The current contract is ABI version 4. Any incompatible change to exported
+The current contract is ABI version 5. Any incompatible change to exported
 signatures or POD layout requires a version bump and a coordinated client
 update.
 
-ABI 4 separates integer tick `volume` from `volume_real`, makes request padding
+ABI 4 separated integer tick `volume` from `volume_real`, made request padding
 explicit, fixes public POD sizes and offsets with compile-time assertions, and
 uses a fixed-width `Mt5FetchStatus` instead of an implementation-defined C enum.
+ABI 5 makes shutdown status-bearing so C and ctypes consumers can detect an
+owner-thread or finalization failure before unloading the DLL.
 
 ## Consequences
 

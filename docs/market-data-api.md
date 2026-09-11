@@ -69,7 +69,7 @@ reconnect, traversal resumes from the last committed cursor.
 ## Realtime boundary
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
-range. ABI 4 does not expose `subscribe_ticks()` and must not be described as a
+range. ABI 5 does not expose `subscribe_ticks()` and must not be described as a
 live subscription API. A future realtime layer must persist the committed
 `(time_msc, ordinal)` cursor, poll the history tail, reconnect, catch up the
 missing interval, suppress only the intentional overlap, and then resume live

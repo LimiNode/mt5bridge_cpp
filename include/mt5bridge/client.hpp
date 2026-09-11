@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -104,15 +105,15 @@ public:
     }
 
     /// \brief Shuts down the runtime when needed and releases the DLL handle.
-    /// \note An initialized client can only be unloaded from its initialize() thread.
+    /// \warning Destroying or unloading an initialized client from another thread terminates the process.
     void unload() noexcept {
-        if (initialized_ && std::this_thread::get_id() != owner_thread_) {
-            Client *expected = this;
-            active_client_.compare_exchange_strong(expected, nullptr);
+        if (initialized_ && std::this_thread::get_id() != owner_thread_)
+            std::terminate();
+        if (initialized_ && shutdown_ && shutdown_() != 0) {
+            // Keep ownership claimed: the runtime may still be alive after a
+            // failed finalization and must not be taken over by another client.
             return;
         }
-        if (initialized_ && shutdown_)
-            shutdown_();
         Client *expected = this;
         active_client_.compare_exchange_strong(expected, nullptr);
         if (initialized_)
@@ -170,8 +171,8 @@ public:
             return;
         if (std::this_thread::get_id() != owner_thread_)
             throw std::runtime_error("mt5bridge shutdown requires initialize owner thread");
-        if (shutdown_)
-            shutdown_();
+        if (shutdown_ && shutdown_() != 0)
+            throw std::runtime_error(error_message());
         initialized_ = false;
         Client *expected = this;
         active_client_.compare_exchange_strong(expected, nullptr);
@@ -315,7 +316,7 @@ public:
 private:
     using AbiVersion = std::uint32_t (*)();
     using Initialize = int (*)(const wchar_t *);
-    using Shutdown = void (*)();
+    using Shutdown = int (*)();
     using EvalJson = int (*)(const char *, char **);
     using Free = void (*)(char *);
     using LastError = const char *(*)();

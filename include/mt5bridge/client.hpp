@@ -138,12 +138,13 @@ public:
         unsubscribe_all_ = resolve<UnsubscribeAll>("mt5bridge_unsubscribe_all");
         process_events_ = resolve<ProcessEvents>("mt5bridge_process_events");
         subscription_diagnostics_ = resolve<SubscriptionDiagnostics>("mt5bridge_subscription_diagnostics");
+        subscription_source_diagnostics_ = resolve<SubscriptionSourceDiagnostics>("mt5bridge_subscription_source_diagnostics");
         if (!abi_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
             !rate_free_ || !rate_diagnostics_ || !last_fetch_diagnostics_ ||
             !copy_ticks_chunks_ || !subscribe_ticks_ || !unsubscribe_ || !unsubscribe_all_ ||
-            !process_events_ || !subscription_diagnostics_ ||
+            !process_events_ || !subscription_diagnostics_ || !subscription_source_diagnostics_ ||
             abi_version_() != MT5BRIDGE_ABI_VERSION) {
             unload();
             throw std::runtime_error("incompatible mt5_bridge.dll ABI");
@@ -195,6 +196,7 @@ public:
         unsubscribe_all_ = nullptr;
         process_events_ = nullptr;
         subscription_diagnostics_ = nullptr;
+        subscription_source_diagnostics_ = nullptr;
         initialized_ = false;
     }
 
@@ -420,6 +422,13 @@ public:
                subscription_diagnostics_(handle, diagnostics) == 0;
     }
 
+    /// \brief Copies diagnostics for one source in a grouped subscription.
+    bool subscription_source_diagnostics(Mt5SubscriptionHandle handle, std::uint32_t source_index,
+                                         Mt5SubscriptionDiagnostics *diagnostics) const noexcept {
+        return subscription_source_diagnostics_ &&
+               subscription_source_diagnostics_(handle, source_index, diagnostics) == 0;
+    }
+
 private:
     using AbiVersion = std::uint32_t (*)();
     using Initialize = int (*)(const wchar_t *);
@@ -445,6 +454,7 @@ private:
     using UnsubscribeAll = int (*)();
     using ProcessEvents = int (*)(std::size_t, Mt5SubscriptionEventCallback, void *);
     using SubscriptionDiagnostics = int (*)(Mt5SubscriptionHandle, Mt5SubscriptionDiagnostics *);
+    using SubscriptionSourceDiagnostics = int (*)(Mt5SubscriptionHandle, std::uint32_t, Mt5SubscriptionDiagnostics *);
 
     /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
     /// \param path Caller-provided DLL path.
@@ -515,6 +525,7 @@ private:
         unsubscribe_all_ = other.unsubscribe_all_;
         process_events_ = other.process_events_;
         subscription_diagnostics_ = other.subscription_diagnostics_;
+        subscription_source_diagnostics_ = other.subscription_source_diagnostics_;
         subscription_state_ = std::move(other.subscription_state_);
         initialized_ = other.initialized_;
         owner_thread_ = other.owner_thread_;
@@ -546,6 +557,7 @@ private:
         other.unsubscribe_all_ = nullptr;
         other.process_events_ = nullptr;
         other.subscription_diagnostics_ = nullptr;
+        other.subscription_source_diagnostics_ = nullptr;
         other.initialized_ = false;
         other.owner_thread_ = std::thread::id{};
     }
@@ -574,6 +586,7 @@ private:
     UnsubscribeAll unsubscribe_all_ = nullptr;
     ProcessEvents process_events_ = nullptr;
     SubscriptionDiagnostics subscription_diagnostics_ = nullptr;
+    SubscriptionSourceDiagnostics subscription_source_diagnostics_ = nullptr;
     std::shared_ptr<SubscriptionState> subscription_state_;
     bool initialized_ = false;
     std::thread::id owner_thread_;

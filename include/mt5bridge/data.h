@@ -137,6 +137,13 @@ typedef int32_t Mt5SubscriptionEventType;
 #define MT5_SUBSCRIPTION_STATUS ((Mt5SubscriptionEventType)1)
 #define MT5_SUBSCRIPTION_GAP ((Mt5SubscriptionEventType)2)
 
+/// \typedef Mt5GapReason
+/// \brief Classifies why a realtime consumer observed a discontinuity.
+typedef int32_t Mt5GapReason;
+#define MT5_GAP_NONE ((Mt5GapReason)0)
+#define MT5_GAP_CONSUMER_OVERFLOW ((Mt5GapReason)1)
+#define MT5_GAP_SOURCE_INCONSISTENCY ((Mt5GapReason)2)
+
 /// \struct Mt5SubscriptionEvent
 /// \brief Borrowed event view valid only during the process-events callback.
 typedef struct Mt5SubscriptionEvent {
@@ -148,7 +155,7 @@ typedef struct Mt5SubscriptionEvent {
     const Mt5Tick *ticks;          ///< Borrowed tick batch for TICK_BATCH events.
     size_t count;                  ///< Number of elements in \p ticks.
     uint64_t dropped;              ///< Number of batches lost before a GAP event.
-    int32_t reserved;              ///< Reserved; must be zero.
+    Mt5GapReason gap_reason;       ///< Reason for GAP events, or MT5_GAP_NONE.
 } Mt5SubscriptionEvent;
 
 /// \struct Mt5SubscriptionDiagnostics
@@ -160,7 +167,7 @@ typedef struct Mt5SubscriptionDiagnostics {
     int64_t history_lag_ms;      ///< Age of the newest observed tick.
     uint64_t poll_duration_us;    ///< Duration of the latest poll call.
     uint32_t history_rewrites;   ///< Observable overlap rewrite count.
-    uint32_t gap_reason;          ///< 0 none, 1 consumer overflow, 2 source inconsistency.
+    uint32_t gap_reason;          ///< Upstream inconsistency reason; consumer overflow is per member.
     Mt5SubscriptionStatus status; ///< Current source status.
 } Mt5SubscriptionDiagnostics;
 
@@ -233,6 +240,25 @@ _Static_assert(sizeof(Mt5SubscriptionEvent) == 72,
 _Static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
                "Mt5SubscriptionDiagnostics ABI size changed");
 #endif
+
+/// \struct Mt5SnapshotItem
+/// \brief Reserved coherent-snapshot item representation for ABI-compatible evolution.
+typedef struct Mt5SnapshotItem {
+    uint32_t source_index; ///< Source index within the subscription request.
+    uint32_t flags;        ///< Item flags; reserved for future snapshot states.
+    Mt5Tick tick;          ///< Latest tick observed for the source.
+} Mt5SnapshotItem;
+
+/// \struct Mt5SnapshotView
+/// \brief Reserved borrowed view for future coherent multi-source snapshots.
+typedef struct Mt5SnapshotView {
+    const Mt5SnapshotItem *items; ///< Borrowed item array.
+    size_t count;                 ///< Number of items in \p items.
+    uint64_t watermark_msc;       ///< Common watermark in Unix milliseconds.
+    uint32_t stale_after_ms;      ///< Configured staleness threshold.
+    uint32_t stale_count;         ///< Number of stale sources.
+    uint32_t reserved[2];         ///< Reserved; must be zero.
+} Mt5SnapshotView;
 
 /// \struct Mt5TickBuffer
 /// \brief Opaque DLL-owned collection of Mt5Tick values.
@@ -338,6 +364,15 @@ MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
 /// \brief Copies diagnostics for one realtime source.
 MT5BRIDGE_EXPORT int mt5bridge_subscription_diagnostics(Mt5SubscriptionHandle handle,
                                                          Mt5SubscriptionDiagnostics *diagnostics);
+
+/// \brief Returns diagnostics for one source in a grouped subscription.
+/// \param handle Generation-qualified logical subscription handle.
+/// \param source_index Zero-based source index from Mt5SubscriptionRequest::sources.
+/// \param[out] diagnostics Receives a source health snapshot.
+/// \return Zero on success; non-zero for stale handles or invalid indexes.
+MT5BRIDGE_EXPORT int mt5bridge_subscription_source_diagnostics(
+    Mt5SubscriptionHandle handle, uint32_t source_index,
+    Mt5SubscriptionDiagnostics *diagnostics);
 
 #ifdef __cplusplus
 }

@@ -74,23 +74,35 @@ accepts an array of `Mt5TickSourceRequest`; one handle may group several
 symbols, while equal `(symbol, flags)` requests share one physical
 `copy_ticks_from()` polling source. A single symbol is a one-element array and
 every source-specific event carries `source_index`; no global chronological
-order is promised across symbols. The source uses the smallest
-requested interval and retains only a bounded ring of batches. Each poll
-re-reads a measured overlap window and reconciles full tick payloads as a
-multiset, because MT5 can insert late records, reorder same-time records, or
-return identical payloads for distinct events.
+order is promised across symbols. The source uses the smallest requested
+interval and retains only a bounded ring of batches. Each poll epoch has two
+separate phases: a forward, lossless page traversal from the committed
+`(time_msc, ordinal)` cursor to the current observation time (where `max_batch`
+is only the page size), followed by a bounded tail reread for overlap
+reconciliation. The tail is never used as the forward cursor, so a dense
+overlap cannot trap the poller rereading the same first page forever.
+Reconciliation compares complete tick payload multiplicities and reports
+rewrites or disappeared records in diagnostics. A non-empty page accompanied
+by an MT5 timeout/IPC status is usable for reconciliation but does not advance
+the confirmed READY state until a clean poll succeeds.
 
 The host calls `mt5bridge_process_events(max_events, callback, user)` from its
 owner loop. Callback views are borrowed until return and contain `TICK_BATCH`,
 `STATUS`, or explicit `GAP` events. A GAP reports batches overrun in the ring;
 loss is never silently reported as complete. Consumer overrun is not repaired
 automatically in v1; applications needing lossless recovery should issue a
-historical POD query from their last committed cursor before resuming.
+historical POD query from their last committed cursor before resuming. Use
+`mt5bridge_subscription_source_diagnostics()` to inspect a particular member
+of a grouped subscription; `mt5bridge_subscription_diagnostics()` is a
+compatibility shorthand for source index zero. Consumer overflow is reported
+on the GAP event (`gap_reason == MT5_GAP_CONSUMER_OVERFLOW`) and is intentionally
+not written into shared physical-source diagnostics.
 Handles include a runtime generation and stale handles are rejected. The
 contract is best-effort lossless relative to observable synchronized MT5
 history; it cannot promise recovery of records that MT5 later rewrites or
 removes. `MT5_DELIVERY_COHERENT_SNAPSHOT` is reserved for the next snapshot
-phase and is rejected until watermark/staleness semantics are implemented.
+phase and is rejected until watermark/staleness semantics are implemented. The
+ABI already reserves `Mt5SnapshotItem` and `Mt5SnapshotView` for that extension.
 Shutdown signals and joins the poller before MetaTrader or CPython teardown.
 
 ## NumPy-to-POD benchmark

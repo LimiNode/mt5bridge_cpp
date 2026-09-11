@@ -886,8 +886,8 @@ void realtime_poller() try {
                         std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
                     int64_t page_from = cursor >= 0 ? cursor : std::max<int64_t>(0, now_msc - static_cast<int64_t>(interval) * 4);
                     std::size_t skip_at_cursor = cursor >= 0 ? cursor_ordinal : 0;
-                    bool first_page = true;
                     for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
+                        const std::size_t boundary_skip = skip_at_cursor;
                         const uint64_t requested = static_cast<uint64_t>(max_batch) + skip_at_cursor;
                         const int count = static_cast<int>(std::min<uint64_t>(requested,
                             static_cast<uint64_t>(std::numeric_limits<int>::max())));
@@ -909,12 +909,11 @@ void realtime_poller() try {
                         for (auto it = page.rbegin(); it != page.rend() && it->time_msc == last_ts; ++it) ++last_count;
                         for (const auto &tick : page) {
                             if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
-                            if (first_page && tick.time_msc == cursor && skip_at_cursor != 0) { --skip_at_cursor; continue; }
+                            if (tick.time_msc == page_from && skip_at_cursor != 0) { --skip_at_cursor; continue; }
                             forward.push_back(tick);
                         }
-                        if (last_ts < page_from || (last_ts == page_from && last_count <= skip_at_cursor))
+                        if (last_ts < page_from || (last_ts == page_from && last_count <= boundary_skip))
                             break;
-                        first_page = false;
                         page_from = last_ts;
                         skip_at_cursor = last_count;
                         if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) break;

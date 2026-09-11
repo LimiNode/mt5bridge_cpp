@@ -66,14 +66,22 @@ one timestamp cannot stall the reader. A page that does not advance either the
 timestamp or its consumed ordinal fails instead of looping forever. On IPC
 reconnect, traversal resumes from the last committed cursor.
 
-## Realtime boundary
+## Realtime subscriptions (ABI 6)
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
-range. ABI 5 does not expose `subscribe_ticks()` and must not be described as a
-live subscription API. A future realtime layer must persist the committed
-`(time_msc, ordinal)` cursor, poll the history tail, reconnect, catch up the
-missing interval, suppress only the intentional overlap, and then resume live
-delivery. Reading only `symbol_info_tick()` after reconnect is not sufficient.
+range. ABI 6 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`
+creates a logical subscription; equal `(symbol, flags)` requests share one
+physical `copy_ticks_from()` polling source. The source uses the smallest
+requested interval and retains only a bounded ring of batches.
+
+The host calls `mt5bridge_process_events(max_events, callback, user)` from its
+owner loop. Callback views are borrowed until return and contain `TICK_BATCH`,
+`STATUS`, or explicit `GAP` events. A GAP reports batches overrun in the ring;
+loss is never silently reported as complete. Consumer overrun is not repaired
+automatically in v1; applications needing lossless recovery should issue a
+historical POD query from their last committed cursor before resuming.
+Handles include a runtime generation and stale handles are rejected.
+Shutdown signals and joins the poller before MetaTrader or CPython teardown.
 
 ## NumPy-to-POD benchmark
 

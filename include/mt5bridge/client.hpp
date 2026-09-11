@@ -33,6 +33,39 @@ namespace mt5bridge {
 /// Only one initialized Client may own the process-global runtime at a time.
 class Client {
 public:
+    /// \class Subscription
+    /// \brief Move-only RAII owner of a realtime tick subscription.
+    class Subscription {
+    public:
+        Subscription() = default;
+        ~Subscription() { reset(); }
+        Subscription(const Subscription &) = delete;
+        Subscription &operator=(const Subscription &) = delete;
+        Subscription(Subscription &&other) noexcept : owner_(other.owner_), handle_(other.handle_) {
+            other.owner_ = nullptr;
+            other.handle_ = {};
+        }
+        Subscription &operator=(Subscription &&other) noexcept {
+            if (this != &other) { reset(); owner_ = other.owner_; handle_ = other.handle_; other.owner_ = nullptr; other.handle_ = {}; }
+            return *this;
+        }
+        /// \brief Returns the underlying generation-qualified handle.
+        Mt5SubscriptionHandle handle() const noexcept { return handle_; }
+        /// \brief Cancels the subscription when still attached to its client.
+        void reset() noexcept {
+            if (owner_) {
+                try { if (owner_->unsubscribe_) owner_->unsubscribe_(handle_); } catch (...) {}
+                owner_ = nullptr;
+                handle_ = {};
+            }
+        }
+        explicit operator bool() const noexcept { return owner_ != nullptr; }
+    private:
+        friend class Client;
+        Subscription(Client *owner, Mt5SubscriptionHandle handle) : owner_(owner), handle_(handle) {}
+        Client *owner_ = nullptr;
+        Mt5SubscriptionHandle handle_{};
+    };
     /// \brief Constructs an unloaded client.
     Client() = default;
 
@@ -93,11 +126,16 @@ public:
         rate_diagnostics_ = resolve<RateDiagnostics>("mt5bridge_rate_buffer_diagnostics");
         last_fetch_diagnostics_ =
             resolve<LastFetchDiagnostics>("mt5bridge_last_fetch_diagnostics");
+        subscribe_ticks_ = resolve<SubscribeTicks>("mt5bridge_subscribe_ticks");
+        unsubscribe_ = resolve<Unsubscribe>("mt5bridge_unsubscribe");
+        unsubscribe_all_ = resolve<UnsubscribeAll>("mt5bridge_unsubscribe_all");
+        process_events_ = resolve<ProcessEvents>("mt5bridge_process_events");
         if (!abi_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
             !rate_free_ || !rate_diagnostics_ || !last_fetch_diagnostics_ ||
-            !copy_ticks_chunks_ ||
+            !copy_ticks_chunks_ || !subscribe_ticks_ || !unsubscribe_ || !unsubscribe_all_ ||
+            !process_events_ ||
             abi_version_() != MT5BRIDGE_ABI_VERSION) {
             unload();
             throw std::runtime_error("incompatible mt5_bridge.dll ABI");
@@ -139,6 +177,10 @@ public:
         rate_free_ = nullptr;
         rate_diagnostics_ = nullptr;
         last_fetch_diagnostics_ = nullptr;
+        subscribe_ticks_ = nullptr;
+        unsubscribe_ = nullptr;
+        unsubscribe_all_ = nullptr;
+        process_events_ = nullptr;
         initialized_ = false;
     }
 
@@ -313,6 +355,39 @@ public:
         return status;
     }
 
+    /// \brief Creates a host-driven realtime tick subscription.
+    Subscription subscribe_ticks(const Mt5SubscriptionRequest &request) {
+        check_loaded();
+        Mt5SubscriptionHandle handle{};
+        if (subscribe_ticks_(&request, &handle) != 0)
+            throw std::runtime_error(error_message());
+        return Subscription(this, handle);
+    }
+
+    /// \brief Removes a subscription by handle.
+    void unsubscribe(Mt5SubscriptionHandle handle) {
+        check_loaded();
+        if (unsubscribe_(handle) != 0)
+            throw std::runtime_error(error_message());
+    }
+
+    /// \brief Removes all realtime subscriptions.
+    void unsubscribe_all() {
+        check_loaded();
+        if (unsubscribe_all_() != 0)
+            throw std::runtime_error(error_message());
+    }
+
+    /// \brief Delivers queued realtime events on the calling thread.
+    int process_events(std::size_t max_events, Mt5SubscriptionEventCallback callback,
+                       void *user_data) {
+        check_loaded();
+        const int status = process_events_(max_events, callback, user_data);
+        if (status < 0)
+            throw std::runtime_error(error_message());
+        return status;
+    }
+
 private:
     using AbiVersion = std::uint32_t (*)();
     using Initialize = int (*)(const wchar_t *);
@@ -333,6 +408,10 @@ private:
     using RateFree = void (*)(Mt5RateBuffer *);
     using RateDiagnostics = int (*)(const Mt5RateBuffer *, Mt5FetchDiagnostics *);
     using LastFetchDiagnostics = int (*)(Mt5FetchDiagnostics *);
+    using SubscribeTicks = int (*)(const Mt5SubscriptionRequest *, Mt5SubscriptionHandle *);
+    using Unsubscribe = int (*)(Mt5SubscriptionHandle);
+    using UnsubscribeAll = int (*)();
+    using ProcessEvents = int (*)(std::size_t, Mt5SubscriptionEventCallback, void *);
 
     /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
     /// \param path Caller-provided DLL path.
@@ -398,6 +477,10 @@ private:
         rate_free_ = other.rate_free_;
         rate_diagnostics_ = other.rate_diagnostics_;
         last_fetch_diagnostics_ = other.last_fetch_diagnostics_;
+        subscribe_ticks_ = other.subscribe_ticks_;
+        unsubscribe_ = other.unsubscribe_;
+        unsubscribe_all_ = other.unsubscribe_all_;
+        process_events_ = other.process_events_;
         initialized_ = other.initialized_;
         owner_thread_ = other.owner_thread_;
         if (other.initialized_)
@@ -423,6 +506,10 @@ private:
         other.rate_free_ = nullptr;
         other.rate_diagnostics_ = nullptr;
         other.last_fetch_diagnostics_ = nullptr;
+        other.subscribe_ticks_ = nullptr;
+        other.unsubscribe_ = nullptr;
+        other.unsubscribe_all_ = nullptr;
+        other.process_events_ = nullptr;
         other.initialized_ = false;
         other.owner_thread_ = std::thread::id{};
     }
@@ -446,6 +533,10 @@ private:
     RateFree rate_free_ = nullptr;
     RateDiagnostics rate_diagnostics_ = nullptr;
     LastFetchDiagnostics last_fetch_diagnostics_ = nullptr;
+    SubscribeTicks subscribe_ticks_ = nullptr;
+    Unsubscribe unsubscribe_ = nullptr;
+    UnsubscribeAll unsubscribe_all_ = nullptr;
+    ProcessEvents process_events_ = nullptr;
     bool initialized_ = false;
     std::thread::id owner_thread_;
     inline static std::mutex ownership_mutex_;

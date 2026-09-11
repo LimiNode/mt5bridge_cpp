@@ -90,6 +90,57 @@ typedef struct Mt5FetchDiagnostics {
     Mt5FetchStatus status;           ///< Final semantic status of the read.
 } Mt5FetchDiagnostics;
 
+/// \struct Mt5SubscriptionRequest
+/// \brief Describes a realtime tick subscription.
+typedef struct Mt5SubscriptionRequest {
+    const char *symbol_utf8; ///< Borrowed UTF-8 symbol name.
+    uint32_t flags;          ///< COPY_TICKS_* mask, or zero for all ticks.
+    uint32_t interval_ms;    ///< Polling cadence; zero selects the 250 ms default.
+    uint32_t max_batch;      ///< Maximum ticks fetched per poll; zero selects 1024.
+    uint32_t queue_capacity; ///< Maximum batches retained by the source; zero selects 64.
+    uint32_t reserved;       ///< Reserved; must be zero.
+} Mt5SubscriptionRequest;
+
+/// \struct Mt5SubscriptionHandle
+/// \brief Generation-qualified identity of a logical subscription.
+typedef struct Mt5SubscriptionHandle {
+    uint64_t generation; ///< Runtime generation that created the handle.
+    uint64_t id;         ///< Monotonically increasing subscription id.
+} Mt5SubscriptionHandle;
+
+/// \typedef Mt5SubscriptionStatus
+/// \brief Lifecycle state reported for a realtime source.
+typedef int32_t Mt5SubscriptionStatus;
+#define MT5_SUBSCRIPTION_STARTING ((Mt5SubscriptionStatus)0)
+#define MT5_SUBSCRIPTION_READY ((Mt5SubscriptionStatus)1)
+#define MT5_SUBSCRIPTION_RECONNECTING ((Mt5SubscriptionStatus)2)
+#define MT5_SUBSCRIPTION_FAILED ((Mt5SubscriptionStatus)3)
+#define MT5_SUBSCRIPTION_STOPPED ((Mt5SubscriptionStatus)4)
+
+/// \typedef Mt5SubscriptionEventType
+/// \brief Kind of event delivered by mt5bridge_process_events().
+typedef int32_t Mt5SubscriptionEventType;
+#define MT5_SUBSCRIPTION_TICK_BATCH ((Mt5SubscriptionEventType)0)
+#define MT5_SUBSCRIPTION_STATUS ((Mt5SubscriptionEventType)1)
+#define MT5_SUBSCRIPTION_GAP ((Mt5SubscriptionEventType)2)
+
+/// \struct Mt5SubscriptionEvent
+/// \brief Borrowed event view valid only during the process-events callback.
+typedef struct Mt5SubscriptionEvent {
+    Mt5SubscriptionEventType type; ///< Event kind.
+    Mt5SubscriptionStatus status;  ///< Source status for status events.
+    Mt5SubscriptionHandle handle;  ///< Logical subscription identity.
+    uint64_t sequence;             ///< Batch sequence, or last observed sequence.
+    const Mt5Tick *ticks;          ///< Borrowed tick batch for TICK_BATCH events.
+    size_t count;                  ///< Number of elements in \p ticks.
+    uint64_t dropped;              ///< Number of batches lost before a GAP event.
+    int32_t reserved;              ///< Reserved; must be zero.
+} Mt5SubscriptionEvent;
+
+/// \brief Callback invoked by mt5bridge_process_events().
+typedef int (*Mt5SubscriptionEventCallback)(const Mt5SubscriptionEvent *event,
+                                            void *user_data);
+
 #if defined(__cplusplus)
 static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
 static_assert(offsetof(Mt5Tick, time_msc) == 0, "Mt5Tick::time_msc ABI offset changed");
@@ -121,6 +172,12 @@ static_assert(sizeof(Mt5FetchDiagnostics) == 24,
               "Mt5FetchDiagnostics ABI size changed");
 static_assert(offsetof(Mt5FetchDiagnostics, status) == 20,
               "Mt5FetchDiagnostics::status ABI offset changed");
+static_assert(sizeof(Mt5SubscriptionRequest) == 32,
+              "Mt5SubscriptionRequest ABI size changed");
+static_assert(sizeof(Mt5SubscriptionHandle) == 16,
+              "Mt5SubscriptionHandle ABI size changed");
+static_assert(sizeof(Mt5SubscriptionEvent) == 64,
+              "Mt5SubscriptionEvent ABI size changed");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
 _Static_assert(offsetof(Mt5Tick, volume) == 32, "Mt5Tick ABI offsets changed");
@@ -134,6 +191,12 @@ _Static_assert(sizeof(Mt5RatesRequest) == 32, "Mt5RatesRequest ABI size changed"
 _Static_assert(sizeof(Mt5FetchStatus) == 4, "Mt5FetchStatus ABI size changed");
 _Static_assert(sizeof(Mt5FetchDiagnostics) == 24,
                "Mt5FetchDiagnostics ABI size changed");
+_Static_assert(sizeof(Mt5SubscriptionRequest) == 32,
+               "Mt5SubscriptionRequest ABI size changed");
+_Static_assert(sizeof(Mt5SubscriptionHandle) == 16,
+               "Mt5SubscriptionHandle ABI size changed");
+_Static_assert(sizeof(Mt5SubscriptionEvent) == 64,
+               "Mt5SubscriptionEvent ABI size changed");
 #endif
 
 /// \struct Mt5TickBuffer
@@ -225,6 +288,18 @@ MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_diagnostics(const Mt5RateBuffer *buff
 /// \return Zero on success; non-zero when \p diagnostics is NULL.
 /// \note This accessor is useful when a query fails before returning a buffer.
 MT5BRIDGE_EXPORT int mt5bridge_last_fetch_diagnostics(Mt5FetchDiagnostics *diagnostics);
+
+/// \brief Creates a logical realtime tick subscription.
+MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *request,
+                                                Mt5SubscriptionHandle *handle);
+/// \brief Removes one logical realtime subscription.
+MT5BRIDGE_EXPORT int mt5bridge_unsubscribe(Mt5SubscriptionHandle handle);
+/// \brief Removes all realtime subscriptions and stops polling when idle.
+MT5BRIDGE_EXPORT int mt5bridge_unsubscribe_all(void);
+/// \brief Delivers queued realtime events on the caller's thread.
+MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
+                                               Mt5SubscriptionEventCallback callback,
+                                               void *user_data);
 
 #ifdef __cplusplus
 }

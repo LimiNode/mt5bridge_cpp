@@ -33,7 +33,7 @@ version-independent.
   string. The caller releases it with `mt5bridge_free()`.
 - `mt5bridge_shutdown()` is idempotent, returns a status, and completes before
   unloading the DLL.
-- ABI 5 is checked by both `mt5bridge::Client` and the ctypes adapter before
+- ABI 6 is checked by both `mt5bridge::Client` and the ctypes adapter before
   use. POD sizes and field offsets are compile-time assertions in `data.h`.
 - Calls that touch Python are serialized. Diagnostics are thread-local and are
   valid until the next call on the same thread.
@@ -78,8 +78,8 @@ in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): the release DLL embeds a
 verified payload and extracts it to a content-addressed per-user cache during
-`mt5bridge_initialize()`. This is intentionally deferred until the realtime
-subscription ABI is stable.
+`mt5bridge_initialize()`. With the realtime subscription ABI now defined, the
+next packaging milestone can implement this without changing the data plane.
 
 ## Runtime lifecycle limit
 

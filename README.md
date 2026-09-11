@@ -122,8 +122,10 @@ embedded runtime cannot discover it automatically.
 
 ## Notes
 
-- The current public contract is ABI 5. Tick POD records preserve separate
+- The current public contract is ABI 6. Tick POD records preserve separate
   integer `volume` and floating-point `volume_real` fields.
+- Realtime consumers use `mt5bridge_subscribe_ticks()` and host-driven
+  `mt5bridge_process_events()`; overflow is reported as an explicit GAP event.
 - Only 64‑bit Windows builds are supported.
 - Python 3.11+ is required.
 - The C++ client resolves the DLL to an absolute path and restricts dependency

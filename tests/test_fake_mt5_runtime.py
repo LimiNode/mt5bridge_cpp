@@ -218,7 +218,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Loads the DLL and installs the deterministic fake module."""
         if ctypes.sizeof(Mt5TicksRequest) != 32 or ctypes.sizeof(Mt5Tick) != 56:
-            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 5")
+            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 6")
         dll_path = os.environ.get("MT5BRIDGE_DLL")
         if not dll_path:
             raise unittest.SkipTest("set MT5BRIDGE_DLL to a built mt5_bridge.dll")
@@ -269,8 +269,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             c_void_p,
         ]
         cls.module.mt5bridge_copy_ticks_range.restype = c_int
-        if cls.module.mt5bridge_abi_version() != 5:
-            raise unittest.SkipTest("test DLL does not expose ABI version 5")
+        if cls.module.mt5bridge_abi_version() != 6:
+            raise unittest.SkipTest("test DLL does not expose ABI version 6")
 
     def tearDown(self) -> None:
         """Restores the module registry after each scenario."""

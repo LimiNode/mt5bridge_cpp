@@ -10,12 +10,15 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <condition_variable>
 #include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <deque>
 #include <utility>
 #include <vector>
 
@@ -42,6 +45,36 @@ PyThreadState *g_main_thread_state = nullptr;
 std::thread::id g_owner_thread;
 thread_local std::string g_last_error;
 thread_local Mt5FetchDiagnostics g_last_fetch_diagnostics{};
+
+struct RealtimeBatch {
+    uint64_t sequence = 0;
+    std::vector<Mt5Tick> ticks;
+};
+struct RealtimeSource {
+    std::string symbol;
+    uint32_t flags = 0;
+    uint32_t interval_ms = 250;
+    uint32_t max_batch = 1024;
+    uint32_t capacity = 64;
+    std::chrono::steady_clock::time_point next_poll{};
+    uint64_t next_sequence = 1;
+    Mt5SubscriptionStatus status = MT5_SUBSCRIPTION_STARTING;
+    std::deque<RealtimeBatch> ring;
+};
+struct RealtimeSubscription {
+    Mt5SubscriptionHandle handle{};
+    std::shared_ptr<RealtimeSource> source;
+    uint64_t next_sequence = 1;
+    Mt5SubscriptionStatus delivered_status = static_cast<Mt5SubscriptionStatus>(-1);
+};
+std::unordered_map<std::string, std::shared_ptr<RealtimeSource>> g_realtime_sources;
+std::unordered_map<uint64_t, RealtimeSubscription> g_realtime_subscriptions;
+uint64_t g_next_subscription_id = 1;
+uint64_t g_runtime_generation = 0;
+std::thread g_poller;
+std::condition_variable g_poller_cv;
+bool g_poller_stop = false;
+
 
 /// \brief Clears the calling thread's latest market-data diagnostics.
 void clear_fetch_diagnostics() { g_last_fetch_diagnostics = Mt5FetchDiagnostics{}; }
@@ -741,6 +774,76 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
     return true;
 }
 
+/// \brief Polls all active physical realtime sources while the runtime is alive.
+std::string realtime_source_key(const char *symbol, uint32_t flags) {
+    return std::string(symbol) + "\n" + std::to_string(flags);
+}
+
+void realtime_poller() try {
+    for (;;) {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        g_poller_cv.wait_for(lock, std::chrono::milliseconds(20), [] {
+            return g_poller_stop || !g_initialized;
+        });
+        if (g_poller_stop || !g_initialized)
+            return;
+        std::vector<std::shared_ptr<RealtimeSource>> sources;
+        for (const auto &entry : g_realtime_sources)
+            sources.push_back(entry.second);
+        if (sources.empty())
+            continue;
+        GilScope gil(true);
+        PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+        if (!mt5) {
+            PyErr_Clear();
+            for (auto &source : sources)
+                source->status = MT5_SUBSCRIPTION_FAILED;
+            continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        for (auto &source : sources) {
+            if (now < source->next_poll)
+                continue;
+            source->next_poll = now + std::chrono::milliseconds(source->interval_ms);
+            const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<
+                std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+            const int64_t from_msc = source->ring.empty() ? now_msc - source->interval_ms * 4
+                                                           : source->ring.back().ticks.back().time_msc;
+            PyRef from(make_datetime(std::max<int64_t>(0, from_msc)));
+            if (!from)
+                continue;
+            PyRef ticks(PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
+                                            source->symbol.c_str(), from.get(),
+                                            static_cast<int>(source->max_batch),
+                                            static_cast<int>(source->flags)));
+            if (!ticks || ticks.get() == Py_None) {
+                PyErr_Clear();
+                source->status = MT5_SUBSCRIPTION_RECONNECTING;
+                continue;
+            }
+            std::vector<Mt5Tick> values;
+            if (!copy_ticks_array(ticks.get(), &values)) {
+                PyErr_Clear();
+                source->status = MT5_SUBSCRIPTION_FAILED;
+                continue;
+            }
+            source->status = MT5_SUBSCRIPTION_READY;
+            if (values.empty())
+                continue;
+            RealtimeBatch batch;
+            batch.sequence = source->next_sequence++;
+            batch.ticks = std::move(values);
+            source->ring.push_back(std::move(batch));
+            while (source->ring.size() > source->capacity)
+                source->ring.pop_front();
+        }
+    }
+} catch (...) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (auto &entry : g_realtime_sources)
+        entry.second->status = MT5_SUBSCRIPTION_FAILED;
+}
+
 } // namespace
 
 extern "C" {
@@ -818,6 +921,8 @@ MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home) try {
     else
         PyGILState_Release(external_gil);
     g_initialized = true;
+    ++g_runtime_generation;
+    g_poller_stop = false;
     return 0;
 } catch (...) {
     set_current_exception_error();
@@ -825,7 +930,9 @@ MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home) try {
 }
 
 MT5BRIDGE_API int mt5bridge_shutdown() try {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::thread poller;
+    {
+    std::unique_lock<std::mutex> lock(g_mutex);
     clear_error();
     if (!g_initialized)
         return 0;
@@ -836,6 +943,14 @@ MT5BRIDGE_API int mt5bridge_shutdown() try {
         set_error("runtime shutdown requires initialize owner thread");
         return -1;
     }
+
+    g_poller_stop = true;
+    g_poller_cv.notify_all();
+    poller = std::move(g_poller);
+    }
+    if (poller.joinable())
+        poller.join();
+    std::unique_lock<std::mutex> lock(g_mutex);
 
     int shutdown_status = 0;
     if (g_owns_interpreter) {
@@ -868,6 +983,8 @@ MT5BRIDGE_API int mt5bridge_shutdown() try {
     }
     g_owns_interpreter = false;
     g_initialized = false;
+    g_realtime_subscriptions.clear();
+    g_realtime_sources.clear();
     if (shutdown_status != 0 && g_last_error.empty())
         set_error("CPython finalization failed");
     return shutdown_status;
@@ -1234,6 +1351,190 @@ MT5BRIDGE_EXPORT int mt5bridge_last_fetch_diagnostics(Mt5FetchDiagnostics *diagn
         return -1;
     *diagnostics = g_last_fetch_diagnostics;
     return 0;
+}
+
+MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *request,
+                                                Mt5SubscriptionHandle *handle) try {
+    if (handle)
+        *handle = Mt5SubscriptionHandle{};
+    if (!request || !handle || !request->symbol_utf8 || !*request->symbol_utf8 ||
+        request->reserved != 0) {
+        set_error("valid subscription request and handle are required");
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    clear_error();
+    if (!g_initialized) {
+        set_error("bridge not initialized");
+        return -1;
+    }
+    const uint32_t interval = request->interval_ms ? request->interval_ms : 250u;
+    const uint32_t max_batch = request->max_batch ? request->max_batch : 1024u;
+    const uint32_t capacity = request->queue_capacity ? request->queue_capacity : 64u;
+    if (interval < 10u || max_batch == 0 || capacity == 0) {
+        set_error("invalid subscription limits");
+        return -1;
+    }
+    uint32_t effective_flags = request->flags;
+    if (effective_flags == 0) {
+        GilScope gil(true);
+        PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+        if (mt5)
+            effective_flags = static_cast<uint32_t>(resolve_tick_flags(mt5.get(), 0));
+        else
+            PyErr_Clear();
+    }
+    const std::string key = realtime_source_key(request->symbol_utf8, effective_flags);
+    auto source_it = g_realtime_sources.find(key);
+    std::shared_ptr<RealtimeSource> source;
+    if (source_it == g_realtime_sources.end()) {
+        source = std::make_shared<RealtimeSource>();
+        source->symbol = request->symbol_utf8;
+        source->flags = effective_flags;
+        source->interval_ms = interval;
+        source->max_batch = max_batch;
+        source->capacity = capacity;
+        source->next_poll = std::chrono::steady_clock::now();
+        g_realtime_sources.emplace(key, source);
+    } else {
+        source = source_it->second;
+        source->interval_ms = std::min(source->interval_ms, interval);
+        source->max_batch = std::max(source->max_batch, max_batch);
+        source->capacity = std::max(source->capacity, capacity);
+    }
+    RealtimeSubscription subscription;
+    subscription.handle = Mt5SubscriptionHandle{g_runtime_generation, g_next_subscription_id++};
+    subscription.source = std::move(source);
+    subscription.next_sequence = subscription.source->next_sequence;
+    g_realtime_subscriptions.emplace(subscription.handle.id, std::move(subscription));
+    if (!g_poller.joinable()) {
+        g_poller_stop = false;
+        g_poller = std::thread(realtime_poller);
+    }
+    *handle = Mt5SubscriptionHandle{g_runtime_generation, g_next_subscription_id - 1};
+    g_poller_cv.notify_all();
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_EXPORT int mt5bridge_unsubscribe(Mt5SubscriptionHandle handle) try {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    clear_error();
+    if (handle.generation != g_runtime_generation || handle.id == 0) {
+        set_error("stale subscription handle");
+        return -1;
+    }
+    const auto it = g_realtime_subscriptions.find(handle.id);
+    if (it == g_realtime_subscriptions.end()) {
+        set_error("unknown subscription handle");
+        return -1;
+    }
+    g_realtime_subscriptions.erase(it);
+    for (auto it_source = g_realtime_sources.begin(); it_source != g_realtime_sources.end();) {
+        bool used = false;
+        for (const auto &entry : g_realtime_subscriptions)
+            if (entry.second.source == it_source->second) { used = true; break; }
+        if (!used)
+            it_source = g_realtime_sources.erase(it_source);
+        else
+            ++it_source;
+    }
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_EXPORT int mt5bridge_unsubscribe_all(void) try {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    clear_error();
+    g_realtime_subscriptions.clear();
+    g_realtime_sources.clear();
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
+                                               Mt5SubscriptionEventCallback callback,
+                                               void *user_data) try {
+    if (!callback) {
+        set_error("subscription callback is required");
+        return -1;
+    }
+    size_t limit = max_events;
+    if (limit == 0) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (const auto &entry : g_realtime_subscriptions)
+            limit += entry.second.source->ring.size() + 1u;
+    }
+    int delivered = 0;
+    while (static_cast<size_t>(delivered) < limit) {
+        Mt5SubscriptionEvent event{};
+        std::vector<Mt5Tick> tick_copy;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            for (auto &entry : g_realtime_subscriptions) {
+                auto &subscription = entry.second;
+                auto &source = subscription.source;
+                if (subscription.delivered_status != source->status) {
+                    subscription.delivered_status = source->status;
+                    event.type = MT5_SUBSCRIPTION_STATUS;
+                    event.status = source->status;
+                    event.handle = subscription.handle;
+                    found = true;
+                    break;
+                }
+                if (source->ring.empty())
+                    continue;
+                const uint64_t oldest = source->ring.front().sequence;
+                if (subscription.next_sequence < oldest) {
+                    event.type = MT5_SUBSCRIPTION_GAP;
+                    event.status = source->status;
+                    event.handle = subscription.handle;
+                    event.sequence = oldest;
+                    event.dropped = oldest - subscription.next_sequence;
+                    subscription.next_sequence = oldest;
+                    found = true;
+                    break;
+                }
+                for (const auto &batch : source->ring) {
+                    if (batch.sequence < subscription.next_sequence)
+                        continue;
+                    tick_copy = batch.ticks;
+                    event.type = MT5_SUBSCRIPTION_TICK_BATCH;
+                    event.status = source->status;
+                    event.handle = subscription.handle;
+                    event.sequence = batch.sequence;
+                    event.ticks = tick_copy.data();
+                    event.count = tick_copy.size();
+                    subscription.next_sequence = batch.sequence + 1;
+                    found = true;
+                    break;
+                }
+                if (found)
+                    break;
+            }
+        }
+        if (!found)
+            break;
+        try {
+            if (callback(&event, user_data) != 0)
+                break;
+        } catch (...) {
+            set_error("subscription callback threw an exception");
+            return -1;
+        }
+        ++delivered;
+    }
+    return delivered;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
 }
 
 } // extern "C"

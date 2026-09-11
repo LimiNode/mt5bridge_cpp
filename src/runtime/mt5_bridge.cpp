@@ -821,7 +821,10 @@ void realtime_poller() try {
                                             static_cast<int>(source->flags)));
             if (!ticks || ticks.get() == Py_None) {
                 PyErr_Clear();
+                const int code = mt5_last_error_code(mt5.get());
                 source->status = MT5_SUBSCRIPTION_RECONNECTING;
+                if (is_ipc_error(code))
+                    reinitialize_terminal(mt5.get());
                 continue;
             }
             std::vector<Mt5Tick> values;

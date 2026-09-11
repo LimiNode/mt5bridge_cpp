@@ -137,6 +137,19 @@ typedef struct Mt5SubscriptionEvent {
     int32_t reserved;              ///< Reserved; must be zero.
 } Mt5SubscriptionEvent;
 
+/// \struct Mt5SubscriptionDiagnostics
+/// \brief Latest source health and reconciliation counters.
+typedef struct Mt5SubscriptionDiagnostics {
+    int32_t last_mt5_error;      ///< Last MT5 error observed by the source.
+    uint32_t reconnects;         ///< Successful terminal reconnects.
+    uint32_t consecutive_failures; ///< Consecutive failed polls.
+    int64_t history_lag_ms;      ///< Age of the newest observed tick.
+    uint64_t poll_duration_us;    ///< Duration of the latest poll call.
+    uint32_t history_rewrites;   ///< Observable overlap rewrite count.
+    uint32_t gap_reason;          ///< 0 none, 1 consumer overflow, 2 source inconsistency.
+    Mt5SubscriptionStatus status; ///< Current source status.
+} Mt5SubscriptionDiagnostics;
+
 /// \brief Callback invoked by mt5bridge_process_events().
 typedef int (*Mt5SubscriptionEventCallback)(const Mt5SubscriptionEvent *event,
                                             void *user_data);
@@ -178,6 +191,8 @@ static_assert(sizeof(Mt5SubscriptionHandle) == 16,
               "Mt5SubscriptionHandle ABI size changed");
 static_assert(sizeof(Mt5SubscriptionEvent) == 64,
               "Mt5SubscriptionEvent ABI size changed");
+static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
+              "Mt5SubscriptionDiagnostics ABI size changed");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(Mt5Tick) == 56, "Mt5Tick ABI size changed");
 _Static_assert(offsetof(Mt5Tick, volume) == 32, "Mt5Tick ABI offsets changed");
@@ -197,6 +212,8 @@ _Static_assert(sizeof(Mt5SubscriptionHandle) == 16,
                "Mt5SubscriptionHandle ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionEvent) == 64,
                "Mt5SubscriptionEvent ABI size changed");
+_Static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
+               "Mt5SubscriptionDiagnostics ABI size changed");
 #endif
 
 /// \struct Mt5TickBuffer
@@ -300,6 +317,9 @@ MT5BRIDGE_EXPORT int mt5bridge_unsubscribe_all(void);
 MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
                                                Mt5SubscriptionEventCallback callback,
                                                void *user_data);
+/// \brief Copies diagnostics for one realtime source.
+MT5BRIDGE_EXPORT int mt5bridge_subscription_diagnostics(Mt5SubscriptionHandle handle,
+                                                         Mt5SubscriptionDiagnostics *diagnostics);
 
 #ifdef __cplusplus
 }

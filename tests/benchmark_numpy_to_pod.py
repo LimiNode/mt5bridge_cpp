@@ -120,7 +120,7 @@ def load_runtime(path: str) -> tuple[ctypes.WinDLL, type[ctypes._CFuncPtr]]:
     """Loads ABI 6 and declares the benchmarked exports."""
     module = ctypes.WinDLL(path)
     module.mt5bridge_abi_version.restype = c_uint32
-    if module.mt5bridge_abi_version() != 4:
+    if module.mt5bridge_abi_version() != 6:
         raise RuntimeError("benchmark requires ABI version 6")
     module.mt5bridge_initialize.argtypes = [ctypes.c_wchar_p]
     module.mt5bridge_initialize.restype = c_int

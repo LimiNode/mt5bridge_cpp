@@ -26,6 +26,18 @@ int wmain(int argc, wchar_t **argv) {
         } catch (const std::runtime_error &) {
         }
         competing_client.shutdown();
+        Mt5SubscriptionRequest subscription_request{"EURUSD", 0, 10, 1, 4, 0};
+        auto subscription = bridge.subscribe_ticks(subscription_request);
+        bool saw_subscription_status = false;
+        auto on_event = [](const Mt5SubscriptionEvent *event, void *context) {
+            if (event && context && event->type == MT5_SUBSCRIPTION_STATUS)
+                *static_cast<bool *>(context) = true;
+            return 0;
+        };
+        bridge.process_events(1, on_event, &saw_subscription_status);
+        if (!saw_subscription_status)
+            return 9;
+        subscription.reset();
         const std::string response = bridge.eval(R"({"method":"terminal_info"})");
         if (response.find("owned_interpreter") == std::string::npos)
             return 3;

@@ -76,6 +76,40 @@ class Mt5Tick(Structure):
     ]
 
 
+class Mt5SubscriptionRequest(Structure):
+    """Matches the ABI 6 realtime subscription request."""
+
+    _fields_ = [
+        ("symbol_utf8", c_char_p),
+        ("flags", c_uint32),
+        ("interval_ms", c_uint32),
+        ("max_batch", c_uint32),
+        ("queue_capacity", c_uint32),
+        ("reserved", c_uint32),
+    ]
+
+
+class Mt5SubscriptionHandle(Structure):
+    """Matches the ABI 6 generation-qualified handle."""
+
+    _fields_ = [("generation", c_uint64), ("id", c_uint64)]
+
+
+class Mt5SubscriptionEvent(Structure):
+    """Matches the borrowed realtime event view."""
+
+    _fields_ = [
+        ("type", c_int32),
+        ("status", c_int32),
+        ("handle", Mt5SubscriptionHandle),
+        ("sequence", c_uint64),
+        ("ticks", c_void_p),
+        ("count", c_size_t),
+        ("dropped", c_uint64),
+        ("reserved", c_int32),
+    ]
+
+
 ## \brief Structured NumPy layout returned by the MetaTrader5 Python package.
 TICK_DTYPE = np.dtype(
     [
@@ -269,6 +303,15 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             c_void_p,
         ]
         cls.module.mt5bridge_copy_ticks_range.restype = c_int
+        cls.module.mt5bridge_subscribe_ticks.argtypes = [
+            POINTER(Mt5SubscriptionRequest), POINTER(Mt5SubscriptionHandle)
+        ]
+        cls.module.mt5bridge_subscribe_ticks.restype = c_int
+        cls.module.mt5bridge_unsubscribe.argtypes = [Mt5SubscriptionHandle]
+        cls.module.mt5bridge_unsubscribe.restype = c_int
+        cls.event_callback_type = ctypes.CFUNCTYPE(c_int, POINTER(Mt5SubscriptionEvent), c_void_p)
+        cls.module.mt5bridge_process_events.argtypes = [c_size_t, cls.event_callback_type, c_void_p]
+        cls.module.mt5bridge_process_events.restype = c_int
         if cls.module.mt5bridge_abi_version() != 6:
             raise unittest.SkipTest("test DLL does not expose ABI version 6")
 
@@ -501,6 +544,38 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(fake.order_calls, 1)
         if response.value:
             self.module.mt5bridge_free(response)
+        self.module.mt5bridge_shutdown()
+
+    def test_realtime_subscription_delivers_tied_timestamp_ticks(self) -> None:
+        """Realtime overlap reconciliation preserves same-time tick multiplicity."""
+        values = page(2000, 3)
+        values[0]["time_msc"] = values[1]["time_msc"] = 2000
+        values[2]["time_msc"] = 2001
+        fake = fake_module([values] * 8)
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        request = Mt5SubscriptionRequest(b"EURUSD", 0, 10, 1, 8, 0)
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        observed: list[int] = []
+
+        def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            value = event.contents
+            if value.type == 0 and value.count:
+                ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[index].time_msc for index in range(value.count))
+            return 0
+
+        native_callback = self.event_callback_type(callback)
+        for _ in range(8):
+            import time
+            time.sleep(0.03)
+            self.module.mt5bridge_process_events(32, native_callback, None)
+            if len(observed) >= 3:
+                break
+        self.assertEqual(observed[:3], [2000, 2000, 2001])
+        self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 
 

@@ -33,6 +33,10 @@ namespace mt5bridge {
 /// Only one initialized Client may own the process-global runtime at a time.
 class Client {
 public:
+    struct SubscriptionState {
+        std::atomic<bool> alive{true};
+        int (*unsubscribe)(Mt5SubscriptionHandle) = nullptr;
+    };
     /// \class Subscription
     /// \brief Move-only RAII owner of a realtime tick subscription.
     class Subscription {
@@ -41,29 +45,32 @@ public:
         ~Subscription() { reset(); }
         Subscription(const Subscription &) = delete;
         Subscription &operator=(const Subscription &) = delete;
-        Subscription(Subscription &&other) noexcept : owner_(other.owner_), handle_(other.handle_) {
-            other.owner_ = nullptr;
+        Subscription(Subscription &&other) noexcept : state_(std::move(other.state_)), handle_(other.handle_) {
             other.handle_ = {};
         }
         Subscription &operator=(Subscription &&other) noexcept {
-            if (this != &other) { reset(); owner_ = other.owner_; handle_ = other.handle_; other.owner_ = nullptr; other.handle_ = {}; }
+            if (this != &other) { reset(); state_ = std::move(other.state_); handle_ = other.handle_; other.handle_ = {}; }
             return *this;
         }
         /// \brief Returns the underlying generation-qualified handle.
         Mt5SubscriptionHandle handle() const noexcept { return handle_; }
         /// \brief Cancels the subscription when still attached to its client.
         void reset() noexcept {
-            if (owner_) {
-                try { if (owner_->unsubscribe_) owner_->unsubscribe_(handle_); } catch (...) {}
-                owner_ = nullptr;
-                handle_ = {};
+            if (auto state = state_.lock()) {
+                try { if (state->alive && state->unsubscribe) state->unsubscribe(handle_); } catch (...) {}
+                state_.reset();
             }
+            handle_ = {};
         }
-        explicit operator bool() const noexcept { return owner_ != nullptr; }
+        explicit operator bool() const noexcept {
+            const auto state = state_.lock();
+            return state && state->alive;
+        }
     private:
         friend class Client;
-        Subscription(Client *owner, Mt5SubscriptionHandle handle) : owner_(owner), handle_(handle) {}
-        Client *owner_ = nullptr;
+        Subscription(std::shared_ptr<SubscriptionState> state, Mt5SubscriptionHandle handle)
+            : state_(std::move(state)), handle_(handle) {}
+        std::weak_ptr<SubscriptionState> state_;
         Mt5SubscriptionHandle handle_{};
     };
     /// \brief Constructs an unloaded client.
@@ -130,16 +137,19 @@ public:
         unsubscribe_ = resolve<Unsubscribe>("mt5bridge_unsubscribe");
         unsubscribe_all_ = resolve<UnsubscribeAll>("mt5bridge_unsubscribe_all");
         process_events_ = resolve<ProcessEvents>("mt5bridge_process_events");
+        subscription_diagnostics_ = resolve<SubscriptionDiagnostics>("mt5bridge_subscription_diagnostics");
         if (!abi_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
             !rate_free_ || !rate_diagnostics_ || !last_fetch_diagnostics_ ||
             !copy_ticks_chunks_ || !subscribe_ticks_ || !unsubscribe_ || !unsubscribe_all_ ||
-            !process_events_ ||
+            !process_events_ || !subscription_diagnostics_ ||
             abi_version_() != MT5BRIDGE_ABI_VERSION) {
             unload();
             throw std::runtime_error("incompatible mt5_bridge.dll ABI");
         }
+        subscription_state_ = std::make_shared<SubscriptionState>();
+        subscription_state_->unsubscribe = unsubscribe_;
     }
 
     /// \brief Shuts down the runtime when needed and releases the DLL handle.
@@ -156,6 +166,9 @@ public:
         active_client_.compare_exchange_strong(expected, nullptr);
         if (initialized_)
             runtime_claimed_ = false;
+        if (subscription_state_)
+            subscription_state_->alive = false;
+        subscription_state_.reset();
         if (module_)
             FreeLibrary(module_);
         module_ = nullptr;
@@ -181,6 +194,7 @@ public:
         unsubscribe_ = nullptr;
         unsubscribe_all_ = nullptr;
         process_events_ = nullptr;
+        subscription_diagnostics_ = nullptr;
         initialized_ = false;
     }
 
@@ -361,7 +375,7 @@ public:
         Mt5SubscriptionHandle handle{};
         if (subscribe_ticks_(&request, &handle) != 0)
             throw std::runtime_error(error_message());
-        return Subscription(this, handle);
+        return Subscription(subscription_state_, handle);
     }
 
     /// \brief Removes a subscription by handle.
@@ -388,6 +402,13 @@ public:
         return status;
     }
 
+    /// \brief Copies health diagnostics for a realtime subscription.
+    bool subscription_diagnostics(Mt5SubscriptionHandle handle,
+                                  Mt5SubscriptionDiagnostics *diagnostics) const noexcept {
+        return subscription_diagnostics_ &&
+               subscription_diagnostics_(handle, diagnostics) == 0;
+    }
+
 private:
     using AbiVersion = std::uint32_t (*)();
     using Initialize = int (*)(const wchar_t *);
@@ -412,6 +433,7 @@ private:
     using Unsubscribe = int (*)(Mt5SubscriptionHandle);
     using UnsubscribeAll = int (*)();
     using ProcessEvents = int (*)(std::size_t, Mt5SubscriptionEventCallback, void *);
+    using SubscriptionDiagnostics = int (*)(Mt5SubscriptionHandle, Mt5SubscriptionDiagnostics *);
 
     /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
     /// \param path Caller-provided DLL path.
@@ -481,6 +503,8 @@ private:
         unsubscribe_ = other.unsubscribe_;
         unsubscribe_all_ = other.unsubscribe_all_;
         process_events_ = other.process_events_;
+        subscription_diagnostics_ = other.subscription_diagnostics_;
+        subscription_state_ = std::move(other.subscription_state_);
         initialized_ = other.initialized_;
         owner_thread_ = other.owner_thread_;
         if (other.initialized_)
@@ -510,6 +534,7 @@ private:
         other.unsubscribe_ = nullptr;
         other.unsubscribe_all_ = nullptr;
         other.process_events_ = nullptr;
+        other.subscription_diagnostics_ = nullptr;
         other.initialized_ = false;
         other.owner_thread_ = std::thread::id{};
     }
@@ -537,6 +562,8 @@ private:
     Unsubscribe unsubscribe_ = nullptr;
     UnsubscribeAll unsubscribe_all_ = nullptr;
     ProcessEvents process_events_ = nullptr;
+    SubscriptionDiagnostics subscription_diagnostics_ = nullptr;
+    std::shared_ptr<SubscriptionState> subscription_state_;
     bool initialized_ = false;
     std::thread::id owner_thread_;
     inline static std::mutex ownership_mutex_;

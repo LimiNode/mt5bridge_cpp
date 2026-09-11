@@ -72,7 +72,10 @@ reconnect, traversal resumes from the last committed cursor.
 range. ABI 6 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`
 creates a logical subscription; equal `(symbol, flags)` requests share one
 physical `copy_ticks_from()` polling source. The source uses the smallest
-requested interval and retains only a bounded ring of batches.
+requested interval and retains only a bounded ring of batches. Each poll
+re-reads a measured overlap window and reconciles full tick payloads as a
+multiset, because MT5 can insert late records, reorder same-time records, or
+return identical payloads for distinct events.
 
 The host calls `mt5bridge_process_events(max_events, callback, user)` from its
 owner loop. Callback views are borrowed until return and contain `TICK_BATCH`,
@@ -80,7 +83,10 @@ owner loop. Callback views are borrowed until return and contain `TICK_BATCH`,
 loss is never silently reported as complete. Consumer overrun is not repaired
 automatically in v1; applications needing lossless recovery should issue a
 historical POD query from their last committed cursor before resuming.
-Handles include a runtime generation and stale handles are rejected.
+Handles include a runtime generation and stale handles are rejected. The
+contract is best-effort lossless relative to observable synchronized MT5
+history; it cannot promise recovery of records that MT5 later rewrites or
+removes.
 Shutdown signals and joins the poller before MetaTrader or CPython teardown.
 
 ## NumPy-to-POD benchmark

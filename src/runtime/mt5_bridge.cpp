@@ -58,6 +58,8 @@ struct RealtimeSource {
     uint32_t capacity = 64;
     std::chrono::steady_clock::time_point next_poll{};
     uint64_t next_sequence = 1;
+    int64_t cursor_time_msc = -1;
+    std::size_t cursor_ordinal = 0;
     Mt5SubscriptionStatus status = MT5_SUBSCRIPTION_STARTING;
     std::deque<RealtimeBatch> ring;
 };
@@ -807,8 +809,9 @@ void realtime_poller() try {
             source->next_poll = now + std::chrono::milliseconds(source->interval_ms);
             const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<
                 std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-            const int64_t from_msc = source->ring.empty() ? now_msc - source->interval_ms * 4
-                                                           : source->ring.back().ticks.back().time_msc;
+            const int64_t from_msc = source->cursor_time_msc >= 0
+                ? source->cursor_time_msc
+                : now_msc - static_cast<int64_t>(source->interval_ms) * 4;
             PyRef from(make_datetime(std::max<int64_t>(0, from_msc)));
             if (!from)
                 continue;
@@ -828,11 +831,26 @@ void realtime_poller() try {
                 continue;
             }
             source->status = MT5_SUBSCRIPTION_READY;
-            if (values.empty())
+            std::vector<Mt5Tick> fresh;
+            fresh.reserve(values.size());
+            std::size_t skipped_at_cursor = 0;
+            for (const auto &tick : values) {
+                if (source->cursor_time_msc >= 0 && tick.time_msc < source->cursor_time_msc)
+                    continue;
+                if (source->cursor_time_msc >= 0 && tick.time_msc == source->cursor_time_msc &&
+                    skipped_at_cursor++ < source->cursor_ordinal)
+                    continue;
+                fresh.push_back(tick);
+            }
+            if (fresh.empty())
                 continue;
+            source->cursor_time_msc = fresh.back().time_msc;
+            source->cursor_ordinal = 0;
+            for (auto it = fresh.rbegin(); it != fresh.rend() && it->time_msc == source->cursor_time_msc; ++it)
+                ++source->cursor_ordinal;
             RealtimeBatch batch;
             batch.sequence = source->next_sequence++;
-            batch.ticks = std::move(values);
+            batch.ticks = std::move(fresh);
             source->ring.push_back(std::move(batch));
             while (source->ring.size() > source->capacity)
                 source->ring.pop_front();

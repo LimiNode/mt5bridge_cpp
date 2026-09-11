@@ -76,6 +76,9 @@ struct RealtimeSource {
     std::chrono::steady_clock::time_point retry_at{};
     Mt5SubscriptionStatus status = MT5_SUBSCRIPTION_STARTING;
     std::deque<RealtimeBatch> ring;
+    uint64_t inconsistency_epoch = 0;
+    int64_t recovery_from_msc = -1;
+    int64_t recovery_to_msc = -1;
 };
 /// \struct RealtimeSubscription
 /// \brief Logical subscriber cursor over a shared source ring.
@@ -88,6 +91,7 @@ struct RealtimeMember {
     uint32_t capacity = 64;
     uint64_t dropped_batches = 0;
     Mt5GapReason last_gap_reason = MT5_GAP_NONE;
+    uint64_t delivered_inconsistency_epoch = 0;
 };
 
 /// \struct RealtimeSubscription
@@ -840,9 +844,7 @@ void realtime_poller() try {
                 if (entry.second->retry_at != std::chrono::steady_clock::time_point{})
                     wake_at = std::min(wake_at, entry.second->retry_at);
             }
-            g_poller_cv.wait_until(lock, wake_at, [] {
-                return g_poller_stop || g_runtime_state != RuntimeState::running;
-            });
+            g_poller_cv.wait_until(lock, wake_at);
             if (g_poller_stop || g_runtime_state != RuntimeState::running)
                 return;
         }
@@ -919,16 +921,47 @@ void realtime_poller() try {
                         if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) break;
                     }
                     const int64_t overlap_from = std::max<int64_t>(0, now_msc - overlap_ms);
-                    PyRef from(make_datetime(overlap_from));
-                    PyRef tail(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
-                        symbol.c_str(), from.get(), static_cast<int>(max_batch), static_cast<int>(flags)) : nullptr);
-                    if (tail && tail.get() != Py_None) {
-                        if (!copy_ticks_array(tail.get(), &reconcile)) { PyErr_Clear(); ok = false; }
-                        reconcile_complete = reconcile.size() < static_cast<std::size_t>(max_batch);
-                        const int tail_code = mt5_last_error_code(mt5.get());
-                        if (is_partial_read_error(tail_code)) partial = true;
-                        if (tail_code != 1) error_code = tail_code;
-                    } else { PyErr_Clear(); }
+                    int64_t tail_from = overlap_from;
+                    std::size_t tail_skip = 0;
+                    for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
+                        const std::size_t boundary_skip = tail_skip;
+                        const uint64_t requested = static_cast<uint64_t>(max_batch) + tail_skip;
+                        const int count = static_cast<int>(std::min<uint64_t>(requested,
+                            static_cast<uint64_t>(std::numeric_limits<int>::max())));
+                        PyRef from(make_datetime(tail_from));
+                        PyRef tail(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
+                            symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
+                        if (!tail || tail.get() == Py_None) {
+                            PyErr_Clear();
+                            error_code = mt5_last_error_code(mt5.get());
+                            partial = is_transient_read_error(error_code);
+                            ok = false;
+                            break;
+                        }
+                        std::vector<Mt5Tick> page;
+                        if (!copy_ticks_array(tail.get(), &page)) { PyErr_Clear(); ok = false; error_code = 0; break; }
+                        error_code = mt5_last_error_code(mt5.get());
+                        if (is_partial_read_error(error_code)) partial = true;
+                        if (page.empty()) { reconcile_complete = true; break; }
+                        const int64_t last_ts = page.back().time_msc;
+                        std::size_t last_count = 0;
+                        for (auto it = page.rbegin(); it != page.rend() && it->time_msc == last_ts; ++it) ++last_count;
+                        for (const auto &tick : page) {
+                            if (tick.time_msc < overlap_from || tick.time_msc > now_msc) continue;
+                            if (tick.time_msc == tail_from && tail_skip != 0) { --tail_skip; continue; }
+                            reconcile.push_back(tick);
+                        }
+                        if (last_ts < tail_from || (last_ts == tail_from && last_count <= boundary_skip)) {
+                            reconcile_complete = true;
+                            break;
+                        }
+                        tail_from = last_ts;
+                        tail_skip = last_count;
+                        if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) {
+                            reconcile_complete = true;
+                            break;
+                        }
+                    }
                     if (is_ipc_error(error_code) && reinitialize_terminal(mt5.get()))
                         reconnected = true;
                 }
@@ -962,6 +995,9 @@ void realtime_poller() try {
                 source->diagnostics.consecutive_failures = source->consecutive_failures;
                 source->status = MT5_SUBSCRIPTION_RECONNECTING;
                 source->diagnostics.status = source->status;
+                const uint32_t shift = std::min<uint32_t>(source->consecutive_failures, 5u);
+                source->retry_at = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(std::min<uint32_t>(5000u, 100u << shift));
             } else {
                 source->consecutive_failures = 0;
                 source->diagnostics.consecutive_failures = 0;
@@ -971,7 +1007,12 @@ void realtime_poller() try {
             }
 
             std::unordered_map<std::string, std::size_t> previous;
-            for (const auto &tick : old_overlap) ++previous[tick_payload_key(tick)];
+            const int64_t current_now_msc = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            const int64_t current_overlap_from = std::max<int64_t>(0, current_now_msc - overlap_ms);
+            for (const auto &tick : old_overlap)
+                if (tick.time_msc >= current_overlap_from)
+                    ++previous[tick_payload_key(tick)];
             std::unordered_map<std::string, std::size_t> forward_keys;
             for (const auto &tick : forward) ++forward_keys[tick_payload_key(tick)];
             std::vector<Mt5Tick> fresh = std::move(forward);
@@ -982,8 +1023,13 @@ void realtime_poller() try {
                 if (it != previous.end() && it->second != 0) { --it->second; continue; }
                 auto fit = forward_keys.find(key);
                 if (fit != forward_keys.end() && fit->second != 0) { --fit->second; continue; }
-                if (cursor >= 0 && tick.time_msc <= cursor) rewrite = true;
-                else fresh.push_back(tick);
+                if (cursor >= 0 && tick.time_msc <= cursor) {
+                    rewrite = true;
+                    // Preserve late inserts for consumers in an explicit recovery batch.
+                    fresh.push_back(tick);
+                } else {
+                    fresh.push_back(tick);
+                }
             }
             if (reconcile_complete)
                 for (const auto &entry : previous)
@@ -991,8 +1037,12 @@ void realtime_poller() try {
             if (rewrite) {
                 ++source->diagnostics.history_rewrites;
                 source->diagnostics.gap_reason = MT5_GAP_SOURCE_INCONSISTENCY;
+                ++source->inconsistency_epoch;
+                source->recovery_from_msc = cursor >= 0 ? std::max<int64_t>(0, cursor - overlap_ms) : 0;
+                source->recovery_to_msc = cursor;
             }
-            if (!reconcile.empty()) source->overlap_snapshot = std::move(reconcile);
+            if (reconcile_complete)
+                source->overlap_snapshot = std::move(reconcile);
             const auto observed = !source->overlap_snapshot.empty() ? source->overlap_snapshot.back().time_msc :
                 (!fresh.empty() ? fresh.back().time_msc : -1);
             if (observed >= 0) {
@@ -1577,6 +1627,11 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
         set_error("invalid subscription limits");
         return -1;
     }
+    if (request->stale_after_ms != 0 &&
+        (request->delivery_flags & MT5_DELIVERY_COHERENT_SNAPSHOT) == 0) {
+        set_error("stale_after_ms requires coherent snapshot delivery");
+        return -1;
+    }
     if ((request->delivery_flags & MT5_DELIVERY_COHERENT_SNAPSHOT) != 0) {
         set_error("coherent snapshots are not implemented yet");
         return -1;
@@ -1740,6 +1795,22 @@ MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
                         event.status = source->status;
                         event.handle = subscription.handle;
                         event.source_index = static_cast<uint32_t>(member_index);
+                        found = true;
+                        subscription.member_cursor = (member_index + 1) % member_count;
+                        g_rr_cursor = (index + 1) % subscription_count;
+                        break;
+                    }
+                    if (member.delivered_inconsistency_epoch < source->inconsistency_epoch) {
+                        event.type = MT5_SUBSCRIPTION_GAP;
+                        event.status = source->status;
+                        event.handle = subscription.handle;
+                        event.source_index = static_cast<uint32_t>(member_index);
+                        event.sequence = source->next_sequence;
+                        event.gap_reason = MT5_GAP_SOURCE_INCONSISTENCY;
+                        event.recovery_from_msc = source->recovery_from_msc;
+                        event.recovery_to_msc = source->recovery_to_msc;
+                        member.delivered_inconsistency_epoch = source->inconsistency_epoch;
+                        member.last_gap_reason = MT5_GAP_SOURCE_INCONSISTENCY;
                         found = true;
                         subscription.member_cursor = (member_index + 1) % member_count;
                         g_rr_cursor = (index + 1) % subscription_count;

@@ -136,6 +136,7 @@ typedef int32_t Mt5SubscriptionEventType;
 #define MT5_SUBSCRIPTION_TICK_BATCH ((Mt5SubscriptionEventType)0)
 #define MT5_SUBSCRIPTION_STATUS ((Mt5SubscriptionEventType)1)
 #define MT5_SUBSCRIPTION_GAP ((Mt5SubscriptionEventType)2)
+#define MT5_SUBSCRIPTION_SNAPSHOT ((Mt5SubscriptionEventType)3)
 
 /// \typedef Mt5GapReason
 /// \brief Classifies why a realtime consumer observed a discontinuity.
@@ -143,6 +144,8 @@ typedef int32_t Mt5GapReason;
 #define MT5_GAP_NONE ((Mt5GapReason)0)
 #define MT5_GAP_CONSUMER_OVERFLOW ((Mt5GapReason)1)
 #define MT5_GAP_SOURCE_INCONSISTENCY ((Mt5GapReason)2)
+
+typedef struct Mt5SnapshotView Mt5SnapshotView;
 
 /// \struct Mt5SubscriptionEvent
 /// \brief Borrowed event view valid only during the process-events callback.
@@ -156,6 +159,9 @@ typedef struct Mt5SubscriptionEvent {
     size_t count;                  ///< Number of elements in \p ticks.
     uint64_t dropped;              ///< Number of batches lost before a GAP event.
     Mt5GapReason gap_reason;       ///< Reason for GAP events, or MT5_GAP_NONE.
+    int64_t recovery_from_msc;     ///< Inclusive recovery range for source GAP events.
+    int64_t recovery_to_msc;       ///< Inclusive recovery range for source GAP events.
+    const Mt5SnapshotView *snapshot; ///< Snapshot payload, or NULL for non-snapshot events.
 } Mt5SubscriptionEvent;
 
 /// \struct Mt5SubscriptionDiagnostics
@@ -212,7 +218,7 @@ static_assert(sizeof(Mt5SubscriptionRequest) == 48,
               "Mt5SubscriptionRequest ABI size changed");
 static_assert(sizeof(Mt5SubscriptionHandle) == 16,
               "Mt5SubscriptionHandle ABI size changed");
-static_assert(sizeof(Mt5SubscriptionEvent) == 72,
+static_assert(sizeof(Mt5SubscriptionEvent) == 96,
               "Mt5SubscriptionEvent ABI size changed");
 static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
               "Mt5SubscriptionDiagnostics ABI size changed");
@@ -235,7 +241,7 @@ _Static_assert(sizeof(Mt5SubscriptionRequest) == 48,
                "Mt5SubscriptionRequest ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionHandle) == 16,
                "Mt5SubscriptionHandle ABI size changed");
-_Static_assert(sizeof(Mt5SubscriptionEvent) == 72,
+_Static_assert(sizeof(Mt5SubscriptionEvent) == 96,
                "Mt5SubscriptionEvent ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionDiagnostics) == 48,
                "Mt5SubscriptionDiagnostics ABI size changed");
@@ -251,14 +257,14 @@ typedef struct Mt5SnapshotItem {
 
 /// \struct Mt5SnapshotView
 /// \brief Reserved borrowed view for future coherent multi-source snapshots.
-typedef struct Mt5SnapshotView {
+struct Mt5SnapshotView {
     const Mt5SnapshotItem *items; ///< Borrowed item array.
     size_t count;                 ///< Number of items in \p items.
     uint64_t watermark_msc;       ///< Common watermark in Unix milliseconds.
     uint32_t stale_after_ms;      ///< Configured staleness threshold.
     uint32_t stale_count;         ///< Number of stale sources.
     uint32_t reserved[2];         ///< Reserved; must be zero.
-} Mt5SnapshotView;
+};
 
 /// \struct Mt5TickBuffer
 /// \brief Opaque DLL-owned collection of Mt5Tick values.

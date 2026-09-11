@@ -18,7 +18,7 @@ bounded tick callback. Responses and buffers are allocated and released by the
 DLL. Keep all implementation libraries and Python objects private. The
 header-only `mt5bridge::Client` validates the version before resolving calls.
 
-The original control/data contract was ABI version 5. ABI 6 adds the realtime
+The original control/data contract was ABI version 5. ABI 7 adds the realtime
 subscription records and exports. Any incompatible change to exported
 signatures or POD layout requires a version bump and a coordinated client
 update.

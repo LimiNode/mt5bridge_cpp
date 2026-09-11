@@ -36,6 +36,7 @@ public:
     struct SubscriptionState {
         std::atomic<bool> alive{true};
         int (*unsubscribe)(Mt5SubscriptionHandle) = nullptr;
+        std::thread::id owner_thread{};
     };
     /// \class Subscription
     /// \brief Move-only RAII owner of a realtime tick subscription.
@@ -55,9 +56,15 @@ public:
         /// \brief Returns the underlying generation-qualified handle.
         Mt5SubscriptionHandle handle() const noexcept { return handle_; }
         /// \brief Cancels the subscription when still attached to its client.
+        /// \warning Reset must run on the Client owner thread; cross-thread
+        /// reset defers cancellation until Client::unload().
         void reset() noexcept {
             if (auto state = state_.lock()) {
-                try { if (state->alive && state->unsubscribe) state->unsubscribe(handle_); } catch (...) {}
+                // The DLL function pointer is valid only while Client is loaded.
+                // Cross-thread reset leaves cancellation to Client::unload().
+                if (state->owner_thread == std::this_thread::get_id()) {
+                    try { if (state->alive && state->unsubscribe) state->unsubscribe(handle_); } catch (...) {}
+                }
                 state_.reset();
             }
             handle_ = {};
@@ -151,6 +158,7 @@ public:
         }
         subscription_state_ = std::make_shared<SubscriptionState>();
         subscription_state_->unsubscribe = unsubscribe_;
+        subscription_state_->owner_thread = std::this_thread::get_id();
     }
 
     /// \brief Shuts down the runtime when needed and releases the DLL handle.

@@ -66,10 +66,10 @@ one timestamp cannot stall the reader. A page that does not advance either the
 timestamp or its consumed ordinal fails instead of looping forever. On IPC
 reconnect, traversal resumes from the last committed cursor.
 
-## Realtime subscriptions (ABI 6)
+## Realtime subscriptions (ABI 7)
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
-range. ABI 6 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`
+range. ABI 7 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`
 accepts an array of `Mt5TickSourceRequest`; one handle may group several
 symbols, while equal `(symbol, flags)` requests share one physical
 `copy_ticks_from()` polling source. A single symbol is a one-element array and
@@ -102,7 +102,10 @@ contract is best-effort lossless relative to observable synchronized MT5
 history; it cannot promise recovery of records that MT5 later rewrites or
 removes. `MT5_DELIVERY_COHERENT_SNAPSHOT` is reserved for the next snapshot
 phase and is rejected until watermark/staleness semantics are implemented. The
-ABI already reserves `Mt5SnapshotItem` and `Mt5SnapshotView` for that extension.
+ABI 7 reserves a tagged snapshot pointer in `Mt5SubscriptionEvent`, together
+with `Mt5SnapshotItem` and `Mt5SnapshotView`, for that extension.
+Until snapshot delivery is implemented, non-zero `stale_after_ms` is rejected
+instead of silently ignored.
 Shutdown signals and joins the poller before MetaTrader or CPython teardown.
 
 ## NumPy-to-POD benchmark

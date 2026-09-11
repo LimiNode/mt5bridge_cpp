@@ -1,4 +1,4 @@
-# ADR 0003: Host-driven realtime subscriptions (ABI 6)
+# ADR 0003: Host-driven realtime subscriptions (ABI 7)
 
 ## Status
 
@@ -7,7 +7,7 @@ Accepted for realtime v1.
 ## Decision
 
 Expose POD-only subscription requests, generation-qualified handles, and a
-borrowed event callback through ABI 6. A request contains one or more
+borrowed event callback through ABI 7. A request contains one or more
 `Mt5TickSourceRequest` entries, making one handle a logical subscription group.
 MT5 has no push tick API in the Python package, so the implementation polls
 `copy_ticks_from()` in one physical source per `(symbol, flags)`. Group members
@@ -23,7 +23,8 @@ RECONNECTING until a clean confirmation is received.
 
 Delivery is host-driven through `mt5bridge_process_events()`. Callbacks execute
 without the runtime mutex and may re-enter the bridge. Event kinds are tick
-batches, lifecycle status, and explicit GAP/overflow notifications. No STL,
+batches, lifecycle status, and explicit GAP/overflow notifications. Source
+inconsistency GAPs carry a recovery time range; no STL,
 Python objects, JSON values, or third-party allocator pointers cross the ABI.
 
 Shutdown rejects new work, signals and joins the poller, then performs
@@ -34,9 +35,10 @@ than silently approximated. Consumer overruns remain explicit and consumers
 use the historical POD API for catch-up.
 Source diagnostics are exported per source index. Consumer GAP/overflow state
 is kept on the logical member and is not attributed to a shared physical
-source. `Mt5GapReason`, `Mt5SnapshotItem`, and `Mt5SnapshotView` reserve the
-ABI representation needed for future coherent snapshots without exposing a
-partial implementation today.
+source. ABI 7 adds recovery range fields and a tagged snapshot pointer to the
+event view. `Mt5SnapshotItem` and `Mt5SnapshotView` reserve the representation
+needed for future coherent snapshots without exposing a partial implementation
+today; snapshot delivery remains explicitly unsupported.
 
 ## Consequences
 

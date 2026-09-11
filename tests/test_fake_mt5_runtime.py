@@ -21,6 +21,8 @@ from ctypes import c_int64, c_size_t, c_uint32, c_uint64, c_void_p
 
 import numpy as np
 
+MT5_GAP_SOURCE_INCONSISTENCY = 2
+
 
 class Mt5TicksRequest(Structure):
     """Matches the versioned C ABI tick request."""
@@ -77,13 +79,13 @@ class Mt5Tick(Structure):
 
 
 class Mt5TickSourceRequest(Structure):
-    """Matches one ABI 6 physical source request."""
+    """Matches one ABI 7 physical source request."""
 
     _fields_ = [("symbol_utf8", c_char_p), ("flags", c_uint32), ("reserved", c_uint32)]
 
 
 class Mt5SubscriptionRequest(Structure):
-    """Matches the ABI 6 multi-source realtime subscription request."""
+    """Matches the ABI 7 multi-source realtime subscription request."""
 
     _fields_ = [
         ("sources", POINTER(Mt5TickSourceRequest)),
@@ -98,7 +100,7 @@ class Mt5SubscriptionRequest(Structure):
 
 
 class Mt5SubscriptionHandle(Structure):
-    """Matches the ABI 6 generation-qualified handle."""
+    """Matches the ABI 7 generation-qualified handle."""
 
     _fields_ = [("generation", c_uint64), ("id", c_uint64)]
 
@@ -115,7 +117,10 @@ class Mt5SubscriptionEvent(Structure):
         ("ticks", c_void_p),
         ("count", c_size_t),
         ("dropped", c_uint64),
-        ("reserved", c_int32),
+        ("gap_reason", c_int32),
+        ("recovery_from_msc", c_int64),
+        ("recovery_to_msc", c_int64),
+        ("snapshot", c_void_p),
     ]
 
 
@@ -285,7 +290,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Loads the DLL and installs the deterministic fake module."""
         if ctypes.sizeof(Mt5TicksRequest) != 32 or ctypes.sizeof(Mt5Tick) != 56:
-            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 6")
+            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 7")
         dll_path = os.environ.get("MT5BRIDGE_DLL")
         if not dll_path:
             raise unittest.SkipTest("set MT5BRIDGE_DLL to a built mt5_bridge.dll")
@@ -349,8 +354,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             Mt5SubscriptionHandle, c_uint32, POINTER(Mt5SubscriptionDiagnostics)
         ]
         cls.module.mt5bridge_subscription_source_diagnostics.restype = c_int
-        if cls.module.mt5bridge_abi_version() != 6:
-            raise unittest.SkipTest("test DLL does not expose ABI version 6")
+        if cls.module.mt5bridge_abi_version() != 7:
+            raise unittest.SkipTest("test DLL does not expose ABI version 7")
 
     def tearDown(self) -> None:
         """Restores the module registry after each scenario."""
@@ -585,10 +590,13 @@ class FakeMt5RuntimeTests(unittest.TestCase):
 
     def test_realtime_subscription_delivers_tied_timestamp_ticks(self) -> None:
         """Realtime overlap reconciliation preserves same-time tick multiplicity."""
-        values = page(2000, 3)
-        values[0]["time_msc"] = values[1]["time_msc"] = 2000
-        values[2]["time_msc"] = 2001
-        fake = fake_module([values] * 8)
+        import time
+        now = int(time.time() * 1000)
+        values = page(now - 2, 3)
+        values[0]["time_msc"] = values[1]["time_msc"] = now - 2
+        values[2]["time_msc"] = now - 1
+        values["time"] = values["time_msc"] // 1000
+        fake = fake_module([], histories={"EURUSD": values})
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
         source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
@@ -606,13 +614,12 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             return 0
 
         native_callback = self.event_callback_type(callback)
-        for _ in range(8):
-            import time
+        for _ in range(30):
             time.sleep(0.03)
             self.module.mt5bridge_process_events(32, native_callback, None)
             if len(observed) >= 3:
                 break
-        self.assertEqual(observed[:3], [2000, 2000, 2001])
+        self.assertEqual(observed, [now - 2, now - 2, now - 1])
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 
@@ -632,14 +639,69 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 1, 64, 0, 0, (0, 0))
         handle = Mt5SubscriptionHandle()
         self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        observed = []
+        def on_event(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            if event.contents.type == 0 and event.contents.count:
+                ticks = ctypes.cast(event.contents.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[i].volume for i in range(event.contents.count))
+            return 0
+        callback = self.event_callback_type(on_event)
         for _ in range(30):
             time.sleep(0.02)
-            self.module.mt5bridge_process_events(128, self.event_callback_type(lambda *_: 0), None)
+            self.module.mt5bridge_process_events(128, callback, None)
+            if len(observed) >= len(values):
+                break
         self.assertGreater(fake.calls, 3)
+        self.assertEqual(len(observed), len(values))
+        self.assertEqual(len(set(observed)), len(values))
         diagnostics = Mt5SubscriptionDiagnostics()
         self.assertEqual(
             self.module.mt5bridge_subscription_source_diagnostics(handle, 0, byref(diagnostics)), 0
         )
+        self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+        self.module.mt5bridge_shutdown()
+
+    def test_realtime_late_insert_emits_recovery_gap(self) -> None:
+        """A late MT5 history insertion is observable and delivered to the consumer."""
+        import time
+        now = int(time.time() * 1000)
+        initial = page(now - 2, 2)
+        initial["time_msc"] = (now - 2, now - 1)
+        initial["time"] = initial["time_msc"] // 1000
+        fake = fake_module([], histories={"EURUSD": initial})
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 2, 16, 0, 0, (0, 0))
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        gaps = []
+        batches = []
+        def on_event(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            value = event.contents
+            if value.type == 2:
+                gaps.append(value.gap_reason)
+            elif value.type == 0:
+                batches.append(value.count)
+            return 0
+        callback = self.event_callback_type(on_event)
+        for _ in range(20):
+            time.sleep(0.03)
+            self.module.mt5bridge_process_events(64, callback, None)
+            if batches:
+                break
+        late = page(now - 3, 3)
+        late["time_msc"] = (now - 3, now - 2, now - 1)
+        late["time"] = late["time_msc"] // 1000
+        fake.histories["EURUSD"] = late
+        for _ in range(30):
+            time.sleep(0.03)
+            self.module.mt5bridge_process_events(64, callback, None)
+            if MT5_GAP_SOURCE_INCONSISTENCY in gaps:
+                break
+        self.assertIn(2, gaps)
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 

@@ -30,7 +30,7 @@ import numpy as np
 
 
 class Mt5TicksRequest(Structure):
-    """Matches the ABI 6 tick request."""
+    """Matches the ABI 7 tick request."""
 
     _fields_ = [
         ("symbol_utf8", c_char_p),
@@ -42,7 +42,7 @@ class Mt5TicksRequest(Structure):
 
 
 class Mt5Tick(Structure):
-    """Matches the ABI 6 tick record."""
+    """Matches the ABI 7 tick record."""
 
     _fields_ = [
         ("time_msc", c_int64),
@@ -117,11 +117,11 @@ def make_fake_module(values: np.ndarray) -> types.ModuleType:
 
 
 def load_runtime(path: str) -> tuple[ctypes.WinDLL, type[ctypes._CFuncPtr]]:
-    """Loads ABI 6 and declares the benchmarked exports."""
+    """Loads ABI 7 and declares the benchmarked exports."""
     module = ctypes.WinDLL(path)
     module.mt5bridge_abi_version.restype = c_uint32
-    if module.mt5bridge_abi_version() != 6:
-        raise RuntimeError("benchmark requires ABI version 6")
+    if module.mt5bridge_abi_version() != 7:
+        raise RuntimeError("benchmark requires ABI version 7")
     module.mt5bridge_initialize.argtypes = [ctypes.c_wchar_p]
     module.mt5bridge_initialize.restype = c_int
     module.mt5bridge_shutdown.argtypes = []

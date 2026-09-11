@@ -33,7 +33,7 @@ version-independent.
   string. The caller releases it with `mt5bridge_free()`.
 - `mt5bridge_shutdown()` is idempotent, returns a status, and completes before
   unloading the DLL.
-- ABI 6 is checked by both `mt5bridge::Client` and the ctypes adapter before
+- ABI 7 is checked by both `mt5bridge::Client` and the ctypes adapter before
   use. POD sizes and field offsets are compile-time assertions in `data.h`.
 - Calls that touch Python are serialized. Diagnostics are thread-local and are
   valid until the next call on the same thread.

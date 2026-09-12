@@ -248,7 +248,10 @@ def fake_module(
         else:
             result = sequence.pop(0) if sequence else page(2000, 0)
         if callable(result):
-            result = result()
+            try:
+                result = result(when)
+            except TypeError:
+                result = result()
         if isinstance(result, tuple):
             result, code, message = result
             module.last = (code, message)
@@ -704,9 +707,9 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         base: list[int] = []
         expected: list[int] = []
 
-        def make_page(count: int) -> np.ndarray:
+        def make_page(count: int, when: object | None = None) -> np.ndarray:
             if not base:
-                base.append(int(time.time() * 1000))
+                base.append(int(when.timestamp() * 1000) if when is not None else int(time.time() * 1000))
             values = page(base[0], count)
             values["time_msc"] = tuple(base[0] + index for index in range(count))
             values["time"] = values["time_msc"] // 1000
@@ -717,10 +720,10 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         fake = fake_module(
             [],
             history_sequence=[
-                lambda: (make_page(1), -10005, "IPC timeout"),
-                lambda: make_page(2),
-                lambda: make_page(3),
-                lambda: make_page(3),
+                lambda when: (make_page(1, when), -10005, "IPC timeout"),
+                lambda when: make_page(2, when),
+                lambda when: make_page(3, when),
+                lambda when: make_page(3, when),
             ],
         )
         sys.modules["MetaTrader5"] = fake

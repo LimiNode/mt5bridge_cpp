@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-#include <mt5bridge/client.hpp>
+#include <mt5bridge.hpp>
 
 namespace {
 

@@ -81,7 +81,7 @@ development workflow still uses the explicit runtime directory.
 ## Example usage
 
 ```cpp
-#include <mt5bridge/client.hpp>
+#include <mt5bridge.hpp>
 #include <iostream>
 
 int main() {

@@ -2,7 +2,7 @@
 /// \brief Demonstrates loading the runtime and requesting terminal information.
 
 #include <iostream>
-#include <mt5bridge/client.hpp>
+#include <mt5bridge.hpp>
 
 /// \brief Runs the terminal-information example.
 /// \return Zero on success; non-zero when initialization or evaluation fails.

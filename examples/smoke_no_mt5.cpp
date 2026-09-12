@@ -2,7 +2,7 @@
 /// \brief Exercises runtime loading and a minimal market-data control request.
 
 #include <iostream>
-#include <mt5bridge/client.hpp>
+#include <mt5bridge.hpp>
 
 /// \brief Runs the basic bridge smoke scenario.
 /// \return Zero on success; non-zero when initialization or evaluation fails.

@@ -68,8 +68,9 @@ is `mt5_bridge` and is optional via `MT5BRIDGE_BUILD_RUNTIME=OFF`. This keeps
 `Python3::Python` a PRIVATE build dependency of the DLL rather than a dependency
 of applications that only consume the client header.
 
-Source layout mirrors the split: `include/mt5bridge/abi.h` and
-`include/mt5bridge/client.hpp` plus `include/mt5bridge/data.h` are
+Source layout mirrors the split: `include/mt5bridge.hpp` is the stable umbrella;
+the focused headers `include/mt5bridge/abi.h`,
+`include/mt5bridge/client.hpp` and `include/mt5bridge/data.h` are
 consumer-facing, while
 `src/runtime/mt5_bridge.cpp` is the CPython-backed implementation.
 

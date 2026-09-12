@@ -1,7 +1,7 @@
 /// \file mt5_bridge.cpp
 /// \brief Implements the CPython-backed mt5_bridge.dll runtime.
 
-#include "mt5bridge/mt5bridge.hpp"
+#include <mt5bridge/abi.h>
 #include "mt5bridge/data.h"
 
 #include <Python.h>

@@ -22,11 +22,12 @@ diagnostics and security harder.
 ## Decision
 
 Release the runtime as a self-extracting `mt5_bridge.dll` from the consumer's
-point of view, while extracting the embedded runtime payload to a private,
-content-addressed directory before CPython initialization:
+point of view, using a bootstrap/core split. The public bootstrap has no
+import-time dependency on CPython; it extracts the embedded runtime payload to
+a private, content-addressed directory and then loads the core implementation:
 
 ```text
-mt5_bridge.dll
+mt5_bridge.dll                  // bootstrap, stable C ABI, no Python import
     embedded compressed payload
         -> %LOCALAPPDATA%\\LimiNode\\mt5bridge\\runtime\\<payload-hash>\\
              python311.dll
@@ -34,7 +35,14 @@ mt5_bridge.dll
              site-packages/NumPy/
              site-packages/MetaTrader5/
              dependent runtime DLLs
+         mt5_bridge_runtime.dll // current CPython-backed implementation
 ```
+
+`mt5_bridge_runtime.dll` may link directly to `Python3::Python`, because it is
+loaded only after the extracted `python311.dll` is available. The bootstrap
+resolves and forwards the exported C ABI through function pointers. Delay-load
+Python is not the primary design: it would require proving that no Python
+symbol is touched before extraction and loader configuration.
 
 Extraction is performed by `mt5bridge_initialize()`, never from `DllMain`.
 The implementation must:
@@ -43,15 +51,21 @@ The implementation must:
    global or the current working directory;
 2. verify the embedded payload hash (and, for published builds, its release
    signature) before loading it;
-3. use a named process lock and a staging directory followed by an atomic
-   rename, so two processes cannot observe a partial runtime;
-4. configure `PyConfig.home` and module search paths to the extracted runtime;
-5. use restricted DLL search directories (`AddDllDirectory` /
-   `LOAD_LIBRARY_SEARCH_*`) rather than globally prepending the payload to
-   `PATH`;
-6. retain extracted versions for concurrent/rollback use and clean them only
+3. validate an existing cache against a signed manifest before reusing it;
+4. reject archive entries containing absolute paths, `..`, alternate data
+   streams, symlinks, junctions, or other reparse points;
+5. use a named process lock and a same-volume staging directory followed by an
+   atomic rename; if another process published the final directory first,
+   verify and reuse it without overwriting it;
+6. configure `PyConfig.home` and module search paths to the extracted runtime;
+7. load the core and dependencies with absolute paths and
+   `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`.
+   Do not call `SetDefaultDllDirectories()` because it changes the host
+   process-wide policy. Use `AddDllDirectory()` only when required, retain its
+   cookie, and remove it during teardown;
+8. retain extracted versions for concurrent/rollback use and clean them only
    through a separate, safe cache-retention policy;
-7. report extraction, hash, Python, NumPy, and MetaTrader5 failures through the
+9. report extraction, hash, Python, NumPy, and MetaTrader5 failures through the
    existing actionable diagnostics surface.
 
 The first implementation should package a proper Windows embeddable Python
@@ -77,12 +91,13 @@ remains the diagnostic fallback for development and clean-machine testing.
 
 ## Delivery sequence
 
-1. Stabilize realtime subscriptions and assign the next incompatible ABI
-   version (expected ABI v6 if the public C surface changes).
+1. Stabilize realtime subscriptions and assign ABI v7 (completed in the
+   realtime branch).
 2. Build and validate an external runtime ZIP on a clean Windows machine.
-3. Add payload manifest/hash verification and extraction tests.
-4. Embed the same verified payload into the release DLL.
-5. Test first-run extraction, cached startup, concurrent processes, corrupted
+3. Split the current implementation into bootstrap and
+   `mt5_bridge_runtime.dll`; verify that the bootstrap has no Python imports.
+4. Add payload manifest/hash verification and extraction tests.
+5. Embed the same verified payload into the release DLL.
+6. Test first-run extraction, cached startup, concurrent processes, corrupted
    payloads, read-only cache locations, missing VC runtime, shutdown, and
    upgrade/rollback behavior.
-

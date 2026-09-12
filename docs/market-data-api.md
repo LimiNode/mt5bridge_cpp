@@ -66,14 +66,70 @@ one timestamp cannot stall the reader. A page that does not advance either the
 timestamp or its consumed ordinal fails instead of looping forever. On IPC
 reconnect, traversal resumes from the last committed cursor.
 
-## Realtime boundary
+## Realtime subscriptions (ABI 7)
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
-range. ABI 5 does not expose `subscribe_ticks()` and must not be described as a
-live subscription API. A future realtime layer must persist the committed
-`(time_msc, ordinal)` cursor, poll the history tail, reconnect, catch up the
-missing interval, suppress only the intentional overlap, and then resume live
-delivery. Reading only `symbol_info_tick()` after reconnect is not sufficient.
+range. ABI 7 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`
+accepts an array of `Mt5TickSourceRequest`; one handle may group several
+symbols, while equal `(symbol, flags)` requests share one physical
+`copy_ticks_from()` polling source. A single symbol is a one-element array and
+every source-specific event carries `source_index`; no global chronological
+order is promised across symbols. The source uses the smallest requested
+interval and retains only a bounded ring of batches. Each poll epoch has two
+separate phases: a forward, lossless page traversal from the committed
+`(time_msc, ordinal)` cursor to the current observation time. `max_batch`
+controls delivery batch size only; physical history pages use an independent
+minimum page size to avoid quadratic same-timestamp rereads. This is followed
+by a bounded tail reread for overlap
+reconciliation. The tail is never used as the forward cursor, so a dense
+overlap cannot trap the poller rereading the same first page forever.
+Each epoch has a hard one-million-tick safety budget and publishes catch-up in
+`max_batch`-sized ring batches. The validated product
+`max_batch * ring_capacity` is bounded to one million retained ticks, so the
+ring capacity is bounded by both batch count and payload size. If the budget or pagination proof is exhausted, the
+source remains `RECONNECTING` instead of claiming `READY`.
+Reconciliation compares complete tick payload multiplicities and reports
+rewrites or disappeared records in diagnostics. A non-empty page accompanied
+by an MT5 timeout/IPC status is retained for reconciliation but is not published
+to consumers; the next forward pass restarts from the last committed cursor and
+delivers each tick once after a clean confirmation. Local epoch-budget
+exhaustion may continue from the observation.
+The first forward poll starts at the source creation timestamp; the overlap
+window is reserved for reconciliation and does not turn pre-subscription ticks
+into realtime events.
+For compatibility, `delivery_flags == 0` is defined as the default
+`MT5_DELIVERY_TICK_BATCH` mode.
+
+The host calls `mt5bridge_process_events(max_events, callback, user)` from its
+owner loop. Callback views are borrowed until return and contain `TICK_BATCH`,
+`STATUS`, or explicit `GAP` events. A GAP reports batches overrun in the ring;
+loss is never silently reported as complete. Consumer overrun is not repaired
+automatically in v1; applications needing lossless recovery should issue a
+historical POD query from their last committed cursor before resuming. Use
+`mt5bridge_subscription_source_diagnostics()` to inspect a particular member
+of a grouped subscription; `mt5bridge_subscription_diagnostics()` is a
+compatibility shorthand for source index zero. Consumer overflow is reported
+on the GAP event (`gap_reason == MT5_GAP_CONSUMER_OVERFLOW`) and is intentionally
+not written into shared physical-source diagnostics.
+Event sequence numbers are monotonic within a source for TICK_BATCH and GAP
+events, including inconsistency GAPs; a GAP uses the next sequence that can be
+produced, never the oldest retained ring entry. STATUS events have
+`sequence == 0` and are outside the data sequence.
+`MT5_SUBSCRIPTION_STOPPED` is reserved in ABI 7 and is not emitted by v1;
+shutdown invalidates the handle after joining the poller.
+The callback return value is a cancellation signal: a non-zero return consumes
+the current event and stops the call. Consequently the function's return count
+includes that event even though no later events are delivered.
+Handles include a runtime generation and stale handles are rejected. The
+contract is best-effort lossless relative to observable synchronized MT5
+history; it cannot promise recovery of records that MT5 later rewrites or
+removes. `MT5_DELIVERY_COHERENT_SNAPSHOT` is reserved for the next snapshot
+phase and is rejected until watermark/staleness semantics are implemented. The
+ABI 7 reserves a tagged snapshot pointer in `Mt5SubscriptionEvent`, together
+with `Mt5SnapshotItem` and `Mt5SnapshotView`, for that extension.
+Until snapshot delivery is implemented, non-zero `stale_after_ms` is rejected
+instead of silently ignored.
+Shutdown signals and joins the poller before MetaTrader or CPython teardown.
 
 ## NumPy-to-POD benchmark
 

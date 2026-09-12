@@ -1,7 +1,9 @@
 # Public ABI guide
 
-`abi.h` is the plain-C ABI and `client.hpp` is the lightweight C++ consumer
-facade. Both are installed entry points; neither pulls in the heavy runtime.
+`mt5bridge.hpp` is the recommended public umbrella. `abi.h` is the plain-C
+ABI, `client.hpp` is the lightweight C++ consumer facade, and `data.h` contains
+the POD market-data contracts. All focused headers remain self-contained and
+none pulls in the heavy runtime.
 
 - Keep `extern "C"` exports plain: pointers, integers, and UTF-8 strings.
 - Do not add C++ containers, exceptions, `PyObject*`, `json_t*`, or ownership

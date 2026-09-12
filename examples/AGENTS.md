@@ -1,7 +1,9 @@
 # Example guide
 
 Examples demonstrate the consumer contract, not private implementation.
-Always use `<mt5bridge/client.hpp>` to load `mt5_bridge.dll`; do not duplicate
+Prefer the stable umbrella `<mt5bridge.hpp>` to load `mt5_bridge.dll`; use
+`<mt5bridge/client.hpp>` only when an example intentionally demonstrates the
+facade in isolation. Do not duplicate
 `LoadLibraryW`/`GetProcAddress` blocks or link against implementation internals.
 `examples/mt5bridge_loader.hpp` is retained only as a compatibility include.
 

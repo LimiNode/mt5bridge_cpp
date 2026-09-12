@@ -9,7 +9,8 @@ C++17 bridge embedding CPython to call the MetaTrader5 Python API from native ap
    - For a one-step MSVC build run `scripts\build_msvc.bat`.
    - Alternatively follow the manual CMake commands below.
 3. Prepare the runtime environment (see [Runtime setup](#runtime-setup)).
-4. Run `build\bin\usage_example.exe` to confirm the setup.
+4. Run `build\bin\Release\usage_example.exe` (Visual Studio) or the
+   generator-specific `build\bin\usage_example.exe` to confirm the setup.
 
 ## Build
 
@@ -46,6 +47,10 @@ when more than one Python installation is present.
 
 ### MinGW
 
+The consumer headers and examples can be built with MinGW. The CPython-backed
+runtime DLL is currently supported and tested only with MSVC because the
+official Windows Python import library and extension wheels are MSVC-built.
+
 ```bash
 cmake -S . -B build -G "MinGW Makefiles"
 cmake --build build
@@ -57,28 +62,30 @@ cmake --build build
 2. Prepare an embeddable Python runtime. For example:
 
    ```bash
-   python scripts/prepare_py_runtime.py --python-url https://www.python.org/ftp/python/3.11.5/python-3.11.5-embed-amd64.zip --output python
+   python scripts/prepare_py_runtime.py --python-url https://www.python.org/ftp/python/3.11.5/python-3.11.5-embed-amd64.zip --wheels <numpy-wheel-url> <metatrader5-wheel-url> --output build/runtime
    ```
 
-   Ensure the resulting `python` folder accompanies your application or set `PYTHONHOME` to that path.
-3. Create a `bridge.ini` with the MT5 terminal path:
-
-   ```ini
-   terminal_path=C:\Path\To\MetaTrader5
-   ```
-4. Run `build\bin\usage_example.exe` from the build directory to verify the setup.
+   The preparation script configures the embeddable interpreter's isolated
+   `._pth` file and places third-party wheels under `build/runtime/Lib/site-packages`.
+   Set `PYTHONHOME`/`PYTHONPATH` to that runtime when launching examples. The
+   MetaTrader5 Python package discovers the logged-in terminal through its own
+   `initialize()` call; this project does not read a `bridge.ini` file.
+4. Run `build\bin\Release\usage_example.exe` (Visual Studio) or
+   `build\bin\usage_example.exe` (single-config generators).
 
 For a future distributable release, the supported one-file user experience is
-planned as a self-extracting `mt5_bridge.dll`. It will verify and extract a
-bundled embeddable Python/NumPy/MetaTrader5 runtime into a content-addressed
-per-user cache during initialization. The design and clean-machine acceptance
-checks are recorded in [ADR-0002](docs/adr/0002-self-contained-runtime-dll.md);
-the current development workflow still uses the explicit runtime directory.
+planned as a self-extracting `mt5_bridge.dll` bootstrap. The bootstrap itself
+will not link to CPython: it will verify and extract a bundled
+`mt5_bridge_runtime.dll` plus the embeddable Python/NumPy/MetaTrader5 runtime
+into a content-addressed per-user cache, then load the core during
+initialization. The design and clean-machine acceptance checks are recorded in
+[ADR-0002](docs/adr/0002-self-contained-runtime-dll.md); the current
+development workflow still uses the explicit runtime directory.
 
 ## Example usage
 
 ```cpp
-#include <mt5bridge/client.hpp>
+#include <mt5bridge.hpp>
 #include <iostream>
 
 int main() {
@@ -115,17 +122,20 @@ $env:PYTHONPATH = (Resolve-Path ..\..\..\venv\Lib\site-packages).Path
 .\live_market_smoke.exe EURUSD
 ```
 
-The check reads only the last ten minutes of ticks and one hour of M1 bars,
-prints recovery diagnostics, and shuts the bridge down before exiting. Set
+The check reads a bounded 72-hour tick window and seven days of M1 bars so it
+also works when the terminal is started during a weekend, prints recovery
+diagnostics, and shuts the bridge down before exiting. Set
 `PYTHONPATH` to the project environment that contains `MetaTrader5` when the
 embedded runtime cannot discover it automatically.
 
 ## Notes
 
-- The current public contract is ABI 5. Tick POD records preserve separate
+- The current public contract is ABI 7. Tick POD records preserve separate
   integer `volume` and floating-point `volume_real` fields.
+- Realtime consumers use `mt5bridge_subscribe_ticks()` and host-driven
+  `mt5bridge_process_events()`; overflow is reported as an explicit GAP event.
 - Only 64‑bit Windows builds are supported.
-- Python 3.11+ is required.
+- The CPython-backed runtime currently supports and is tested with Python 3.11.x.
 - The C++ client resolves the DLL to an absolute path and restricts dependency
   lookup to the DLL directory and default safe Windows directories.
 - The DLL must be shut down before `FreeLibrary`.

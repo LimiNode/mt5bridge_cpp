@@ -5,7 +5,7 @@
 #include <string>
 #include <thread>
 
-#include <mt5bridge/client.hpp>
+#include <mt5bridge.hpp>
 
 /// \brief Loads the bridge without a pre-existing Python interpreter.
 /// \param argc Number of command-line arguments.

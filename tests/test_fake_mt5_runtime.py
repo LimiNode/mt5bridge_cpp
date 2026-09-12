@@ -660,25 +660,36 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         large_handle = Mt5SubscriptionHandle()
         self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(small), byref(small_handle)), 0)
         self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(large), byref(large_handle)), 0)
-        self.assertEqual(self.module.mt5bridge_unsubscribe(large_handle), 0)
-        maximum = 0
+        maximum_small = 0
+        maximum_large = 0
 
         def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
             del user_data
-            nonlocal maximum
+            nonlocal maximum_small, maximum_large
             if event.contents.type == MT5_SUBSCRIPTION_TICK_BATCH:
-                maximum = max(maximum, int(event.contents.count))
+                if event.contents.handle.id == small_handle.id:
+                    maximum_small = max(maximum_small, int(event.contents.count))
+                else:
+                    maximum_large = max(maximum_large, int(event.contents.count))
             return 0
 
         native_callback = self.event_callback_type(callback)
         for _ in range(40):
             time.sleep(0.02)
             self.module.mt5bridge_process_events(32, native_callback, None)
-            if maximum:
+            if maximum_small and maximum_large:
+                break
+        self.assertLessEqual(maximum_small, 1)
+        self.assertEqual(self.module.mt5bridge_unsubscribe(large_handle), 0)
+        maximum_small = 0
+        for _ in range(40):
+            time.sleep(0.02)
+            self.module.mt5bridge_process_events(32, native_callback, None)
+            if maximum_small:
                 break
         self.module.mt5bridge_unsubscribe(small_handle)
         self.module.mt5bridge_shutdown()
-        self.assertLessEqual(maximum, 1)
+        self.assertLessEqual(maximum_small, 1)
 
     def test_realtime_dense_pages_do_not_stall_and_expose_source_diagnostics(self) -> None:
         """Forward pagination remains lossless when the overlap is densely populated."""

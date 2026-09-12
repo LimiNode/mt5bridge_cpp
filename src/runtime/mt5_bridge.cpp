@@ -951,8 +951,12 @@ void realtime_poller() try {
                             }
                         }
                         if (forward.size() >= kRealtimeEpochTickLimit) break;
-                        if (last_ts < page_from || (last_ts == page_from && last_count <= boundary_skip))
+                        if (last_ts < page_from || (last_ts == page_from && last_count < boundary_skip))
                             break;
+                        if (last_ts == page_from && last_count == boundary_skip) {
+                            forward_complete = true;
+                            break;
+                        }
                         page_from = last_ts;
                         skip_at_cursor = last_count;
                         if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) {
@@ -1083,9 +1087,18 @@ void realtime_poller() try {
                     ++previous[tick_payload_key(tick)];
             std::unordered_map<std::string, std::size_t> forward_keys;
             for (const auto &tick : forward) ++forward_keys[tick_payload_key(tick)];
-            std::vector<Mt5Tick> fresh = std::move(forward);
-            if (requires_committed_replay)
-                fresh.clear();
+            auto previous_for_forward = previous;
+            std::vector<Mt5Tick> fresh;
+            fresh.reserve(forward.size());
+            for (const auto &tick : forward) {
+                const auto key = tick_payload_key(tick);
+                auto it = previous_for_forward.find(key);
+                if (it != previous_for_forward.end() && it->second != 0) {
+                    --it->second;
+                    continue;
+                }
+                fresh.push_back(tick);
+            }
             bool rewrite = false;
             for (const auto &tick : reconcile) {
                 const auto key = tick_payload_key(tick);
@@ -1104,6 +1117,10 @@ void realtime_poller() try {
             if (reconcile_complete)
                 for (const auto &entry : previous)
                     if (entry.second != 0) rewrite = true;
+            // Reconciliation may discover additional provisional records.  Do
+            // not publish any of them when the epoch must replay from commit.
+            if (requires_committed_replay)
+                fresh.clear();
             if (rewrite) {
                 ++source->diagnostics.history_rewrites;
                 source->diagnostics.gap_reason = MT5_GAP_SOURCE_INCONSISTENCY;
@@ -1810,7 +1827,8 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
             source->max_batch = max_batch;
             source->capacity = capacity;
             source->initial_from_msc = static_cast<int64_t>(std::chrono::duration_cast<
-                std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+                std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) -
+                kRealtimeMinOverlapMs;
             source->next_poll = std::chrono::steady_clock::now();
             g_realtime_sources.emplace(key, source);
         } else {
@@ -1859,6 +1877,21 @@ MT5BRIDGE_EXPORT int mt5bridge_unsubscribe(Mt5SubscriptionHandle handle) try {
         g_rr_cursor %= g_subscription_order.size();
     else
         g_rr_cursor = 0;
+    // A source may have no remaining member waiting for its latest rewrite.
+    // Drop the coalesced recovery window once all surviving members ack it.
+    for (auto &source_entry : g_realtime_sources) {
+        auto &source = source_entry.second;
+        bool pending = false;
+        for (const auto &subscription_entry : g_realtime_subscriptions)
+            for (const auto &member : subscription_entry.second.members)
+                if (member.source == source &&
+                    member.delivered_inconsistency_epoch < source->inconsistency_epoch)
+                    pending = true;
+        if (!pending) {
+            source->recovery_from_msc = -1;
+            source->recovery_to_msc = -1;
+        }
+    }
     for (auto &source_entry : g_realtime_sources) {
         auto &source = source_entry.second;
         uint32_t min_interval = std::numeric_limits<uint32_t>::max();

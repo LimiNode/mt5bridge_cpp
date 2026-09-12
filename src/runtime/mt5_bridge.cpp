@@ -76,6 +76,9 @@ struct RealtimeSource {
     std::chrono::steady_clock::time_point retry_at{};
     Mt5SubscriptionStatus status = MT5_SUBSCRIPTION_STARTING;
     std::deque<RealtimeBatch> ring;
+    bool observed_valid = false;
+    int64_t observed_cursor_time_msc = -1;
+    std::size_t observed_cursor_ordinal = 0;
     uint64_t inconsistency_epoch = 0;
     int64_t recovery_from_msc = -1;
     int64_t recovery_to_msc = -1;
@@ -528,6 +531,12 @@ constexpr int kTickPageSize = 65536;
 constexpr uint32_t kShortPageProbes = 2;
 /// \brief Maximum number of partial pages accepted while recovering history.
 constexpr uint32_t kPartialPageLimit = 3;
+/// \brief Hard per-epoch tick budget preventing unbounded realtime catch-up allocations.
+constexpr std::size_t kRealtimeEpochTickLimit = 1000000;
+/// \brief Lower bound for overlap reconciliation in milliseconds.
+constexpr int64_t kRealtimeMinOverlapMs = 1000;
+/// \brief Upper bound for adaptive overlap reconciliation in milliseconds.
+constexpr int64_t kRealtimeMaxOverlapMs = 60000;
 
 /// \brief Gets the numeric status reported by the MetaTrader Python module.
 /// \param mt5 Borrowed MetaTrader5 module.
@@ -866,7 +875,8 @@ void realtime_poller() try {
                 source->next_poll = now + std::chrono::milliseconds(source->interval_ms);
                 symbol = source->symbol; flags = source->flags; interval = source->interval_ms;
                 max_batch = source->max_batch; capacity = source->capacity;
-                cursor = source->cursor_time_msc; cursor_ordinal = source->cursor_ordinal;
+                cursor = source->observed_valid ? source->observed_cursor_time_msc : source->cursor_time_msc;
+                cursor_ordinal = source->observed_valid ? source->observed_cursor_ordinal : source->cursor_ordinal;
                 overlap_ms = source->overlap_ms; old_overlap = source->overlap_snapshot;
             }
 
@@ -877,6 +887,7 @@ void realtime_poller() try {
             bool ok = true;
             bool reconnected = false;
             bool reconcile_complete = false;
+            bool forward_complete = false;
             const auto poll_started = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> python_lock(g_python_mutex);
@@ -906,7 +917,7 @@ void realtime_poller() try {
                         if (!copy_ticks_array(ticks.get(), &page)) { PyErr_Clear(); ok = false; error_code = 0; break; }
                         error_code = mt5_last_error_code(mt5.get());
                         if (is_partial_read_error(error_code)) partial = true;
-                        if (page.empty()) break;
+                        if (page.empty()) { forward_complete = true; break; }
                         const int64_t last_ts = page.back().time_msc;
                         std::size_t last_count = 0;
                         for (auto it = page.rbegin(); it != page.rend() && it->time_msc == last_ts; ++it) ++last_count;
@@ -914,12 +925,20 @@ void realtime_poller() try {
                             if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
                             if (tick.time_msc == page_from && skip_at_cursor != 0) { --skip_at_cursor; continue; }
                             forward.push_back(tick);
+                            if (forward.size() >= kRealtimeEpochTickLimit) {
+                                partial = true;
+                                break;
+                            }
                         }
+                        if (forward.size() >= kRealtimeEpochTickLimit) break;
                         if (last_ts < page_from || (last_ts == page_from && last_count <= boundary_skip))
                             break;
                         page_from = last_ts;
                         skip_at_cursor = last_count;
-                        if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) break;
+                        if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) {
+                            forward_complete = true;
+                            break;
+                        }
                     }
                     const int64_t overlap_from = std::max<int64_t>(0, now_msc - overlap_ms);
                     int64_t tail_from = overlap_from;
@@ -951,7 +970,13 @@ void realtime_poller() try {
                             if (tick.time_msc < overlap_from || tick.time_msc > now_msc) continue;
                             if (tick.time_msc == tail_from && tail_skip != 0) { --tail_skip; continue; }
                             reconcile.push_back(tick);
+                            if (reconcile.size() >= kRealtimeEpochTickLimit) {
+                                partial = true;
+                                break;
+                            }
                         }
+                        if (reconcile.size() >= kRealtimeEpochTickLimit)
+                            break;
                         if (last_ts < tail_from || (last_ts == tail_from && last_count <= boundary_skip)) {
                             reconcile_complete = true;
                             break;
@@ -989,7 +1014,7 @@ void realtime_poller() try {
                 source->retry_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::min<uint32_t>(5000u, 100u << shift));
                 continue;
             }
-            if (!ok)
+            if (!ok || !forward_complete)
                 partial = true;
             if (partial) {
                 ++source->consecutive_failures;
@@ -1050,6 +1075,9 @@ void realtime_poller() try {
                 const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count());
                 source->diagnostics.history_lag_ms = std::max<int64_t>(0, now_msc - observed);
+                if (source->diagnostics.history_lag_ms > source->overlap_ms)
+                    source->overlap_ms = std::min<int64_t>(kRealtimeMaxOverlapMs,
+                        std::max<int64_t>(kRealtimeMinOverlapMs, source->overlap_ms * 2));
             }
             if (!fresh.empty()) {
                 const auto tail_it = std::max_element(fresh.begin(), fresh.end(),
@@ -1058,24 +1086,44 @@ void realtime_poller() try {
                 std::size_t tail_count = 0;
                 for (const auto &tick : fresh)
                     if (tick.time_msc == tail_time) ++tail_count;
-                if (source->cursor_time_msc < tail_time) {
-                    source->cursor_time_msc = tail_time;
-                    source->cursor_ordinal = tail_count;
-                } else if (source->cursor_time_msc == tail_time) {
-                    source->cursor_ordinal += tail_count;
+                if (cursor < tail_time) {
+                    source->observed_cursor_time_msc = tail_time;
+                    source->observed_cursor_ordinal = tail_count;
+                } else if (cursor == tail_time) {
+                    source->observed_cursor_time_msc = tail_time;
+                    source->observed_cursor_ordinal = cursor_ordinal + tail_count;
+                } else {
+                    source->observed_cursor_time_msc = cursor;
+                    source->observed_cursor_ordinal = cursor_ordinal;
                 }
-                RealtimeBatch batch;
-                batch.sequence = source->next_sequence++;
-                batch.ticks = std::move(fresh);
-                source->ring.push_back(std::move(batch));
-                while (source->ring.size() > source->capacity) source->ring.pop_front();
+                source->observed_valid = true;
+                if (!partial && forward_complete) {
+                    source->cursor_time_msc = source->observed_cursor_time_msc;
+                    source->cursor_ordinal = source->observed_cursor_ordinal;
+                }
+                if (partial || reconnected || rewrite)
+                    source->overlap_ms = std::min<int64_t>(kRealtimeMaxOverlapMs, source->overlap_ms * 2);
+                else if (!source->overlap_snapshot.empty() && source->overlap_ms > kRealtimeMinOverlapMs)
+                    source->overlap_ms = std::max<int64_t>(kRealtimeMinOverlapMs, source->overlap_ms / 2);
+                for (std::size_t offset = 0; offset < fresh.size();) {
+                    const std::size_t count = std::min<std::size_t>(max_batch, fresh.size() - offset);
+                    RealtimeBatch batch;
+                    batch.sequence = source->next_sequence++;
+                    batch.ticks.insert(batch.ticks.end(), fresh.begin() + offset,
+                                       fresh.begin() + offset + count);
+                    source->ring.push_back(std::move(batch));
+                    while (source->ring.size() > source->capacity) source->ring.pop_front();
+                    offset += count;
+                }
             }
         }
     }
 } catch (...) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    for (auto &entry : g_realtime_sources)
+    for (auto &entry : g_realtime_sources) {
         entry.second->status = MT5_SUBSCRIPTION_FAILED;
+        entry.second->diagnostics.status = MT5_SUBSCRIPTION_FAILED;
+    }
 }
 
 } // namespace
@@ -1341,8 +1389,9 @@ MT5BRIDGE_EXPORT int mt5bridge_query_ticks(const Mt5TicksRequest *request,
     if (result)
         *result = nullptr;
     clear_fetch_diagnostics();
-    if (!result || !request || !valid_range(request->symbol_utf8, request->from_msc,
-                                            request->to_msc))
+    if (!result || !request || request->reserved != 0 ||
+        request->flags > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+        !valid_range(request->symbol_utf8, request->from_msc, request->to_msc))
         return -1;
     clear_error();
     auto buffer = std::make_unique<Mt5TickBuffer>();
@@ -1398,7 +1447,9 @@ MT5BRIDGE_EXPORT int mt5bridge_copy_ticks_range(const Mt5TicksRequest *request,
                                                 Mt5TickChunkCallback callback,
                                                 void *user_data) try {
     clear_fetch_diagnostics();
-    if (!request || !valid_range(request->symbol_utf8, request->from_msc, request->to_msc) ||
+    if (!request || request->reserved != 0 ||
+        request->flags > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+        !valid_range(request->symbol_utf8, request->from_msc, request->to_msc) ||
         !callback || chunk_size == 0) {
         set_error("callback and chunk_size are required");
         return -1;
@@ -1439,8 +1490,8 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
     if (result)
         *result = nullptr;
     clear_fetch_diagnostics();
-    if (!result || !request || !valid_range(request->symbol_utf8, request->from_msc,
-                                            request->to_msc))
+    if (!result || !request || request->reserved != 0 ||
+        !valid_range(request->symbol_utf8, request->from_msc, request->to_msc))
         return -1;
     std::lock_guard<std::mutex> lock(g_mutex);
     std::lock_guard<std::mutex> python_lock(g_python_mutex);
@@ -1637,12 +1688,13 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
         set_error("coherent snapshots are not implemented yet");
         return -1;
     }
-    RealtimeSubscription subscription;
-    subscription.handle = Mt5SubscriptionHandle{g_runtime_generation, g_next_subscription_id++};
-    subscription.members.reserve(request->source_count);
+    struct PreparedSource { std::string symbol; uint32_t flags; };
+    std::vector<PreparedSource> prepared;
+    prepared.reserve(request->source_count);
     for (size_t index = 0; index < request->source_count; ++index) {
         const auto &source_request = request->sources[index];
-        if (!source_request.symbol_utf8 || !*source_request.symbol_utf8 || source_request.reserved != 0)
+        if (!source_request.symbol_utf8 || !*source_request.symbol_utf8 || source_request.reserved != 0 ||
+            source_request.flags > static_cast<uint32_t>(std::numeric_limits<int>::max()))
             throw std::runtime_error("invalid subscription source");
         uint32_t effective_flags = source_request.flags;
         if (effective_flags == 0) {
@@ -1653,13 +1705,24 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
             else
                 PyErr_Clear();
         }
-        const std::string key = realtime_source_key(source_request.symbol_utf8, effective_flags);
+        prepared.push_back(PreparedSource{source_request.symbol_utf8, effective_flags});
+    }
+
+    // All validation and flag resolution above is complete before mutating any
+    // shared source or subscription state.
+    RealtimeSubscription subscription;
+    const uint64_t subscription_id = g_next_subscription_id++;
+    subscription.handle = Mt5SubscriptionHandle{g_runtime_generation, subscription_id};
+    subscription.members.reserve(prepared.size());
+    const auto reschedule_at = std::chrono::steady_clock::now();
+    for (const auto &prepared_source : prepared) {
+        const std::string key = realtime_source_key(prepared_source.symbol.c_str(), prepared_source.flags);
         auto source_it = g_realtime_sources.find(key);
         std::shared_ptr<RealtimeSource> source;
         if (source_it == g_realtime_sources.end()) {
             source = std::make_shared<RealtimeSource>();
-            source->symbol = source_request.symbol_utf8;
-            source->flags = effective_flags;
+            source->symbol = prepared_source.symbol;
+            source->flags = prepared_source.flags;
             source->interval_ms = interval;
             source->max_batch = max_batch;
             source->capacity = capacity;
@@ -1670,17 +1733,19 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
             source->interval_ms = std::min(source->interval_ms, interval);
             source->max_batch = std::max(source->max_batch, max_batch);
             source->capacity = std::max(source->capacity, capacity);
+            source->next_poll = std::min(source->next_poll,
+                                         reschedule_at + std::chrono::milliseconds(interval));
         }
         subscription.members.push_back(RealtimeMember{source, source->next_sequence,
                                                        static_cast<Mt5SubscriptionStatus>(-1),
                                                        interval, max_batch, capacity});
     }
     g_realtime_subscriptions.emplace(subscription.handle.id, std::move(subscription));
-    g_subscription_order.push_back(g_next_subscription_id - 1);
+    g_subscription_order.push_back(subscription_id);
     if (!g_poller.joinable()) {
         g_poller = std::thread(realtime_poller);
     }
-    *handle = Mt5SubscriptionHandle{g_runtime_generation, g_next_subscription_id - 1};
+    *handle = Mt5SubscriptionHandle{g_runtime_generation, subscription_id};
     g_poller_cv.notify_all();
     return 0;
 } catch (...) {
@@ -1806,7 +1871,8 @@ MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
                         event.status = source->status;
                         event.handle = subscription.handle;
                         event.source_index = static_cast<uint32_t>(member_index);
-                        event.sequence = source->next_sequence;
+                        event.sequence = source->ring.empty() ? source->next_sequence
+                                                              : source->ring.front().sequence;
                         event.gap_reason = MT5_GAP_SOURCE_INCONSISTENCY;
                         event.recovery_from_msc = source->recovery_from_msc;
                         event.recovery_to_msc = source->recovery_to_msc;

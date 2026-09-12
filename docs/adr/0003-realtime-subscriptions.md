@@ -20,6 +20,10 @@ because MT5 may return thousands of records with one timestamp; using the
 overlap window as the cursor can otherwise loop forever. A timeout-bearing
 non-empty response contributes observable data but leaves the source in
 RECONNECTING until a clean confirmation is received.
+Observed progress is tracked separately from the committed cursor; partial
+epochs may be delivered provisionally but cannot advance the committed
+watermark. A one-million-tick epoch budget and `max_batch`-sized publication
+keep catch-up memory bounded.
 
 Delivery is host-driven through `mt5bridge_process_events()`. Callbacks execute
 without the runtime mutex and may re-enter the bridge. Event kinds are tick

@@ -678,6 +678,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
         gaps = []
         batches = []
+        observed_ticks = []
         def on_event(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
             del user_data
             value = event.contents
@@ -685,6 +686,10 @@ class FakeMt5RuntimeTests(unittest.TestCase):
                 gaps.append(value.gap_reason)
             elif value.type == 0:
                 batches.append(value.count)
+                if value.count:
+                    ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                    observed_ticks.extend((ticks[i].time_msc, ticks[i].volume)
+                                          for i in range(value.count))
             return 0
         callback = self.event_callback_type(on_event)
         for _ in range(20):
@@ -702,6 +707,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             if MT5_GAP_SOURCE_INCONSISTENCY in gaps:
                 break
         self.assertIn(2, gaps)
+        self.assertIn((now - 3, 0), observed_ticks)
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 

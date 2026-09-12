@@ -81,10 +81,16 @@ separate phases: a forward, lossless page traversal from the committed
 is only the page size), followed by a bounded tail reread for overlap
 reconciliation. The tail is never used as the forward cursor, so a dense
 overlap cannot trap the poller rereading the same first page forever.
+Each epoch has a hard one-million-tick safety budget and publishes catch-up in
+`max_batch`-sized ring batches, so `ring_capacity` bounds retained memory as
+well as batch count. If the budget or pagination proof is exhausted, the
+source remains `RECONNECTING` instead of claiming `READY`.
 Reconciliation compares complete tick payload multiplicities and reports
 rewrites or disappeared records in diagnostics. A non-empty page accompanied
 by an MT5 timeout/IPC status is usable for reconciliation but does not advance
 the confirmed READY state until a clean poll succeeds.
+For compatibility, `delivery_flags == 0` is defined as the default
+`MT5_DELIVERY_TICK_BATCH` mode.
 
 The host calls `mt5bridge_process_events(max_events, callback, user)` from its
 owner loop. Callback views are borrowed until return and contain `TICK_BATCH`,

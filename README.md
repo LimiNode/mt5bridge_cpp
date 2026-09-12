@@ -122,8 +122,9 @@ $env:PYTHONPATH = (Resolve-Path ..\..\..\venv\Lib\site-packages).Path
 .\live_market_smoke.exe EURUSD
 ```
 
-The check reads only the last ten minutes of ticks and one hour of M1 bars,
-prints recovery diagnostics, and shuts the bridge down before exiting. Set
+The check reads a bounded 72-hour tick window and seven days of M1 bars so it
+also works when the terminal is started during a weekend, prints recovery
+diagnostics, and shuts the bridge down before exiting. Set
 `PYTHONPATH` to the project environment that contains `MetaTrader5` when the
 embedded runtime cannot discover it automatically.
 

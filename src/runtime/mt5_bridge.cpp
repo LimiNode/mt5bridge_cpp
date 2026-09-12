@@ -1087,18 +1087,14 @@ void realtime_poller() try {
                     ++previous[tick_payload_key(tick)];
             std::unordered_map<std::string, std::size_t> forward_keys;
             for (const auto &tick : forward) ++forward_keys[tick_payload_key(tick)];
-            auto previous_for_forward = previous;
             std::vector<Mt5Tick> fresh;
-            fresh.reserve(forward.size());
-            for (const auto &tick : forward) {
-                const auto key = tick_payload_key(tick);
-                auto it = previous_for_forward.find(key);
-                if (it != previous_for_forward.end() && it->second != 0) {
-                    --it->second;
-                    continue;
-                }
-                fresh.push_back(tick);
-            }
+            // Forward traversal starts at the committed (time, ordinal) cursor,
+            // so its records are already distinct from committed delivery.  Do
+            // not deduplicate against the overlap snapshot here: that snapshot
+            // contains observed records, including ticks from an earlier partial
+            // epoch that may never have reached a consumer.  A committed replay
+            // must deliver those records again rather than silently losing them.
+            fresh = std::move(forward);
             bool rewrite = false;
             for (const auto &tick : reconcile) {
                 const auto key = tick_payload_key(tick);
@@ -1827,8 +1823,7 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
             source->max_batch = max_batch;
             source->capacity = capacity;
             source->initial_from_msc = static_cast<int64_t>(std::chrono::duration_cast<
-                std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) -
-                kRealtimeMinOverlapMs;
+                std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
             source->next_poll = std::chrono::steady_clock::now();
             g_realtime_sources.emplace(key, source);
         } else {

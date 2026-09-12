@@ -209,6 +209,7 @@ def fake_module(
     sequence: list[object], *, order_error: BaseException | None = None,
     rate_sequence: list[object] | None = None, initialize_result: bool = True,
     histories: dict[str, np.ndarray] | None = None, order_none: bool = False,
+    history_sequence: list[object] | None = None,
 ) -> types.ModuleType:
     """Creates a fake MetaTrader5 module consuming a scripted sequence."""
     module = types.ModuleType("MetaTrader5")
@@ -221,6 +222,7 @@ def fake_module(
     module.order_calls = 0
     module.last = (1, "Success")
     module.histories = histories or {}
+    module.history_sequence = list(history_sequence or [])
 
     def initialize() -> bool:
         module.initialize_calls += 1
@@ -236,14 +238,17 @@ def fake_module(
     def copy_ticks_from(symbol: str, when: object, count: int, flags: int) -> object:
         del flags
         module.calls += 1
-        if symbol in module.histories:
+        if module.history_sequence:
+            result = module.history_sequence.pop(0)
+        elif symbol in module.histories:
             values = module.histories[symbol]
             start_msc = int(when.timestamp() * 1000)
             start = int(np.searchsorted(values["time_msc"], start_msc, side="left"))
             result = values[start : start + count]
-            module.last = (1, "Success")
-            return result
-        result = sequence.pop(0) if sequence else page(2000, 0)
+        else:
+            result = sequence.pop(0) if sequence else page(2000, 0)
+        if callable(result):
+            result = result()
         if isinstance(result, tuple):
             result, code, message = result
             module.last = (code, message)
@@ -680,6 +685,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             if maximum_small and maximum_large:
                 break
         self.assertLessEqual(maximum_small, 1)
+        self.assertGreater(maximum_large, 0)
         self.assertEqual(self.module.mt5bridge_unsubscribe(large_handle), 0)
         maximum_small = 0
         for _ in range(40):
@@ -687,9 +693,63 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             self.module.mt5bridge_process_events(32, native_callback, None)
             if maximum_small:
                 break
+        self.assertGreater(maximum_small, 0)
         self.module.mt5bridge_unsubscribe(small_handle)
         self.module.mt5bridge_shutdown()
         self.assertLessEqual(maximum_small, 1)
+
+    def test_committed_replay_redelivers_observed_but_unpublished_ticks(self) -> None:
+        """A partial epoch must not suppress ticks from the committed replay."""
+        import time
+        base: list[int] = []
+        expected: list[int] = []
+
+        def make_page(count: int) -> np.ndarray:
+            if not base:
+                base.append(int(time.time() * 1000))
+            values = page(base[0], count)
+            values["time_msc"] = tuple(base[0] + index for index in range(count))
+            values["time"] = values["time_msc"] // 1000
+            if count == 3:
+                expected[:] = [base[0], base[0] + 1, base[0] + 2]
+            return values
+
+        fake = fake_module(
+            [],
+            history_sequence=[
+                lambda: (make_page(1), -10005, "IPC timeout"),
+                lambda: make_page(2),
+                lambda: make_page(3),
+                lambda: make_page(3),
+            ],
+        )
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 16, 32, 0, 0, (0, 0))
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        observed: list[int] = []
+
+        def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            value = event.contents
+            if value.type == MT5_SUBSCRIPTION_TICK_BATCH and value.count:
+                ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[index].time_msc for index in range(value.count))
+            return 0
+
+        native_callback = self.event_callback_type(callback)
+        for _ in range(80):
+            time.sleep(0.03)
+            self.module.mt5bridge_process_events(64, native_callback, None)
+            if len(observed) >= 3:
+                break
+        try:
+            self.assertEqual(observed, expected)
+        finally:
+            self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+            self.module.mt5bridge_shutdown()
 
     def test_realtime_dense_pages_do_not_stall_and_expose_source_diagnostics(self) -> None:
         """Forward pagination remains lossless when the overlap is densely populated."""

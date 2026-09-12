@@ -10,6 +10,11 @@
 
 namespace {
 
+/// \brief Bounded lookback used by the manual smoke for weekend-safe history.
+constexpr auto kTickLookback = std::chrono::hours(72);
+/// \brief Bounded M1 lookback that spans at least one completed session.
+constexpr auto kRateLookback = std::chrono::hours(24 * 7);
+
 /// \brief Prints a compact market-data diagnostic snapshot.
 /// \param label Human-readable operation label.
 /// \param diagnostics Snapshot returned by the bridge.
@@ -57,14 +62,18 @@ int main(int argc, char **argv) {
                                  .count();
 
         Mt5FetchDiagnostics tick_diagnostics{};
-        const auto ticks = bridge.copy_ticks_range(symbol, now_msc - 10 * 60 * 1000, now_msc,
+        const auto ticks = bridge.copy_ticks_range(symbol, now_msc -
+                                                       std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                           kTickLookback).count(), now_msc,
                                                    0, &tick_diagnostics);
         print_diagnostics("ticks", tick_diagnostics);
         std::cout << "ticks_count=" << ticks.size() << '\n';
         require_complete("ticks", ticks.size(), tick_diagnostics);
 
         Mt5FetchDiagnostics rate_diagnostics{};
-        const auto rates = bridge.copy_rates_range(symbol, 1, now_msc - 60 * 60 * 1000, now_msc,
+        const auto rates = bridge.copy_rates_range(symbol, 1, now_msc -
+                                                       std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                           kRateLookback).count(), now_msc,
                                                    &rate_diagnostics);
         print_diagnostics("rates", rate_diagnostics);
         std::cout << "rates_count=" << rates.size() << '\n';

@@ -23,7 +23,10 @@ non-empty response contributes observable data but leaves the source in
 RECONNECTING until a clean confirmation is received.
 Observed progress is tracked separately from the committed cursor. Upstream
 partial epochs are retained for diagnostics but are not published; a clean
-replay from the committed cursor delivers each tick once. Local epoch-budget
+replay from the committed cursor delivers each tick once. Forward replay is
+deduplicated only by the committed `(time_msc, ordinal)` cursor, never by the
+overlap snapshot: observed-but-unpublished records must be delivered after
+recovery. Local epoch-budget
 exhaustion may continue from the observation. A one-million-tick budget per
 forward/reconciliation phase and `max_batch`-sized publication keep catch-up
 memory bounded.
@@ -40,6 +43,9 @@ Coherent cross-symbol snapshots are reserved until watermark and staleness
 semantics are implemented; the corresponding delivery flag is rejected rather
 than silently approximated. Consumer overruns remain explicit and consumers
 use the historical POD API for catch-up.
+The first forward cursor is the source creation timestamp. The overlap window
+is used only for reconciliation, so a new subscription does not emit
+pre-subscription ticks as realtime data.
 Source diagnostics are exported per source index. Consumer GAP/overflow state
 is kept on the logical member and is not attributed to a shared physical
 source. ABI 7 adds recovery range fields and a tagged snapshot pointer to the

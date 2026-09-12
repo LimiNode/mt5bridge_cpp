@@ -94,6 +94,9 @@ by an MT5 timeout/IPC status is retained for reconciliation but is not published
 to consumers; the next forward pass restarts from the last committed cursor and
 delivers each tick once after a clean confirmation. Local epoch-budget
 exhaustion may continue from the observation.
+The first forward poll starts at the source creation timestamp; the overlap
+window is reserved for reconciliation and does not turn pre-subscription ticks
+into realtime events.
 For compatibility, `delivery_flags == 0` is defined as the default
 `MT5_DELIVERY_TICK_BATCH` mode.
 

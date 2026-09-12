@@ -207,11 +207,13 @@ def rate_page(count: int) -> np.ndarray:
 def fake_module(
     sequence: list[object], *, order_error: BaseException | None = None,
     rate_sequence: list[object] | None = None, initialize_result: bool = True,
-    histories: dict[str, np.ndarray] | None = None,
+    histories: dict[str, np.ndarray] | None = None, order_none: bool = False,
 ) -> types.ModuleType:
     """Creates a fake MetaTrader5 module consuming a scripted sequence."""
     module = types.ModuleType("MetaTrader5")
     module.COPY_TICKS_ALL = 3
+    module.TRADE_ACTION_DEAL = 1
+    module.ORDER_TYPE_BUY = 0
     module.calls = 0
     module.initialize_calls = 0
     module.shutdown_calls = 0
@@ -250,11 +252,14 @@ def fake_module(
             module.last = (1, "Success")
         return result
 
-    def order_send(request: dict[str, object]) -> dict[str, object]:
-        del request
+    def order_send(request: dict[str, object]) -> dict[str, object] | None:
+        if request.get("action") != module.TRADE_ACTION_DEAL or request.get("type") != module.ORDER_TYPE_BUY:
+            raise ValueError("invalid market order request")
         module.order_calls += 1
         if order_error is not None:
             raise order_error
+        if order_none:
+            return None
         return {"retcode": 10009}
 
     def terminal_info() -> dict[str, bool]:
@@ -584,6 +589,22 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         )
         self.assertNotEqual(status, 0)
         self.assertEqual(fake.order_calls, 1)
+        if response.value:
+            self.module.mt5bridge_free(response)
+        self.module.mt5bridge_shutdown()
+
+    def test_order_none_is_reported_as_failure(self) -> None:
+        """MT5's None trade result must not become a successful JSON null."""
+        fake = fake_module([], order_none=True)
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        response = c_void_p()
+        status = self.module.mt5bridge_eval_json(
+            b'{"method":"open_market_buy","symbol":"EURUSD","volume":0.1}',
+            byref(response),
+        )
+        self.assertNotEqual(status, 0)
+        self.assertIn("returned None", self.last_error())
         if response.value:
             self.module.mt5bridge_free(response)
         self.module.mt5bridge_shutdown()

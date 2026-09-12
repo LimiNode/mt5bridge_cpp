@@ -9,7 +9,8 @@ C++17 bridge embedding CPython to call the MetaTrader5 Python API from native ap
    - For a one-step MSVC build run `scripts\build_msvc.bat`.
    - Alternatively follow the manual CMake commands below.
 3. Prepare the runtime environment (see [Runtime setup](#runtime-setup)).
-4. Run `build\bin\usage_example.exe` to confirm the setup.
+4. Run `build\bin\Release\usage_example.exe` (Visual Studio) or the
+   generator-specific `build\bin\usage_example.exe` to confirm the setup.
 
 ## Build
 
@@ -57,16 +58,16 @@ cmake --build build
 2. Prepare an embeddable Python runtime. For example:
 
    ```bash
-   python scripts/prepare_py_runtime.py --python-url https://www.python.org/ftp/python/3.11.5/python-3.11.5-embed-amd64.zip --output python
+   python scripts/prepare_py_runtime.py --python-url https://www.python.org/ftp/python/3.11.5/python-3.11.5-embed-amd64.zip --wheels <numpy-wheel-url> <metatrader5-wheel-url> --output build/runtime
    ```
 
-   Ensure the resulting `python` folder accompanies your application or set `PYTHONHOME` to that path.
-3. Create a `bridge.ini` with the MT5 terminal path:
-
-   ```ini
-   terminal_path=C:\Path\To\MetaTrader5
-   ```
-4. Run `build\bin\usage_example.exe` from the build directory to verify the setup.
+   The preparation script configures the embeddable interpreter's isolated
+   `._pth` file and places third-party wheels under `build/runtime/Lib/site-packages`.
+   Set `PYTHONHOME`/`PYTHONPATH` to that runtime when launching examples. The
+   MetaTrader5 Python package discovers the logged-in terminal through its own
+   `initialize()` call; this project does not read a `bridge.ini` file.
+4. Run `build\bin\Release\usage_example.exe` (Visual Studio) or
+   `build\bin\usage_example.exe` (single-config generators).
 
 For a future distributable release, the supported one-file user experience is
 planned as a self-extracting `mt5_bridge.dll` bootstrap. The bootstrap itself

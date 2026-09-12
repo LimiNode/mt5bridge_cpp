@@ -106,6 +106,10 @@ public:
     /// \return Reference to this client.
     Client &operator=(Client &&other) noexcept {
         if (this != &other) {
+            // A failed shutdown deliberately keeps the runtime alive.  Do not
+            // overwrite this object's ownership in that case.
+            if (initialized_)
+                return *this;
             unload();
             move_from(other);
         }
@@ -218,6 +222,11 @@ public:
     void initialize(const wchar_t *python_home = nullptr) {
         check_loaded();
         std::lock_guard<std::mutex> lock(ownership_mutex_);
+        if (initialized_) {
+            if (std::this_thread::get_id() != owner_thread_)
+                throw std::runtime_error("mt5bridge initialize requires the existing owner thread");
+            return;
+        }
         if (active_client_ && active_client_ != this)
             throw std::runtime_error("another mt5bridge::Client already owns the runtime");
         if (runtime_claimed_ && active_client_ != this)
@@ -226,8 +235,10 @@ public:
             throw std::runtime_error(error_message());
         initialized_ = true;
         owner_thread_ = std::this_thread::get_id();
-        if (subscription_state_)
-            subscription_state_->owner_thread = owner_thread_;
+        if (!subscription_state_ || !subscription_state_->alive)
+            subscription_state_ = std::make_shared<SubscriptionState>();
+        subscription_state_->unsubscribe = unsubscribe_;
+        subscription_state_->owner_thread = owner_thread_;
         active_client_ = this;
         runtime_claimed_ = true;
     }
@@ -242,6 +253,8 @@ public:
         if (shutdown_ && shutdown_() != 0)
             throw std::runtime_error(error_message());
         initialized_ = false;
+        if (subscription_state_)
+            subscription_state_->alive = false;
         Client *expected = this;
         active_client_.compare_exchange_strong(expected, nullptr);
         runtime_claimed_ = false;

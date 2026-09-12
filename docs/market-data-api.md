@@ -77,18 +77,24 @@ every source-specific event carries `source_index`; no global chronological
 order is promised across symbols. The source uses the smallest requested
 interval and retains only a bounded ring of batches. Each poll epoch has two
 separate phases: a forward, lossless page traversal from the committed
-`(time_msc, ordinal)` cursor to the current observation time (where `max_batch`
-is only the page size), followed by a bounded tail reread for overlap
+`(time_msc, ordinal)` cursor to the current observation time. `max_batch`
+controls delivery batch size only; physical history pages use an independent
+minimum page size to avoid quadratic same-timestamp rereads. This is followed
+by a bounded tail reread for overlap
 reconciliation. The tail is never used as the forward cursor, so a dense
 overlap cannot trap the poller rereading the same first page forever.
 Each epoch has a hard one-million-tick safety budget and publishes catch-up in
-`max_batch`-sized ring batches, so `ring_capacity` bounds retained memory as
-well as batch count. If the budget or pagination proof is exhausted, the
+`max_batch`-sized ring batches. The validated product
+`max_batch * ring_capacity` is bounded to one million retained ticks, so the
+ring capacity is bounded by both batch count and payload size. If the budget or pagination proof is exhausted, the
 source remains `RECONNECTING` instead of claiming `READY`.
 Reconciliation compares complete tick payload multiplicities and reports
 rewrites or disappeared records in diagnostics. A non-empty page accompanied
 by an MT5 timeout/IPC status is usable for reconciliation but does not advance
-the confirmed READY state until a clean poll succeeds.
+the confirmed READY state until a clean poll succeeds. When upstream data is
+partial or pagination cannot prove progress, the next forward pass restarts
+from the last committed cursor rather than the provisional observation. Local
+epoch-budget exhaustion may continue from the observation.
 For compatibility, `delivery_flags == 0` is defined as the default
 `MT5_DELIVERY_TICK_BATCH` mode.
 
@@ -103,6 +109,9 @@ of a grouped subscription; `mt5bridge_subscription_diagnostics()` is a
 compatibility shorthand for source index zero. Consumer overflow is reported
 on the GAP event (`gap_reason == MT5_GAP_CONSUMER_OVERFLOW`) and is intentionally
 not written into shared physical-source diagnostics.
+Event sequence numbers are monotonic within a source, including inconsistency
+GAP events; a GAP uses the next sequence that can be produced, never the oldest
+retained ring entry.
 Handles include a runtime generation and stale handles are rejected. The
 contract is best-effort lossless relative to observable synchronized MT5
 history; it cannot promise recovery of records that MT5 later rewrites or

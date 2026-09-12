@@ -104,9 +104,9 @@ typedef struct Mt5SubscriptionRequest {
     const Mt5TickSourceRequest *sources; ///< Borrowed source array.
     size_t source_count;                 ///< Number of source entries; must be non-zero.
     uint32_t interval_ms;                ///< Polling cadence; zero selects 250 ms.
-    uint32_t max_batch;                  ///< Maximum ticks per poll; zero selects 1024.
-    uint32_t ring_capacity;              ///< Maximum retained batches; zero selects 64.
-    uint32_t delivery_flags;             ///< MT5_DELIVERY_* bit mask.
+    uint32_t max_batch;                  ///< Maximum delivered ticks per batch; zero selects 1024.
+    uint32_t ring_capacity;              ///< Maximum retained batches; zero selects 64 (combined bound applies).
+    uint32_t delivery_flags;             ///< MT5_DELIVERY_* bit mask; zero defaults to MT5_DELIVERY_TICK_BATCH.
     uint32_t stale_after_ms;             ///< Snapshot staleness threshold; zero disables.
     uint32_t reserved[2];                ///< Reserved; must be zero.
 } Mt5SubscriptionRequest;

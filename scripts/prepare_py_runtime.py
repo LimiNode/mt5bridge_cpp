@@ -28,6 +28,7 @@ import sys
 import tempfile
 import urllib.request
 from pathlib import Path
+import os
 from zipfile import ZipFile
 
 
@@ -61,6 +62,11 @@ def download(url: str, dest: Path) -> None:
 def extract_zip(archive: Path, dest: Path) -> None:
     """Unzip *archive* into *dest*."""
     with ZipFile(archive) as zf:
+        root = dest.resolve()
+        for info in zf.infolist():
+            target = (dest / info.filename).resolve()
+            if os.path.commonpath((str(root), str(target))) != str(root):
+                raise ValueError(f"unsafe ZIP path: {info.filename}")
         zf.extractall(dest)
 
 
@@ -70,7 +76,23 @@ def extract_zip(archive: Path, dest: Path) -> None:
 def extract_wheel(wheel: Path, site_packages: Path) -> None:
     """Extract *wheel* into *site_packages*."""
     with ZipFile(wheel) as zf:
+        root = site_packages.resolve()
+        for info in zf.infolist():
+            target = (site_packages / info.filename).resolve()
+            if os.path.commonpath((str(root), str(target))) != str(root):
+                raise ValueError(f"unsafe wheel path: {info.filename}")
         zf.extractall(site_packages)
+
+
+## \brief Enables imports from the embedded runtime's site-packages directory.
+#  \param runtime_dir Extracted embeddable Python directory.
+def configure_embedded_path(runtime_dir: Path) -> None:
+    """Configure the embeddable interpreter's isolated ``._pth`` file."""
+    pth_files = list(runtime_dir.glob("python*._pth"))
+    if not pth_files:
+        return
+    pth = pth_files[0]
+    pth.write_text("python311.zip\n.\nLib\\site-packages\nimport site\n", encoding="utf-8")
 
 
 ## \brief Parses command-line options and assembles the runtime directory.
@@ -94,6 +116,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print("Extracting Python runtime...")
     extract_zip(python_zip, output_dir)
+    configure_embedded_path(output_dir)
 
     site_packages = output_dir / "Lib" / "site-packages"
     site_packages.mkdir(parents=True, exist_ok=True)

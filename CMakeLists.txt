@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(mt5bridge_cpp LANGUAGES CXX)
+project(mt5bridge_cpp LANGUAGES C CXX)
 
 include(CTest)
 
@@ -10,6 +10,9 @@ option(BUILD_EXAMPLES "Build example programs" ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -17,7 +20,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Lightweight consumer target. Linking this target never searches for Python.
 add_library(mt5bridge_client INTERFACE)
-target_include_directories(mt5bridge_client INTERFACE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(mt5bridge_client INTERFACE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
 add_library(mt5bridge::client ALIAS mt5bridge_client)
 
 if(MT5BRIDGE_BUILD_RUNTIME)
@@ -42,6 +47,9 @@ if(MT5BRIDGE_BUILD_RUNTIME)
     endif()
 
     if(BUILD_TESTING)
+        add_executable(mt5bridge_c_header_compile tests/abi_compile_test.c)
+        target_include_directories(mt5bridge_c_header_compile PRIVATE ${PROJECT_SOURCE_DIR}/include)
+        add_test(NAME mt5bridge_c_header_compile COMMAND mt5bridge_c_header_compile)
         add_executable(mt5bridge_owned_runtime_smoke tests/owned_runtime_smoke.cpp)
         target_link_libraries(mt5bridge_owned_runtime_smoke PRIVATE mt5bridge::client)
         set(MT5BRIDGE_PYTHON_RUNTIME_DIRS "${Python3_RUNTIME_LIBRARY_DIRS}")
@@ -55,7 +63,7 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         add_test(
             NAME mt5bridge_owned_runtime
             COMMAND ${CMAKE_COMMAND} -E env
-                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_mt5_module"
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_lifecycle_module"
                     "PYTHONHOME=${MT5BRIDGE_PYTHON_RUNTIME_DIR}"
                     "PATH=${MT5BRIDGE_TEST_PATH}"
                     "$<TARGET_FILE:mt5bridge_owned_runtime_smoke>"
@@ -86,6 +94,14 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         )
     endif()
 endif()
+
+install(TARGETS mt5bridge_client EXPORT mt5bridgeTargets)
+if(MT5BRIDGE_BUILD_RUNTIME)
+    install(TARGETS mt5_bridge RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
+endif()
+install(DIRECTORY include/ DESTINATION include FILES_MATCHING
+    PATTERN "*.h" PATTERN "*.hpp")
+install(EXPORT mt5bridgeTargets NAMESPACE mt5bridge:: DESTINATION lib/cmake/mt5bridge)
 
 if(BUILD_EXAMPLES)
     add_executable(usage_example examples/usage_example.cpp)

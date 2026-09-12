@@ -28,6 +28,12 @@ set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 
 if(MT5BRIDGE_BUILD_RUNTIME)
     find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter Development)
+    if(NOT Python3_VERSION_MAJOR EQUAL 3 OR
+       NOT Python3_VERSION_MINOR EQUAL 11)
+        message(FATAL_ERROR
+            "mt5bridge runtime currently requires CPython 3.11.x; "
+            "selected ${Python3_VERSION} at ${Python3_EXECUTABLE}")
+    endif()
 
     add_library(mt5_bridge SHARED src/runtime/mt5_bridge.cpp)
     target_include_directories(mt5_bridge PRIVATE ${PROJECT_SOURCE_DIR}/include)

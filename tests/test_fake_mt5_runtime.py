@@ -22,6 +22,7 @@ from ctypes import c_int64, c_size_t, c_uint32, c_uint64, c_void_p
 import numpy as np
 
 MT5_GAP_SOURCE_INCONSISTENCY = 2
+MT5_SUBSCRIPTION_TICK_BATCH = 0
 
 
 class Mt5TicksRequest(Structure):
@@ -643,6 +644,41 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(observed, [now - 2, now - 2, now - 1])
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
+
+    def test_shared_source_keeps_smallest_delivery_batch_after_unsubscribe(self) -> None:
+        """Removing a large subscriber must not widen the remaining batch contract."""
+        import time
+        now = int(time.time() * 1000)
+        values = page(now - 1, 32)
+        fake = fake_module([], histories={"EURUSD": values})
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        small = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 1, 64, 0, 0, (0, 0))
+        large = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 1024, 64, 0, 0, (0, 0))
+        small_handle = Mt5SubscriptionHandle()
+        large_handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(small), byref(small_handle)), 0)
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(large), byref(large_handle)), 0)
+        self.assertEqual(self.module.mt5bridge_unsubscribe(large_handle), 0)
+        maximum = 0
+
+        def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            nonlocal maximum
+            if event.contents.type == MT5_SUBSCRIPTION_TICK_BATCH:
+                maximum = max(maximum, int(event.contents.count))
+            return 0
+
+        native_callback = self.event_callback_type(callback)
+        for _ in range(40):
+            time.sleep(0.02)
+            self.module.mt5bridge_process_events(32, native_callback, None)
+            if maximum:
+                break
+        self.module.mt5bridge_unsubscribe(small_handle)
+        self.module.mt5bridge_shutdown()
+        self.assertLessEqual(maximum, 1)
 
     def test_realtime_dense_pages_do_not_stall_and_expose_source_diagnostics(self) -> None:
         """Forward pagination remains lossless when the overlap is densely populated."""

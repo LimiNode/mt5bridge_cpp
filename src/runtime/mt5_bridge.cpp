@@ -854,6 +854,8 @@ void realtime_poller() try {
             const auto now = std::chrono::steady_clock::now();
             wake_at = now + std::chrono::hours(24);
             for (const auto &entry : g_realtime_sources) {
+                if (entry.second->status == MT5_SUBSCRIPTION_FAILED)
+                    continue;
                 sources.push_back(entry.second);
                 auto due = entry.second->next_poll;
                 if (entry.second->retry_at != std::chrono::steady_clock::time_point{})
@@ -1046,7 +1048,9 @@ void realtime_poller() try {
             }
             if (!ok || !forward_complete)
                 partial = true;
-            if (upstream_partial || (!forward_complete && !budget_exhausted))
+            const bool requires_committed_replay =
+                upstream_partial || (!forward_complete && !budget_exhausted);
+            if (requires_committed_replay)
                 source->recovery_from_committed = true;
             if (partial) {
                 if (!budget_exhausted)
@@ -1080,6 +1084,8 @@ void realtime_poller() try {
             std::unordered_map<std::string, std::size_t> forward_keys;
             for (const auto &tick : forward) ++forward_keys[tick_payload_key(tick)];
             std::vector<Mt5Tick> fresh = std::move(forward);
+            if (requires_committed_replay)
+                fresh.clear();
             bool rewrite = false;
             for (const auto &tick : reconcile) {
                 const auto key = tick_payload_key(tick);
@@ -1112,8 +1118,6 @@ void realtime_poller() try {
                 source->overlap_snapshot = std::move(reconcile);
             // Do not publish provisional upstream data.  The next clean replay
             // starts from the committed cursor and delivers each tick once.
-            if (upstream_partial)
-                fresh.clear();
             const auto observed = !source->overlap_snapshot.empty() ? source->overlap_snapshot.back().time_msc :
                 (!fresh.empty() ? fresh.back().time_msc : -1);
             if (observed >= 0) {
@@ -1780,7 +1784,7 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
         const auto it = g_realtime_sources.find(
             realtime_source_key(prepared_source.symbol.c_str(), prepared_source.flags));
         if (it != g_realtime_sources.end()) {
-            const uint32_t effective_batch = std::max(it->second->max_batch, max_batch);
+            const uint32_t effective_batch = std::min(it->second->max_batch, max_batch);
             const uint32_t effective_capacity = std::max(it->second->capacity, capacity);
             if (static_cast<std::uint64_t>(effective_batch) * effective_capacity >
                 kRealtimeMaxRetainedTicks) {
@@ -1817,9 +1821,11 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
             source->next_poll = std::min(source->next_poll,
                                          reschedule_at + std::chrono::milliseconds(interval));
         }
-        subscription.members.push_back(RealtimeMember{source, source->next_sequence,
-                                                       static_cast<Mt5SubscriptionStatus>(-1),
-                                                       interval, max_batch, capacity});
+        RealtimeMember member{source, source->next_sequence,
+                              static_cast<Mt5SubscriptionStatus>(-1),
+                              interval, max_batch, capacity};
+        member.delivered_inconsistency_epoch = source->inconsistency_epoch;
+        subscription.members.push_back(std::move(member));
     }
     g_realtime_subscriptions.emplace(subscription.handle.id, std::move(subscription));
     g_subscription_order.push_back(subscription_id);
@@ -1856,20 +1862,20 @@ MT5BRIDGE_EXPORT int mt5bridge_unsubscribe(Mt5SubscriptionHandle handle) try {
     for (auto &source_entry : g_realtime_sources) {
         auto &source = source_entry.second;
         uint32_t min_interval = std::numeric_limits<uint32_t>::max();
-        uint32_t max_batch = std::numeric_limits<uint32_t>::max();
+        uint32_t min_batch = std::numeric_limits<uint32_t>::max();
         uint32_t capacity = 0;
         for (const auto &subscription_entry : g_realtime_subscriptions) {
             for (const auto &member : subscription_entry.second.members) {
                 if (member.source != source)
                     continue;
                 min_interval = std::min(min_interval, member.interval_ms);
-                max_batch = std::max(max_batch, member.max_batch);
+                min_batch = std::min(min_batch, member.max_batch);
                 capacity = std::max(capacity, member.capacity);
             }
         }
         if (min_interval != std::numeric_limits<uint32_t>::max()) {
             source->interval_ms = min_interval;
-            source->max_batch = max_batch == std::numeric_limits<uint32_t>::max() ? 1024u : max_batch;
+            source->max_batch = min_batch == std::numeric_limits<uint32_t>::max() ? 1024u : min_batch;
             source->capacity = capacity;
         }
     }
@@ -1958,6 +1964,16 @@ MT5BRIDGE_EXPORT int mt5bridge_process_events(size_t max_events,
                         event.recovery_to_msc = source->recovery_to_msc;
                         member.delivered_inconsistency_epoch = source->inconsistency_epoch;
                         member.last_gap_reason = MT5_GAP_SOURCE_INCONSISTENCY;
+                        bool all_members_ack = true;
+                        for (const auto &subscription_entry : g_realtime_subscriptions)
+                            for (const auto &other_member : subscription_entry.second.members)
+                                if (other_member.source == source &&
+                                    other_member.delivered_inconsistency_epoch < source->inconsistency_epoch)
+                                    all_members_ack = false;
+                        if (all_members_ack) {
+                            source->recovery_from_msc = -1;
+                            source->recovery_to_msc = -1;
+                        }
                         found = true;
                         subscription.member_cursor = (member_index + 1) % member_count;
                         g_rr_cursor = (index + 1) % subscription_count;

@@ -128,7 +128,7 @@ typedef int32_t Mt5SubscriptionStatus;
 #define MT5_SUBSCRIPTION_READY ((Mt5SubscriptionStatus)1)
 #define MT5_SUBSCRIPTION_RECONNECTING ((Mt5SubscriptionStatus)2)
 #define MT5_SUBSCRIPTION_FAILED ((Mt5SubscriptionStatus)3)
-#define MT5_SUBSCRIPTION_STOPPED ((Mt5SubscriptionStatus)4)
+#define MT5_SUBSCRIPTION_STOPPED ((Mt5SubscriptionStatus)4) /* Reserved for a future retained-handle lifecycle event. */
 
 /// \typedef Mt5SubscriptionEventType
 /// \brief Kind of event delivered by mt5bridge_process_events().
@@ -194,7 +194,7 @@ typedef struct Mt5SnapshotItem {
 struct Mt5SnapshotView {
     const Mt5SnapshotItem *items; ///< Borrowed item array.
     size_t count;                 ///< Number of items in \p items.
-    uint64_t watermark_msc;       ///< Common watermark in Unix milliseconds.
+    int64_t watermark_msc;        ///< Common watermark in Unix milliseconds, or -1 when unset.
     uint32_t stale_after_ms;      ///< Configured staleness threshold.
     uint32_t stale_count;         ///< Number of stale sources.
     uint32_t reserved[2];         ///< Reserved; must be zero.

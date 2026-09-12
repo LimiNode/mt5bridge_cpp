@@ -90,11 +90,10 @@ ring capacity is bounded by both batch count and payload size. If the budget or 
 source remains `RECONNECTING` instead of claiming `READY`.
 Reconciliation compares complete tick payload multiplicities and reports
 rewrites or disappeared records in diagnostics. A non-empty page accompanied
-by an MT5 timeout/IPC status is usable for reconciliation but does not advance
-the confirmed READY state until a clean poll succeeds. When upstream data is
-partial or pagination cannot prove progress, the next forward pass restarts
-from the last committed cursor rather than the provisional observation. Local
-epoch-budget exhaustion may continue from the observation.
+by an MT5 timeout/IPC status is retained for reconciliation but is not published
+to consumers; the next forward pass restarts from the last committed cursor and
+delivers each tick once after a clean confirmation. Local epoch-budget
+exhaustion may continue from the observation.
 For compatibility, `delivery_flags == 0` is defined as the default
 `MT5_DELIVERY_TICK_BATCH` mode.
 
@@ -112,6 +111,11 @@ not written into shared physical-source diagnostics.
 Event sequence numbers are monotonic within a source, including inconsistency
 GAP events; a GAP uses the next sequence that can be produced, never the oldest
 retained ring entry.
+`MT5_SUBSCRIPTION_STOPPED` is reserved in ABI 7 and is not emitted by v1;
+shutdown invalidates the handle after joining the poller.
+The callback return value is a cancellation signal: a non-zero return consumes
+the current event and stops the call. Consequently the function's return count
+includes that event even though no later events are delivered.
 Handles include a runtime generation and stale handles are rejected. The
 contract is best-effort lossless relative to observable synchronized MT5
 history; it cannot promise recovery of records that MT5 later rewrites or

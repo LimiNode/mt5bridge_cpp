@@ -14,16 +14,19 @@ MT5 has no push tick API in the Python package, so the implementation polls
 have independent sequence cursors while each source owns a bounded ring.
 
 Each poll is split into a lossless forward pagination pass and a separately
-bounded overlap reconciliation pass. `max_batch` is the page size, never a
-limit on the amount of forward history traversed. This distinction is required
+bounded overlap reconciliation pass. `max_batch` is the logical delivery batch
+size; physical history pages use a separate minimum page size and never limit
+the amount of forward history traversed. This distinction is required
 because MT5 may return thousands of records with one timestamp; using the
 overlap window as the cursor can otherwise loop forever. A timeout-bearing
 non-empty response contributes observable data but leaves the source in
 RECONNECTING until a clean confirmation is received.
-Observed progress is tracked separately from the committed cursor; partial
-epochs may be delivered provisionally but cannot advance the committed
-watermark. A one-million-tick epoch budget and `max_batch`-sized publication
-keep catch-up memory bounded.
+Observed progress is tracked separately from the committed cursor. Upstream
+partial epochs are retained for diagnostics but are not published; a clean
+replay from the committed cursor delivers each tick once. Local epoch-budget
+exhaustion may continue from the observation. A one-million-tick budget per
+forward/reconciliation phase and `max_batch`-sized publication keep catch-up
+memory bounded.
 
 Delivery is host-driven through `mt5bridge_process_events()`. Callbacks execute
 without the runtime mutex and may re-enter the bridge. Event kinds are tick

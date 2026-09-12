@@ -47,6 +47,10 @@ when more than one Python installation is present.
 
 ### MinGW
 
+The consumer headers and examples can be built with MinGW. The CPython-backed
+runtime DLL is currently supported and tested only with MSVC because the
+official Windows Python import library and extension wheels are MSVC-built.
+
 ```bash
 cmake -S . -B build -G "MinGW Makefiles"
 cmake --build build

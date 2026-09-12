@@ -92,7 +92,10 @@ def configure_embedded_path(runtime_dir: Path) -> None:
     if not pth_files:
         return
     pth = pth_files[0]
-    pth.write_text("python311.zip\n.\nLib\\site-packages\nimport site\n", encoding="utf-8")
+    existing = pth.read_text(encoding="utf-8").splitlines()
+    stdlib_zip = next((line for line in existing if line.lower().endswith(".zip")),
+                      "python" + pth.stem.removeprefix("python") + ".zip")
+    pth.write_text(f"{stdlib_zip}\n.\nLib\\site-packages\nimport site\n", encoding="utf-8")
 
 
 ## \brief Parses command-line options and assembles the runtime directory.
@@ -108,6 +111,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     output_dir = Path(args.output).resolve()
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     python_zip = output_dir / "python_embed.zip"

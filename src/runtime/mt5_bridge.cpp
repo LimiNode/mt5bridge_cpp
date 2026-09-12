@@ -964,7 +964,8 @@ void realtime_poller() try {
                             break;
                         }
                     }
-                    const int64_t overlap_from = std::max<int64_t>(0, now_msc - overlap_ms);
+                    const int64_t overlap_from = std::max<int64_t>(
+                        source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
                     int64_t tail_from = overlap_from;
                     std::size_t tail_skip = 0;
                     for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
@@ -1081,7 +1082,8 @@ void realtime_poller() try {
             std::unordered_map<std::string, std::size_t> previous;
             const int64_t current_now_msc = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
-            const int64_t current_overlap_from = std::max<int64_t>(0, current_now_msc - overlap_ms);
+            const int64_t current_overlap_from = std::max<int64_t>(
+                source->initial_from_msc, std::max<int64_t>(0, current_now_msc - overlap_ms));
             for (const auto &tick : old_overlap)
                 if (tick.time_msc >= current_overlap_from)
                     ++previous[tick_payload_key(tick)];

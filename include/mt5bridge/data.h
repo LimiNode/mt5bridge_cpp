@@ -153,7 +153,7 @@ typedef struct Mt5SubscriptionEvent {
     Mt5SubscriptionEventType type; ///< Event kind.
     Mt5SubscriptionStatus status;  ///< Source status for status events.
     Mt5SubscriptionHandle handle;  ///< Logical subscription identity.
-    uint64_t sequence;             ///< Batch sequence, or last observed sequence.
+    uint64_t sequence;             ///< Monotonic batch/GAP sequence; zero for STATUS events.
     uint32_t source_index;         ///< Index in the request source array.
     const Mt5Tick *ticks;          ///< Borrowed tick batch for TICK_BATCH events.
     size_t count;                  ///< Number of elements in \p ticks.

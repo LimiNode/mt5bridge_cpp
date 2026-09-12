@@ -111,9 +111,10 @@ of a grouped subscription; `mt5bridge_subscription_diagnostics()` is a
 compatibility shorthand for source index zero. Consumer overflow is reported
 on the GAP event (`gap_reason == MT5_GAP_CONSUMER_OVERFLOW`) and is intentionally
 not written into shared physical-source diagnostics.
-Event sequence numbers are monotonic within a source, including inconsistency
-GAP events; a GAP uses the next sequence that can be produced, never the oldest
-retained ring entry.
+Event sequence numbers are monotonic within a source for TICK_BATCH and GAP
+events, including inconsistency GAPs; a GAP uses the next sequence that can be
+produced, never the oldest retained ring entry. STATUS events have
+`sequence == 0` and are outside the data sequence.
 `MT5_SUBSCRIPTION_STOPPED` is reserved in ABI 7 and is not emitted by v1;
 shutdown invalidates the handle after joining the poller.
 The callback return value is a cancellation signal: a non-zero return consumes

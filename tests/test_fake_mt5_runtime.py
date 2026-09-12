@@ -621,12 +621,15 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def test_realtime_subscription_delivers_tied_timestamp_ticks(self) -> None:
         """Realtime overlap reconciliation preserves same-time tick multiplicity."""
         import time
-        now = int(time.time() * 1000)
-        values = page(now - 2, 3)
-        values[0]["time_msc"] = values[1]["time_msc"] = now - 2
-        values[2]["time_msc"] = now - 1
-        values["time"] = values["time_msc"] // 1000
-        fake = fake_module([], histories={"EURUSD": values})
+        def make_values(when: object) -> np.ndarray:
+            base = int(when.timestamp() * 1000)
+            values = page(base, 3)
+            values[0]["time_msc"] = values[1]["time_msc"] = base
+            values[2]["time_msc"] = base
+            values["time"] = values["time_msc"] // 1000
+            return values
+
+        fake = fake_module([], history_sequence=[make_values, make_values])
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
         source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
@@ -649,16 +652,66 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             self.module.mt5bridge_process_events(32, native_callback, None)
             if len(observed) >= 3:
                 break
-        self.assertEqual(observed, [now - 2, now - 2, now - 1])
-        self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
-        self.module.mt5bridge_shutdown()
+        try:
+            self.assertEqual(len(observed), 3)
+            self.assertEqual(observed[0], observed[1])
+            self.assertEqual(observed[2], observed[0])
+        finally:
+            self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+            self.module.mt5bridge_shutdown()
+
+    def test_realtime_subscription_does_not_emit_pre_subscription_ticks(self) -> None:
+        """The initial overlap must not publish ticks before source creation."""
+        import time
+        base: list[int] = []
+
+        def make_values(when: object) -> np.ndarray:
+            if not base:
+                base.append(int(when.timestamp() * 1000))
+            values = page(base[0] - 100, 2)
+            values["time_msc"] = (base[0] - 100, base[0])
+            values["time"] = values["time_msc"] // 1000
+            return values
+
+        fake = fake_module([], history_sequence=[make_values, make_values])
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 16, 8, 0, 0, (0, 0))
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        observed: list[int] = []
+
+        def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            value = event.contents
+            if value.type == MT5_SUBSCRIPTION_TICK_BATCH and value.count:
+                ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[index].time_msc for index in range(value.count))
+            return 0
+
+        native_callback = self.event_callback_type(callback)
+        for _ in range(30):
+            time.sleep(0.03)
+            self.module.mt5bridge_process_events(32, native_callback, None)
+            if observed:
+                break
+        try:
+            self.assertEqual(observed, [base[0]])
+        finally:
+            self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+            self.module.mt5bridge_shutdown()
 
     def test_shared_source_keeps_smallest_delivery_batch_after_unsubscribe(self) -> None:
         """Removing a large subscriber must not widen the remaining batch contract."""
         import time
-        now = int(time.time() * 1000)
-        values = page(now - 1, 32)
-        fake = fake_module([], histories={"EURUSD": values})
+        def make_values(when: object) -> np.ndarray:
+            values = page(int(when.timestamp() * 1000), 32)
+            values["time_msc"] = int(when.timestamp() * 1000)
+            values["time"] = values["time_msc"] // 1000
+            return values
+
+        fake = fake_module([], history_sequence=[make_values, make_values])
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
         source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
@@ -757,13 +810,14 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def test_realtime_dense_pages_do_not_stall_and_expose_source_diagnostics(self) -> None:
         """Forward pagination remains lossless when the overlap is densely populated."""
         import time
-        now = int(time.time() * 1000)
-        values = page(now - 20, 32)
-        values["time_msc"] = now - 20
-        values["time"] = (now - 20) // 1000
-        values[-3:]["time_msc"] = (now - 2, now - 1, now)
-        values[-3:]["time"] = values[-3:]["time_msc"] // 1000
-        fake = fake_module([], histories={"EURUSD": values})
+        def make_values(when: object) -> np.ndarray:
+            base = int(when.timestamp() * 1000)
+            values = page(base, 32)
+            values["time_msc"] = base
+            values["time"] = values["time_msc"] // 1000
+            return values
+
+        fake = fake_module([], history_sequence=[make_values, make_values])
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
         source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
@@ -781,11 +835,11 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         for _ in range(30):
             time.sleep(0.02)
             self.module.mt5bridge_process_events(128, callback, None)
-            if len(observed) >= len(values):
+            if len(observed) >= 32:
                 break
         self.assertGreater(fake.calls, 3)
-        self.assertEqual(len(observed), len(values))
-        self.assertEqual(len(set(observed)), len(values))
+        self.assertEqual(len(observed), 32)
+        self.assertEqual(len(set(observed)), 32)
         diagnostics = Mt5SubscriptionDiagnostics()
         self.assertEqual(
             self.module.mt5bridge_subscription_source_diagnostics(handle, 0, byref(diagnostics)), 0
@@ -796,11 +850,17 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def test_realtime_late_insert_emits_recovery_gap(self) -> None:
         """A late MT5 history insertion is observable and delivered to the consumer."""
         import time
-        now = int(time.time() * 1000)
-        initial = page(now - 2, 2)
-        initial["time_msc"] = (now - 2, now - 1)
-        initial["time"] = initial["time_msc"] // 1000
-        fake = fake_module([], histories={"EURUSD": initial})
+        base: list[int] = []
+
+        def make_initial(when: object) -> np.ndarray:
+            if not base:
+                base.append(int(when.timestamp() * 1000))
+            values = page(base[0], 2)
+            values["time_msc"] = (base[0], base[0] + 2)
+            values["time"] = values["time_msc"] // 1000
+            return values
+
+        fake = fake_module([], history_sequence=[make_initial, make_initial])
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
         source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
@@ -828,8 +888,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             self.module.mt5bridge_process_events(64, callback, None)
             if batches:
                 break
-        late = page(now - 3, 3)
-        late["time_msc"] = (now - 3, now - 2, now - 1)
+        late = page(base[0], 3)
+        late["time_msc"] = (base[0], base[0] + 1, base[0] + 2)
         late["time"] = late["time_msc"] // 1000
         fake.histories["EURUSD"] = late
         for _ in range(30):
@@ -838,7 +898,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             if MT5_GAP_SOURCE_INCONSISTENCY in gaps:
                 break
         self.assertIn(2, gaps)
-        self.assertIn((now - 3, 0), observed_ticks)
+        self.assertIn((base[0] + 1, 1), observed_ticks)
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 

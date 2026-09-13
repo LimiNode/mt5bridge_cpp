@@ -720,7 +720,6 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
     std::size_t consumed_boundary_count = 0;
     uint32_t short_page_confirmations = 0;
     uint32_t partial_page_count = 0;
-    bool confirming_short_page = false;
     for (;;) {
         std::vector<Mt5Tick> page;
         bool page_ok = false;
@@ -759,7 +758,6 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             if (short_page_confirmations >= kShortPageProbes)
                 break;
             ++short_page_confirmations;
-            confirming_short_page = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(50u));
             continue;
         }
@@ -769,7 +767,6 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             // the next inclusive read must replay the same boundary after MT5
             // finishes synchronization.
             ++partial_page_count;
-            confirming_short_page = false;
             if (partial_page_count > kPartialPageLimit) {
                 set_error("MetaTrader history remained partial after recovery");
                 return false;
@@ -819,9 +816,10 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         // copy_ticks_from is inclusive. Keep the timestamp and payload
         // multiplicity at its boundary; adding one millisecond would lose
         // tied ticks, while positional skipping would lose reordered ticks.
+        const bool short_page = page.size() < static_cast<std::size_t>(page_size);
         if (last_timestamp < cursor_msc ||
             (last_timestamp == cursor_msc && next_boundary_count == 0)) {
-            if (confirming_short_page && !partial_page) {
+            if (short_page) {
                 if (short_page_confirmations >= kShortPageProbes)
                     break;
                 ++short_page_confirmations;
@@ -842,16 +840,13 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             consumed_boundary_count = next_boundary_count;
         }
         partial_page_count = 0;
-        const bool short_page = page.size() < static_cast<std::size_t>(page_size);
         if (short_page) {
             if (last_timestamp > request->to_msc || short_page_confirmations >= kShortPageProbes)
                 break;
             ++short_page_confirmations;
-            confirming_short_page = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(50u));
         } else {
             short_page_confirmations = 0;
-            confirming_short_page = false;
         }
     }
     return true;

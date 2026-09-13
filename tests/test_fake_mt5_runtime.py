@@ -671,6 +671,17 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(size, 2)
         self.assertGreaterEqual(diagnostics.attempts, 3)
 
+    def test_exact_full_page_followed_by_boundary_only_is_confirmed_complete(self) -> None:
+        """A consumed short boundary page is a valid, probe-confirmed EOF."""
+        first = page(2000, 65536)
+        fake = fake_module([first, first, first, first])
+        status, size, diagnostics, error = self.query(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 65536)
+        self.assertTrue(diagnostics.complete)
+        self.assertGreaterEqual(fake.calls, 3)
+        self.assertEqual(fake.request_counts[:2], [65536, 131072])
+
     def test_initialize_false_is_rejected(self) -> None:
         """A false MetaTrader initialize result is not accepted as success."""
         fake = fake_module([], initialize_result=False)
@@ -708,7 +719,9 @@ class FakeMt5RuntimeTests(unittest.TestCase):
 
     def test_repeated_page_fails_no_progress(self) -> None:
         """A repeated page cannot spin forever."""
-        fake = fake_module([page(2000, 65536), page(2000, 65536)])
+        first = page(2000, 65536)
+        stale = page(1000, 131072)
+        fake = fake_module([first, stale])
         status, _, diagnostics, error = self.query(fake)
         self.assertNotEqual(status, 0)
         self.assertLessEqual(fake.calls, 2)

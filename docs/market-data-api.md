@@ -60,6 +60,12 @@ provisional: it is neither delivered nor used to advance the cursor. The next
 attempt replays the same inclusive boundary until a clean page arrives or the
 bounded partial-page budget is exhausted.
 
+A clean short page whose rows are all already present in the committed boundary
+is also a valid end-of-range observation; it is confirmed with the same bounded
+probes before completion. In contrast, a full page that does not advance the
+timestamp or boundary payload multiset is treated as a non-progress error so a
+malformed MT5 response cannot spin the reader indefinitely.
+
 ## Pagination cursor rule
 
 Do not advance a cursor with `last_time_msc + 1`: multiple ticks can share one

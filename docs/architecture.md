@@ -76,6 +76,9 @@ consumer-facing, while
 
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
+Trade submission and its explicit read-only confirmation contract are specified
+in [ADR-0004](adr/0004-trade-reconciliation.md). The bridge never retries a
+side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
 embeds a verified payload, extracts it to a content-addressed per-user cache,
@@ -108,7 +111,8 @@ worker process.
 ## Migration path
 
 1. Keep the current embedded-Python backend as the release path.
-2. Add request methods through the existing dispatcher and tests.
+2. Add request methods through the existing dispatcher and tests. Side-effecting
+   trade methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 3. If startup/reliability requires process isolation, introduce a transport
    implementation behind the same C ABI; do not duplicate business methods.
 4. Add native or alternate MT5 backends only behind a backend interface after

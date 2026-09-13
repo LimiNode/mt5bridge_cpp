@@ -763,6 +763,20 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             std::this_thread::sleep_for(std::chrono::milliseconds(50u));
             continue;
         }
+        if (partial_page) {
+            // A non-empty page paired with a transient status is only a
+            // provisional observation.  Do not publish it or move the cursor:
+            // the next inclusive read must replay the same boundary after MT5
+            // finishes synchronization.
+            ++partial_page_count;
+            confirming_short_page = false;
+            if (partial_page_count > kPartialPageLimit) {
+                set_error("MetaTrader history remained partial after recovery");
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+            continue;
+        }
 
         std::vector<Mt5Tick> deliver;
         deliver.reserve(page.size());
@@ -826,15 +840,6 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         } else {
             consumed_boundary = std::move(next_boundary);
             consumed_boundary_count = next_boundary_count;
-        }
-        if (partial_page) {
-            ++partial_page_count;
-            confirming_short_page = false;
-            if (partial_page_count > kPartialPageLimit) {
-                set_error("MetaTrader history remained partial after recovery");
-                return false;
-            }
-            continue;
         }
         partial_page_count = 0;
         const bool short_page = page.size() < static_cast<std::size_t>(page_size);

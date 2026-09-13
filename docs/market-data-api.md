@@ -55,6 +55,10 @@ the Python/GIL and runtime-mutex critical sections, so a consumer does not need
 to retain a year-sized NumPy allocation in the DLL. Callbacks may return
 non-zero to cancel delivery and may call another bridge operation; shutting
 the bridge down from a callback cancels the outer traversal on its next page.
+A non-empty page accompanied by a transient history status (including 4403) is
+provisional: it is neither delivered nor used to advance the cursor. The next
+attempt replays the same inclusive boundary until a clean page arrives or the
+bounded partial-page budget is exhausted.
 
 ## Pagination cursor rule
 

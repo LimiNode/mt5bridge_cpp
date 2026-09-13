@@ -219,6 +219,7 @@ def fake_module(
     module.ORDER_TYPE_BUY = 0
     module.calls = 0
     module.request_counts: list[int] = []
+    module.request_starts: list[int] = []
     module.initialize_calls = 0
     module.shutdown_calls = 0
     module.order_calls = 0
@@ -241,6 +242,7 @@ def fake_module(
         del flags
         module.calls += 1
         module.request_counts.append(count)
+        module.request_starts.append(int(when.timestamp() * 1000))
         if module.history_sequence:
             result = module.history_sequence.pop(0)
         elif symbol in module.histories:
@@ -261,14 +263,16 @@ def fake_module(
                         result = result(when)
                     except TypeError:
                         result = result()
-        if isinstance(result, np.ndarray):
-            result = result[:count]
         if isinstance(result, tuple):
             result, code, message = result
             module.last = (code, message)
+            if isinstance(result, np.ndarray):
+                result = result[:count]
         elif result is None:
             module.last = (-4, "History timeout")
         else:
+            if isinstance(result, np.ndarray):
+                result = result[:count]
             module.last = (1, "Success")
         return result
 
@@ -639,6 +643,25 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
         self.assertTrue(diagnostics.history_warmup_detected)
+
+    def test_repeated_partial_4403_does_not_commit_incomplete_history(self) -> None:
+        """Three partial 4403 pages are replayed from the original cursor."""
+        partial = page(1200, 1)
+        partial["time_msc"] = (1200,)
+        complete = page(1100, 3)
+        complete["time_msc"] = (1100, 1150, 1200)
+        complete["time"] = complete["time_msc"] // 1000
+        fake = fake_module([
+            (partial, 4403, "History timeout"),
+            (partial, 4403, "History timeout"),
+            (partial, 4403, "History timeout"),
+            complete,
+        ])
+        status, size, _, error = self.query(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 3)
+        self.assertGreaterEqual(len(fake.request_starts), 4)
+        self.assertEqual(fake.request_starts[:4], [1000, 1000, 1000, 1000])
 
     def test_empty_successes_can_be_followed_by_history_data(self) -> None:
         """Two empty success probes do not hide data arriving during warm-up."""

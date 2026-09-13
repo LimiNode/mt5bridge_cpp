@@ -60,11 +60,14 @@ provisional: it is neither delivered nor used to advance the cursor. The next
 attempt replays the same inclusive boundary until a clean page arrives or the
 bounded partial-page budget is exhausted.
 
-A clean short page whose rows are all already present in the committed boundary
-is also a valid end-of-range observation; it is confirmed with the same bounded
-probes before completion. In contrast, a full page that does not advance the
-timestamp or boundary payload multiset is treated as a non-progress error so a
-malformed MT5 response cannot spin the reader indefinitely.
+A clean short page whose rows are all already present at the committed boundary
+(`last_timestamp == cursor_msc` with no new boundary multiplicity) is a valid
+end-of-range observation; it is confirmed with the same bounded probes before
+completion. A response whose last timestamp is older than the active cursor is
+never accepted as EOF and fails as stale data. In contrast, a full page that
+does not advance the timestamp or boundary payload multiset is treated as a
+non-progress error so a malformed MT5 response cannot spin the reader
+indefinitely.
 
 ## Pagination cursor rule
 

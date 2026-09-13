@@ -720,12 +720,25 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def test_repeated_page_fails_no_progress(self) -> None:
         """A repeated page cannot spin forever."""
         first = page(2000, 65536)
-        stale = page(1000, 131072)
-        fake = fake_module([first, stale])
+        older = page(1000, 65536)
+        repeated = np.concatenate((older, first))
+        fake = fake_module([first, repeated])
         status, _, diagnostics, error = self.query(fake)
         self.assertNotEqual(status, 0)
         self.assertLessEqual(fake.calls, 2)
         self.assertIn("non-progressing", error)
+        self.assertEqual(diagnostics.status, 3)
+
+    def test_short_stale_page_before_cursor_is_not_eof(self) -> None:
+        """A short response older than the cursor is not valid completion."""
+        first = page(2000, 65536)
+        stale = page(1000, 3)
+        stale["time_msc"] = (1000, 1500, 1900)
+        stale["time"] = stale["time_msc"] // 1000
+        fake = fake_module([first, stale])
+        status, _, diagnostics, error = self.query(fake)
+        self.assertNotEqual(status, 0)
+        self.assertIn("before the active cursor", error)
         self.assertEqual(diagnostics.status, 3)
 
     def test_partial_page_continues_from_committed_cursor(self) -> None:

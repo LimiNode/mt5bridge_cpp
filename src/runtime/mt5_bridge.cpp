@@ -817,8 +817,11 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         // multiplicity at its boundary; adding one millisecond would lose
         // tied ticks, while positional skipping would lose reordered ticks.
         const bool short_page = page.size() < static_cast<std::size_t>(page_size);
-        if (last_timestamp < cursor_msc ||
-            (last_timestamp == cursor_msc && next_boundary_count == 0)) {
+        if (last_timestamp < cursor_msc) {
+            set_error("MetaTrader returned ticks before the active cursor");
+            return false;
+        }
+        if (last_timestamp == cursor_msc && next_boundary_count == 0) {
             if (short_page) {
                 if (short_page_confirmations >= kShortPageProbes)
                     break;

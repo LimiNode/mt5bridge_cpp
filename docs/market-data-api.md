@@ -59,11 +59,13 @@ the bridge down from a callback cancels the outer traversal on its next page.
 ## Pagination cursor rule
 
 Do not advance a cursor with `last_time_msc + 1`: multiple ticks can share one
-millisecond. Use `(time_msc, ordinal_at_timestamp)` and request the boundary
-timestamp inclusively, discarding exactly the already-consumed ordinal count.
-The next page request grows by that ordinal, so more than 65,536 ticks sharing
-one timestamp cannot stall the reader. A page that does not advance either the
-timestamp or its consumed ordinal fails instead of looping forever. On IPC
+millisecond. Keep the boundary timestamp and a multiset of full payloads already
+consumed at that timestamp; request the boundary inclusively and discard only
+matching payload occurrences. This remains lossless if MT5 changes the order of
+same-millisecond rows between pages. The next page request grows by the number
+of consumed boundary records, so more than 65,536 ticks sharing one timestamp
+cannot stall the reader. A page that does not advance either the timestamp or
+the consumed boundary multiset fails instead of looping forever. On IPC
 reconnect, traversal resumes from the last committed cursor.
 
 ## Realtime subscriptions (ABI 7)

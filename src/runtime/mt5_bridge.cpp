@@ -81,6 +81,8 @@ struct RealtimeSource {
     bool observed_valid = false;
     int64_t observed_cursor_time_msc = -1;
     std::size_t observed_cursor_ordinal = 0;
+    std::vector<Mt5Tick> cursor_boundary;
+    std::vector<Mt5Tick> observed_boundary;
     bool recovery_from_committed = false;
     uint64_t inconsistency_epoch = 0;
     int64_t recovery_from_msc = -1;
@@ -566,14 +568,14 @@ int mt5_last_error_code(PyObject *mt5) {
 /// \param code MetaTrader Python API status code.
 /// \return True for history-not-found, IPC, and timeout conditions.
 bool is_transient_read_error(int code) {
-    return code == 0 || code == -4 || (code <= -10000 && code >= -10005);
+    return code == 0 || code == -4 || code == 4403 || (code <= -10000 && code >= -10005);
 }
 
 /// \brief Tests whether returned data must be treated as a recoverable partial page.
 /// \param code MetaTrader Python API status code.
 /// \return True when the result carries a recognized timeout or IPC error.
 bool is_partial_read_error(int code) {
-    return code == -4 || (code <= -10000 && code >= -10005);
+    return code == -4 || code == 4403 || (code <= -10000 && code >= -10005);
 }
 
 /// \brief Tests whether an MT5 status requires terminal reinitialization before retrying.
@@ -716,7 +718,8 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
     }
 
     int64_t cursor_msc = request->from_msc;
-    std::size_t skipped_at_cursor = 0;
+    std::unordered_map<std::string, std::size_t> consumed_boundary;
+    std::size_t consumed_boundary_count = 0;
     uint32_t short_page_confirmations = 0;
     uint32_t partial_page_count = 0;
     bool confirming_short_page = false;
@@ -725,12 +728,12 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         bool page_ok = false;
         bool partial_page = false;
         int page_size = kTickPageSize;
-        if (skipped_at_cursor >
+        if (consumed_boundary_count >
             static_cast<std::size_t>(std::numeric_limits<int>::max() - kTickPageSize)) {
             set_error("too many ticks share one timestamp");
             return false;
         }
-        page_size += static_cast<int>(skipped_at_cursor);
+        page_size += static_cast<int>(consumed_boundary_count);
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             std::lock_guard<std::mutex> python_lock(g_python_mutex);
@@ -763,33 +766,39 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             continue;
         }
 
-        const std::size_t previously_consumed_at_cursor = skipped_at_cursor;
         std::vector<Mt5Tick> deliver;
         deliver.reserve(page.size());
         const int64_t last_timestamp = page.back().time_msc;
-        std::size_t last_timestamp_count = 0;
-        for (auto it = page.rbegin(); it != page.rend() && it->time_msc == last_timestamp; ++it)
-            ++last_timestamp_count;
+        std::unordered_map<std::string, std::size_t> new_boundary;
+        std::size_t new_boundary_count = 0;
         for (const Mt5Tick &tick : page) {
             if (tick.time_msc < request->from_msc || tick.time_msc > request->to_msc)
                 continue;
             if (tick.time_msc < cursor_msc)
                 continue;
-            if (tick.time_msc == cursor_msc && skipped_at_cursor != 0) {
-                --skipped_at_cursor;
-                continue;
+            if (tick.time_msc == cursor_msc) {
+                const auto key = tick_payload_key(tick);
+                auto it = consumed_boundary.find(key);
+                if (it != consumed_boundary.end() && it->second != 0) {
+                    --it->second;
+                    continue;
+                }
+                ++new_boundary[key];
+                ++new_boundary_count;
+            } else if (tick.time_msc == last_timestamp) {
+                ++new_boundary[tick_payload_key(tick)];
+                ++new_boundary_count;
             }
             deliver.push_back(tick);
         }
         if (!deliver.empty() && consume(deliver.data(), deliver.size()) != 0)
             return false;
 
-        // copy_ticks_from is inclusive.  Keep the timestamp and remember how
-        // many records at that timestamp have already been consumed; adding
-        // one millisecond would lose tied ticks.
+        // copy_ticks_from is inclusive. Keep the timestamp and payload
+        // multiplicity at its boundary; adding one millisecond would lose
+        // tied ticks, while positional skipping would lose reordered ticks.
         if (last_timestamp < cursor_msc ||
-            (last_timestamp == cursor_msc &&
-             last_timestamp_count <= previously_consumed_at_cursor)) {
+            (last_timestamp == cursor_msc && new_boundary_count == 0)) {
             if (confirming_short_page && !partial_page) {
                 if (short_page_confirmations >= kShortPageProbes)
                     break;
@@ -800,8 +809,16 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             set_error("MetaTrader returned a non-progressing tick page");
             return false;
         }
+        const bool stayed_on_boundary = last_timestamp == cursor_msc;
         cursor_msc = last_timestamp;
-        skipped_at_cursor = last_timestamp_count;
+        if (stayed_on_boundary) {
+            consumed_boundary_count += new_boundary_count;
+            for (const auto &entry : new_boundary)
+                consumed_boundary[entry.first] += entry.second;
+        } else {
+            consumed_boundary = std::move(new_boundary);
+            consumed_boundary_count = new_boundary_count;
+        }
         if (partial_page) {
             ++partial_page_count;
             confirming_short_page = false;
@@ -876,6 +893,7 @@ void realtime_poller() try {
             int64_t cursor = -1, overlap_ms = 1000;
             std::size_t cursor_ordinal = 0;
             std::vector<Mt5Tick> old_overlap;
+            std::vector<Mt5Tick> boundary_snapshot;
             {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 if (g_runtime_state != RuntimeState::running || now < source->retry_at || now < source->next_poll)
@@ -886,6 +904,7 @@ void realtime_poller() try {
                 const bool use_observed = source->observed_valid && !source->recovery_from_committed;
                 cursor = use_observed ? source->observed_cursor_time_msc : source->cursor_time_msc;
                 cursor_ordinal = use_observed ? source->observed_cursor_ordinal : source->cursor_ordinal;
+                boundary_snapshot = use_observed ? source->observed_boundary : source->cursor_boundary;
                 overlap_ms = source->overlap_ms; old_overlap = source->overlap_snapshot;
             }
 
@@ -901,6 +920,7 @@ void realtime_poller() try {
             bool reconnected = false;
             bool reconcile_complete = false;
             bool forward_complete = false;
+            std::vector<Mt5Tick> forward_boundary;
             const auto poll_started = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> python_lock(g_python_mutex);
@@ -914,11 +934,15 @@ void realtime_poller() try {
                     int64_t page_from = cursor >= 0 ? cursor :
                         (source->initial_from_msc >= 0 ? source->initial_from_msc
                                                        : std::max<int64_t>(0, now_msc - static_cast<int64_t>(interval) * 4));
-                    std::size_t skip_at_cursor = cursor >= 0 ? cursor_ordinal : 0;
+                    std::unordered_map<std::string, std::size_t> consumed_boundary;
+                    for (const auto &tick : boundary_snapshot)
+                        ++consumed_boundary[tick_payload_key(tick)];
+                    std::size_t consumed_boundary_count = boundary_snapshot.size();
+                    std::vector<Mt5Tick> boundary_records = boundary_snapshot;
                     const uint32_t physical_page_size = std::max<uint32_t>(1024u, max_batch);
                     for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
-                        const std::size_t boundary_skip = skip_at_cursor;
-                        const uint64_t requested = static_cast<uint64_t>(physical_page_size) + skip_at_cursor;
+                        const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
+                            consumed_boundary_count;
                         const int count = static_cast<int>(std::min<uint64_t>(requested,
                             static_cast<uint64_t>(std::numeric_limits<int>::max())));
                         PyRef from(make_datetime(page_from));
@@ -938,11 +962,26 @@ void realtime_poller() try {
                         if (is_partial_read_error(error_code)) partial = true;
                         if (page.empty()) { forward_complete = true; break; }
                         const int64_t last_ts = page.back().time_msc;
-                        std::size_t last_count = 0;
-                        for (auto it = page.rbegin(); it != page.rend() && it->time_msc == last_ts; ++it) ++last_count;
+                        std::unordered_map<std::string, std::size_t> new_boundary;
+                        std::size_t new_boundary_count = 0;
+                        std::vector<Mt5Tick> new_boundary_records;
                         for (const auto &tick : page) {
                             if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
-                            if (tick.time_msc == page_from && skip_at_cursor != 0) { --skip_at_cursor; continue; }
+                            if (tick.time_msc == page_from) {
+                                const auto key = tick_payload_key(tick);
+                                auto it = consumed_boundary.find(key);
+                                if (it != consumed_boundary.end() && it->second != 0) {
+                                    --it->second;
+                                    continue;
+                                }
+                                ++new_boundary[key];
+                                ++new_boundary_count;
+                                new_boundary_records.push_back(tick);
+                            } else if (tick.time_msc == last_ts) {
+                                ++new_boundary[tick_payload_key(tick)];
+                                ++new_boundary_count;
+                                new_boundary_records.push_back(tick);
+                            }
                             forward.push_back(tick);
                             if (forward.size() >= kRealtimeEpochTickLimit) {
                                 partial = true;
@@ -951,19 +990,31 @@ void realtime_poller() try {
                             }
                         }
                         if (forward.size() >= kRealtimeEpochTickLimit) break;
-                        if (last_ts < page_from || (last_ts == page_from && last_count < boundary_skip))
+                        if (last_ts < page_from || (last_ts == page_from && new_boundary_count == 0))
                             break;
-                        if (last_ts == page_from && last_count == boundary_skip) {
+                        const bool stayed_on_boundary = last_ts == page_from;
+                        if (stayed_on_boundary && new_boundary_count == 0) {
                             forward_complete = true;
                             break;
                         }
-                        page_from = last_ts;
-                        skip_at_cursor = last_count;
+                        if (stayed_on_boundary) {
+                            consumed_boundary_count += new_boundary_count;
+                            for (const auto &entry : new_boundary)
+                                consumed_boundary[entry.first] += entry.second;
+                            boundary_records.insert(boundary_records.end(),
+                                new_boundary_records.begin(), new_boundary_records.end());
+                        } else {
+                            page_from = last_ts;
+                            consumed_boundary = std::move(new_boundary);
+                            consumed_boundary_count = new_boundary_count;
+                            boundary_records = std::move(new_boundary_records);
+                        }
                         if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) {
                             forward_complete = true;
                             break;
                         }
                     }
+                    forward_boundary = std::move(boundary_records);
                     const int64_t overlap_from = std::max<int64_t>(
                         source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
                     int64_t tail_from = overlap_from;
@@ -1087,6 +1138,16 @@ void realtime_poller() try {
             for (const auto &tick : old_overlap)
                 if (tick.time_msc >= current_overlap_from)
                     ++previous[tick_payload_key(tick)];
+            // The committed boundary is a delivery fact, even when MT5 has
+            // not returned a complete overlap snapshot for this epoch. Include
+            // it in reconciliation so a multiplicity increase (A×2 -> A×3)
+            // contributes only the genuinely new occurrence.
+            std::unordered_map<std::string, std::size_t> boundary_counts;
+            for (const auto &tick : source->cursor_boundary)
+                if (tick.time_msc >= current_overlap_from)
+                    ++boundary_counts[tick_payload_key(tick)];
+            for (const auto &entry : boundary_counts)
+                previous[entry.first] = std::max(previous[entry.first], entry.second);
             std::unordered_map<std::string, std::size_t> forward_keys;
             for (const auto &tick : forward) ++forward_keys[tick_payload_key(tick)];
             std::vector<Mt5Tick> fresh;
@@ -1177,6 +1238,18 @@ void realtime_poller() try {
                     source->ring.push_back(std::move(batch));
                     while (source->ring.size() > source->capacity) source->ring.pop_front();
                     offset += count;
+                }
+            }
+            if (!forward_boundary.empty()) {
+                const int64_t boundary_time = forward_boundary.front().time_msc;
+                source->observed_cursor_time_msc = boundary_time;
+                source->observed_cursor_ordinal = forward_boundary.size();
+                source->observed_boundary = forward_boundary;
+                source->observed_valid = true;
+                if (!partial && forward_complete) {
+                    source->cursor_time_msc = boundary_time;
+                    source->cursor_ordinal = forward_boundary.size();
+                    source->cursor_boundary = forward_boundary;
                 }
             }
         }

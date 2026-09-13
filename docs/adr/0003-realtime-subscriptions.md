@@ -11,7 +11,9 @@ borrowed event callback through ABI 7. A request contains one or more
 `Mt5TickSourceRequest` entries, making one handle a logical subscription group.
 MT5 has no push tick API in the Python package, so the implementation polls
 `copy_ticks_from()` in one physical source per `(symbol, flags)`. Group members
-have independent sequence cursors while each source owns a bounded ring.
+have independent sequence cursors while each source owns a bounded ring. A
+source keeps a full-payload boundary multiset for its inclusive cursor, because
+MT5 may reorder rows that share one `time_msc` between reads.
 
 Each poll is split into a lossless forward pagination pass and a separately
 bounded overlap reconciliation pass. `max_batch` is the logical delivery batch

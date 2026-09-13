@@ -49,7 +49,9 @@ TradeId
 same field as `POSITION_TICKET`. Neither is the bridge's `TradeId`.
 `request_id` is available in the Python `MqlTradeResult` too, but without
 `OnTradeTransaction` it is diagnostic/correlation evidence only. A native MQL
-backend can additionally correlate the request transaction with it.
+backend can additionally correlate the request transaction with it. It must be
+scoped by `TerminalSessionId` and never correlated across terminal sessions or
+restarts.
 
 ## State and certainty
 
@@ -76,7 +78,7 @@ provisional -> server_confirmed -> reconciled
 ```
 
 For example, `retcode == DONE` with `deal == 0` can be
-`submitted/server_confirmed`, but it is not `open/reconciled` until a deal and
+`accepted/server_confirmed`, but it is not `open/reconciled` until a deal and
 the relevant position evidence are observed.
 
 ## Submission and reconciliation algorithm
@@ -87,6 +89,7 @@ capture before-snapshot (active orders, positions, relevant history)
 resolve symbol execution/filling capabilities
 order_check
 persist durable dispatch intent (AccountKey + operation state)
+verify current AccountKey still matches the immutable operation key
 order_send exactly once
 persist raw result, retcode_external, and every non-zero ID
 poll bounded snapshots of orders + deals + positions + history orders
@@ -101,11 +104,28 @@ did not execute the request and never permits a retry. Two concurrent
 identical requests with no correlation evidence must remain `AMBIGUOUS`;
 matching by symbol/volume/time, comment, or magic cannot safely choose one.
 
+The initial reconciliation deadline is a wait limit, not the end of the
+operation lifetime. After `NOT_OBSERVED`, the journal operation remains
+unresolved and later snapshots, reconnects, history refreshes, or a restart may
+emit a new transition to `CONFIRMED`, `RECONCILED`, or `AMBIGUOUS`.
+
 Before the side effect, the operation journal durably records its
 `AccountKey` (at minimum server and login), `TradeId`, `OperationId`, request
 payload, and `dispatch_intent_persisted`. After the call it records the raw
 result before moving to `reconciling`. On restart, a `dispatching` record with
-no result is reconciled from snapshots and is never resent.
+no result is reconciled from snapshots and is never resent. The durable
+`dispatching` commit is written before entering `order_send()`, giving the
+system at-most-once dispatch semantics even if the process dies before the
+call or before its result is persisted.
+
+`AccountKey` is immutable for the operation and scopes graph keys as
+`(AccountKey, OrderTicket)`, `(AccountKey, DealTicket)`, and
+`(AccountKey, PositionIdentifier)`. Immediately before any side effect the
+current terminal account (`server`, `login`, and trade permissions) must match
+the operation key. A mismatch prevents sending. If the account changes during
+reconciliation, suspend observation with `ACCOUNT_MISMATCH`; never attach the
+new account's records to the old graph. A managed TradeManager uses a
+single-writer lease per AccountKey.
 
 History reads use sets/maps keyed by tickets and bounded overlap snapshots.
 They never rely on chronological order, the last array element, or an
@@ -133,8 +153,9 @@ reversals and CloseBy, respectively.
 - **Execution/filling modes:** inspect symbol capabilities and resolve a
   compatible `FOK`, `IOC`, `RETURN`, or `BOC` policy before `order_check`/send.
   Also validate expiration/time-in-force, GTC mode, stops/freeze levels,
-  volume min/max/step/limit, and tick size. Account capabilities include
-  margin mode, FIFO-close, hedge permission, and trade permission.
+  volume min/max/step/limit, tick size, and `SYMBOL_ORDER_CLOSEBY`. Account
+  capabilities include margin mode, FIFO-close, hedge permission,
+  `ACCOUNT_TRADE_ALLOWED`, `ACCOUNT_TRADE_EXPERT`, and trade permission.
 - **External changes:** manual trades, SL/TP, expiration, and broker/exchange
   execution differences are recorded as graph observations, not silently
   attributed to a bridge operation.
@@ -151,7 +172,10 @@ it is not terminal-native async.
 `order_check` is advisory: a successful check does not reserve price,
 liquidity, or permissions for the subsequent send. Return codes are
 operation-aware: `PLACED` is a valid pending-order result, `DONE_PARTIAL` is
-not a terminal fill, and `TIMEOUT`, `REQUOTE`, and `REJECT` remain distinct.
+not by itself a terminal operation. `DONE_PARTIAL` proves partial execution,
+but terminality depends on operation kind, filling policy, execution mode, and
+the reconciled active-order remainder: `IOC` may cancel the remainder while
+`RETURN` may keep it active. `TIMEOUT`, `REQUOTE`, and `REJECT` remain distinct.
 
 An optional MQL5 backend may later forward only copied transaction records into
 an IPC ring. Its `request_id` is valid for the request transaction, not as a
@@ -165,14 +189,18 @@ Manager callbacks are queued and dispatched by host-thread
 `process_trade_events()`, outside runtime/Python mutexes. Both per-operation
 callbacks and an optional global callback receive `TradeId`, `OperationId`,
 `OperationState`, `TradeState`, `Certainty`, a monotonic revision, and the
-current MT5-ID evidence snapshot.
+current MT5-ID evidence snapshot. The queue is bounded: it must either
+coalesce snapshots by logical ID or emit a `TRADE_EVENT_GAP` containing the
+last delivered revision. The preferred contract is an explicit GAP followed by
+an authoritative snapshot/query; state remains retained by TradeManager so a
+consumer can recover without replaying every intermediate notification.
 
 ## Required test matrix
 
 | Scenario | Required outcome |
 | --- | --- |
 | Immediate market result has order and deal | Bind observations, then reconcile |
-| `deal == 0`, deal appears later | `submitted/reconciling` then `open/reconciled` |
+| `deal == 0`, deal appears later | `accepted/reconciling` then `open/reconciled` |
 | Deal precedes history order | Keep both; no false inconsistency |
 | Timeout after server acceptance | Exactly one send; reconcile, never retry |
 | Timeout with no unique candidate | `AMBIGUOUS`/`NOT_OBSERVED`, never `FAILED` or a guessed mapping; no retry |
@@ -187,6 +215,11 @@ current MT5-ID evidence snapshot.
 | `order_check` succeeds but send requotes/rejects | Keep advisory check and classify the send result separately |
 | Non-zero `retcode_external` | Preserve in raw result and diagnostics |
 | Terminal restart | Rebuild graph from journal/snapshots; no duplicate send |
+| Crash after durable `dispatching` but before send | Reconcile only; zero automatic resends |
+| `DONE_PARTIAL` with IOC | Record fills and terminal cancelled remainder |
+| `DONE_PARTIAL` with RETURN | Record fills and keep active remainder pending |
+| Account switch before send/reconcile | Block send or emit `ACCOUNT_MISMATCH`; never mix graphs |
+| Deadline before visibility | Emit `NOT_OBSERVED`, keep journal operation unresolved for later reconciliation |
 
 ## References and known quirks
 

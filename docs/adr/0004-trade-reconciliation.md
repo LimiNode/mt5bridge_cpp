@@ -54,6 +54,7 @@ generate TradeId + OperationId
         -> capture a baseline of the observable trade environment
         -> resolve symbol capabilities and run order_check
         -> persist durable dispatch intent (AccountKey + operation state)
+        -> verify current AccountKey still matches the immutable operation key
         -> call order_send exactly once
         -> persist dispatching/result records and all known IDs
         -> reconcile active/history orders, deals, and positions
@@ -65,8 +66,21 @@ dispatching -> result_persisted -> reconciling`. `TradeId` and `OperationId`
 are stable across process restarts and the journal is namespaced by
 `AccountKey` (at minimum server plus login). If recovery finds `dispatching`
 without a result, it only reconciles snapshots and never resends the side
-effect. An `order_send()` timeout or IPC failure never triggers a blind second
-send. The result is provisional until reconciliation proves what happened.
+effect. `dispatching` is durably committed before entering `order_send()`;
+anything after that point is at-most-once and permanently non-resendable by
+automatic recovery. An `order_send()` timeout or IPC failure never triggers a
+blind second send. The result is provisional until reconciliation proves what
+happened.
+
+`AccountKey` is immutable for an operation and scopes every graph key as
+`(AccountKey, OrderTicket)`, `(AccountKey, DealTicket)`, and
+`(AccountKey, PositionIdentifier)`. Immediately before every side effect the
+current terminal account (`server`, `login`, and relevant trade permissions)
+must equal the operation key; otherwise the operation is not sent. If the
+account changes during reconciliation, observation is suspended and the
+operation receives `ACCOUNT_MISMATCH` rather than attaching the new account's
+records to the old graph. A managed TradeManager holds a single-writer lease
+per AccountKey so two processes cannot maintain competing netting ledgers.
 
 ## Identity and certainty rules
 
@@ -87,10 +101,11 @@ TradeId -> OperationId[] -> request_id?
 ```
 
 `request_id` correlates the request transaction when a transaction stream is
-available; it does not identify every subsequent transaction. The current
-Python backend does not receive `OnTradeTransaction`, so comments and magic
-numbers are additional evidence, never identity. `result.order` and
-`result.deal` are optional observations, not universal guarantees.
+available; it does not identify every subsequent transaction and must be
+scoped by terminal session. The current Python backend does not receive
+`OnTradeTransaction`, so comments and magic numbers are additional evidence,
+never identity. `result.order` and `result.deal` are optional observations,
+not universal guarantees.
 
 Operation state, logical Trade state, and certainty are separate dimensions.
 Operation state includes `queued`, `prechecking`, `submitting`, `accepted`,
@@ -100,14 +115,19 @@ Operation state includes `queued`, `prechecking`, `submitting`, `accepted`,
 `provisional`, `server_confirmed`, `reconciled`, or `ambiguous`. A filled close
 operation can therefore leave a trade `reducing` or `closed`; `filled` never
 means that the logical trade is open.
+`accepted` is used only when MT5 provides server-acceptance evidence; a timeout
+may move directly from `submitting` to `reconciling` with provisional
+certainty.
 
 ## Safety constraints
 
-- Reconciliation is bounded by a deadline and reports attempts, last MT5
+- The initial reconciliation wait is bounded by a deadline and reports attempts, last MT5
   error, observed records, and the reason for `PENDING`, `NOT_OBSERVED`, or
   `AMBIGUOUS`. `NOT_OBSERVED` means only that no matching evidence was visible
   before the deadline; it never proves that the server did not execute the
-  operation and never permits an automatic retry.
+  operation and never permits an automatic retry. The operation remains
+  unresolved in the journal; later snapshots, reconnects, history refreshes,
+  or a restart may transition it to `CONFIRMED`, `RECONCILED`, or `AMBIGUOUS`.
 - Ticket-keyed snapshots and overlap reconciliation are required; chronology
   and “last array element” assumptions are forbidden.
 - The graph retains `DEAL_ORDER`, `DEAL_POSITION_ID`, `DEAL_ENTRY`,
@@ -126,16 +146,23 @@ means that the logical trade is open.
   a pending remainder. Filling mode (`FOK`, `IOC`, `RETURN`) is resolved from
   symbol capabilities before sending; `BOC` is also supported for limit and
   stop-limit requests. Expiration/GTC mode, stops/freeze levels, volume
-  min/max/step/limit, and tick size are part of symbol capabilities; account
-  margin mode, FIFO-close, hedge permission, and trade permission are part of
-  account capabilities. Invalid combinations are rejected.
+  min/max/step/limit, tick size, and `SYMBOL_ORDER_CLOSEBY` are part of symbol
+  capabilities; account margin mode, FIFO-close, hedge permission,
+  `ACCOUNT_TRADE_ALLOWED`, `ACCOUNT_TRADE_EXPERT`, and trade permission are
+  part of account capabilities. Invalid combinations are rejected.
 - `order_check` is advisory only: a successful check does not guarantee the
   later `order_send` will succeed. Return codes are classified by operation;
-  `PLACED` is success for a pending order, `DONE_PARTIAL` is not terminal fill,
-  and `TIMEOUT`, `REQUOTE`, and `REJECT` have distinct outcomes.
+  `PLACED` is success for a pending order, and `DONE_PARTIAL` is not by itself
+  a terminal operation; `TIMEOUT`, `REQUOTE`, and `REJECT` have distinct
+  outcomes.
 - The raw result preserves `retcode`, `retcode_external`, `order`, `deal`, and
   all other fields returned by MT5. No field is promoted to a universal
   position or completion identifier.
+- `DONE_PARTIAL` proves only partial execution. Operation terminality depends
+  on the operation kind, filling policy, execution mode, and the reconciled
+  active-order remainder: with `IOC` the remainder may already be cancelled,
+  while with `RETURN` it may remain active. A partial result is therefore not
+  universally terminal or universally pending.
 - A transaction stream is a hint stream. An MQL `OnTradeTransaction` handler
   must copy events into a bounded ring and return immediately; its 1024-entry
   terminal queue can overflow or deliver events out of order. Any overflow or

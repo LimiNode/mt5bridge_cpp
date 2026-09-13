@@ -30,12 +30,16 @@ RECONNECTING until a clean confirmation is received.
 Observed progress is tracked separately from the committed cursor. Upstream
 partial epochs are retained for diagnostics but are not published; a clean
 replay from the committed cursor delivers each tick once. Forward replay is
-deduplicated only by the committed `(time_msc, ordinal)` cursor, never by the
+deduplicated only by the committed timestamp and payload boundary, never by the
 overlap snapshot: observed-but-unpublished records must be delivered after
 recovery. Local epoch-budget
 exhaustion may continue from the observation. A one-million-tick budget per
 forward/reconciliation phase and `max_batch`-sized publication keep catch-up
 memory bounded.
+Each epoch captures a `now_msc` horizon before MT5 IPC. Since
+`copy_ticks_from()` has no upper bound, rows newer than that horizon are
+ignored for the current epoch and cannot advance the committed boundary; the
+next poll observes them normally.
 
 Delivery is host-driven through `mt5bridge_process_events()`. Callbacks execute
 without the runtime mutex and may re-enter the bridge. Event kinds are tick

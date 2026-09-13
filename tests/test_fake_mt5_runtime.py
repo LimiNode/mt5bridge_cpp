@@ -218,6 +218,7 @@ def fake_module(
     module.TRADE_ACTION_DEAL = 1
     module.ORDER_TYPE_BUY = 0
     module.calls = 0
+    module.request_counts: list[int] = []
     module.initialize_calls = 0
     module.shutdown_calls = 0
     module.order_calls = 0
@@ -239,6 +240,7 @@ def fake_module(
     def copy_ticks_from(symbol: str, when: object, count: int, flags: int) -> object:
         del flags
         module.calls += 1
+        module.request_counts.append(count)
         if module.history_sequence:
             result = module.history_sequence.pop(0)
         elif symbol in module.histories:
@@ -250,12 +252,17 @@ def fake_module(
             result = sequence.pop(0) if sequence else page(2000, 0)
         if callable(result):
             try:
-                result = result(symbol, when)
+                result = result(symbol, when, count)
             except TypeError:
                 try:
-                    result = result(when)
+                    result = result(symbol, when)
                 except TypeError:
-                    result = result()
+                    try:
+                        result = result(when)
+                    except TypeError:
+                        result = result()
+        if isinstance(result, np.ndarray):
+            result = result[:count]
         if isinstance(result, tuple):
             result, code, message = result
             module.last = (code, message)
@@ -1024,7 +1031,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             values = page(base[0], count)
             values["time_msc"] = base[0]
             values["time"] = values["time_msc"] // 1000
-            return np.concatenate((values[1:], values[:1])) if rotate else values
+            return np.concatenate((values[-1:], values[:-1])) if rotate else values
 
         fake = fake_module(
             [],
@@ -1061,6 +1068,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         try:
             self.assertEqual(len(observed), 2049, f"calls={fake.calls} observed={len(observed)}")
             self.assertEqual(set(observed), set(range(2049)))
+            self.assertIn(2048, fake.request_counts)
+            self.assertIn(3072, fake.request_counts)
         finally:
             self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
             self.module.mt5bridge_shutdown()
@@ -1116,6 +1125,66 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             self.assertEqual(len(observed), 2049)
             self.assertEqual(set(observed), set(range(2049)))
             self.assertNotIn(MT5_GAP_SOURCE_INCONSISTENCY, gaps)
+        finally:
+            self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+            self.module.mt5bridge_shutdown()
+
+    def test_realtime_tick_after_snapshot_horizon_does_not_repeat_tail(self) -> None:
+        """A row arriving beyond captured now_msc cannot strand the accepted tail."""
+        import time
+        base: list[int] = []
+        calls = [0]
+
+        def scripted_page(symbol: str, when: object, count: int) -> np.ndarray:
+            del symbol
+            calls[0] += 1
+            if not base:
+                base.append(int(when.timestamp() * 1000))
+            t0 = base[0]
+            values = page(t0, 1 if calls[0] <= 2 else 3)
+            if calls[0] <= 2:
+                values["time_msc"] = (t0,)
+                values["volume"] = (1,)
+                values["volume_real"] = (0.1,)
+            else:
+                values["time_msc"] = (t0, t0 + 1, t0 + 60000)
+                values["time"] = values["time_msc"] // 1000
+                values["volume"] = (1, 2, 3)
+                values["volume_real"] = (0.1, 0.2, 0.3)
+            return values[:count]
+
+        fake = fake_module([], history_sequence=[scripted_page] * 32)
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 16, 16, 0, 0, (0, 0))
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        observed: list[int] = []
+
+        def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            value = event.contents
+            if value.type == MT5_SUBSCRIPTION_TICK_BATCH and value.count:
+                ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[index].volume for index in range(value.count))
+            return 0
+
+        native_callback = self.event_callback_type(callback)
+        for _ in range(80):
+            time.sleep(0.02)
+            self.module.mt5bridge_process_events(64, native_callback, None)
+            if calls[0] >= 4 and observed.count(2) >= 1:
+                break
+        try:
+            self.assertGreaterEqual(calls[0], 4)
+            self.assertEqual(observed.count(1), 1)
+            self.assertEqual(observed.count(2), 1)
+            self.assertEqual(observed.count(3), 0)
+            for _ in range(10):
+                time.sleep(0.02)
+                self.module.mt5bridge_process_events(64, native_callback, None)
+            self.assertEqual(observed.count(2), 1)
         finally:
             self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
             self.module.mt5bridge_shutdown()

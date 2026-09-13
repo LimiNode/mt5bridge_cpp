@@ -70,7 +70,6 @@ struct RealtimeSource {
     std::chrono::steady_clock::time_point next_poll{};
     uint64_t next_sequence = 1;
     int64_t cursor_time_msc = -1;
-    std::size_t cursor_ordinal = 0;
     int64_t overlap_ms = 1000;
     std::vector<Mt5Tick> overlap_snapshot;
     Mt5SubscriptionDiagnostics diagnostics{};
@@ -80,7 +79,6 @@ struct RealtimeSource {
     std::deque<RealtimeBatch> ring;
     bool observed_valid = false;
     int64_t observed_cursor_time_msc = -1;
-    std::size_t observed_cursor_ordinal = 0;
     std::vector<Mt5Tick> cursor_boundary;
     std::vector<Mt5Tick> observed_boundary;
     bool recovery_from_committed = false;
@@ -969,7 +967,20 @@ void realtime_poller() try {
                         if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
                         if (is_partial_read_error(error_code)) partial = true;
                         if (page.empty()) { forward_complete = true; break; }
-                        const int64_t last_ts = page.back().time_msc;
+                        // copy_ticks_from() has no upper time bound.  Rows
+                        // newer than this poll's snapshot may therefore be
+                        // present in the response, but they must not advance
+                        // the committed cursor.
+                        bool saw_after_snapshot = false;
+                        int64_t last_ts = page_from - 1;
+                        for (const auto &tick : page) {
+                            if (tick.time_msc > now_msc) {
+                                saw_after_snapshot = true;
+                                continue;
+                            }
+                            if (tick.time_msc >= page_from)
+                                last_ts = std::max(last_ts, tick.time_msc);
+                        }
                         // Keep the persistent boundary immutable while this
                         // page is matched.  Only the temporary copy is
                         // decremented; otherwise repeated inclusive reads
@@ -1009,8 +1020,11 @@ void realtime_poller() try {
                             }
                         }
                         if (forward.size() >= kRealtimeEpochTickLimit) break;
-                        if (last_ts < page_from)
+                        if (last_ts < page_from) {
+                            if (saw_after_snapshot)
+                                forward_complete = true;
                             break;
+                        }
                         if (last_ts == page_from && new_boundary_count == 0) {
                             // The inclusive boundary has been fully consumed;
                             // a full page with no new payload multiplicity is
@@ -1020,10 +1034,6 @@ void realtime_poller() try {
                             break;
                         }
                         const bool stayed_on_boundary = last_ts == page_from;
-                        if (stayed_on_boundary && new_boundary_count == 0) {
-                            forward_complete = true;
-                            break;
-                        }
                         if (stayed_on_boundary) {
                             consumed_boundary_count += new_boundary_count;
                             for (const auto &entry : new_boundary)
@@ -1036,7 +1046,7 @@ void realtime_poller() try {
                             consumed_boundary_count = new_boundary_count;
                             boundary_records = std::move(new_boundary_records);
                         }
-                        if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
+                        if (saw_after_snapshot || page.size() < static_cast<std::size_t>(count)) {
                             forward_complete = true;
                             break;
                         }
@@ -1212,8 +1222,9 @@ void realtime_poller() try {
             std::unordered_map<std::string, std::size_t> forward_keys;
             for (const auto &tick : forward) ++forward_keys[tick_payload_key(tick)];
             std::vector<Mt5Tick> fresh;
-            // Forward traversal starts at the committed (time, ordinal) cursor,
-            // so its records are already distinct from committed delivery.  Do
+            // Forward traversal starts at the committed timestamp and payload
+            // boundary, so its records are already distinct from committed
+            // delivery.  Do
             // not deduplicate against the overlap snapshot here: that snapshot
             // contains observed records, including ticks from an earlier partial
             // epoch that may never have reached a consumer.  A committed replay
@@ -1287,12 +1298,10 @@ void realtime_poller() try {
                 // become part of the new cursor or make it move backwards.
                 const int64_t boundary_time = forward_boundary.front().time_msc;
                 source->observed_cursor_time_msc = boundary_time;
-                source->observed_cursor_ordinal = forward_boundary.size();
                 source->observed_boundary = forward_boundary;
                 source->observed_valid = true;
                 if (!partial && forward_complete) {
                     source->cursor_time_msc = boundary_time;
-                    source->cursor_ordinal = forward_boundary.size();
                     source->cursor_boundary = forward_boundary;
                 }
             }

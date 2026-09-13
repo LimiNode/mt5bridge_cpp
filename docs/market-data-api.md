@@ -49,21 +49,38 @@ History reads are retrieved through bounded `copy_ticks_from()` pages and
 retried up to three times with bounded backoff when MT5 returns no result or a
 classified partial page during history warm-up. Empty and short successful
 pages receive bounded confirmation probes before the reader declares the range
-complete. Diagnostics record attempts, retries, warm-up detection, and
+complete. The confirmation counter resets whenever a page contributes a newly
+accepted tick, so only consecutive probes without progress can prove
+completion. Diagnostics record attempts, retries, warm-up detection, and
 completion status. The callback API delivers each page outside
 the Python/GIL and runtime-mutex critical sections, so a consumer does not need
 to retain a year-sized NumPy allocation in the DLL. Callbacks may return
 non-zero to cancel delivery and may call another bridge operation; shutting
 the bridge down from a callback cancels the outer traversal on its next page.
+A non-empty page accompanied by a transient history status (including 4403) is
+provisional: it is neither delivered nor used to advance the cursor. The next
+attempt replays the same inclusive boundary until a clean page arrives or the
+bounded partial-page budget is exhausted.
+
+A clean short page whose rows are all already present at the committed boundary
+(`last_timestamp == cursor_msc` with no new boundary multiplicity) is a valid
+end-of-range observation; it is confirmed with the same bounded probes before
+completion. A response whose last timestamp is older than the active cursor is
+never accepted as EOF and fails as stale data. In contrast, a full page that
+does not advance the timestamp or boundary payload multiset is treated as a
+non-progress error so a malformed MT5 response cannot spin the reader
+indefinitely.
 
 ## Pagination cursor rule
 
 Do not advance a cursor with `last_time_msc + 1`: multiple ticks can share one
-millisecond. Use `(time_msc, ordinal_at_timestamp)` and request the boundary
-timestamp inclusively, discarding exactly the already-consumed ordinal count.
-The next page request grows by that ordinal, so more than 65,536 ticks sharing
-one timestamp cannot stall the reader. A page that does not advance either the
-timestamp or its consumed ordinal fails instead of looping forever. On IPC
+millisecond. Keep the boundary timestamp and a multiset of full payloads already
+consumed at that timestamp; request the boundary inclusively and discard only
+matching payload occurrences. This remains lossless if MT5 changes the order of
+same-millisecond rows between pages. The next page request grows by the number
+of consumed boundary records, so more than 65,536 ticks sharing one timestamp
+cannot stall the reader. A page that does not advance either the timestamp or
+the consumed boundary multiset fails instead of looping forever. On IPC
 reconnect, traversal resumes from the last committed cursor.
 
 ## Realtime subscriptions (ABI 7)
@@ -77,11 +94,11 @@ every source-specific event carries `source_index`; no global chronological
 order is promised across symbols. The source uses the smallest requested
 interval and retains only a bounded ring of batches. Each poll epoch has two
 separate phases: a forward, lossless page traversal from the committed
-`(time_msc, ordinal)` cursor to the current observation time. `max_batch`
+`(time_msc, boundary payload multiset)` cursor to the current observation time. `max_batch`
 controls delivery batch size only; physical history pages use an independent
 minimum page size to avoid quadratic same-timestamp rereads. This is followed
-by a bounded tail reread for overlap
-reconciliation. The tail is never used as the forward cursor, so a dense
+by a bounded tail reread for overlap reconciliation using the same full-payload
+boundary matcher. The tail is never used as the forward cursor, so a dense
 overlap cannot trap the poller rereading the same first page forever.
 Each epoch has a hard one-million-tick safety budget and publishes catch-up in
 `max_batch`-sized ring batches. The validated product
@@ -94,6 +111,11 @@ by an MT5 timeout/IPC status is retained for reconciliation but is not published
 to consumers; the next forward pass restarts from the last committed cursor and
 delivers each tick once after a clean confirmation. Local epoch-budget
 exhaustion may continue from the observation.
+Each poll captures a `now_msc` snapshot before entering MT5 IPC. Because
+`copy_ticks_from()` has no upper time bound, a response may contain rows that
+arrived after that snapshot. Such rows are ignored for the current epoch and
+never advance the cursor; the last accepted row at or before `now_msc` remains
+the boundary, so accepted ticks cannot be repeated on the next poll.
 The first forward poll starts at the source creation timestamp; the overlap
 window is reserved for reconciliation and does not turn pre-subscription ticks
 into realtime events.

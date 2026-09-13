@@ -452,6 +452,35 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 65537)
 
+    def test_three_reads_of_same_timestamp_preserve_full_multiplicity(self) -> None:
+        """Persistent boundary multiplicity survives repeated reordered rereads."""
+        first = page(2000, 65536)
+        second = page(2000, 65537)
+        second = np.concatenate((second[32768:], second[:32768]))
+        third = page(2000, 65537)
+        third = np.concatenate((third[12345:], third[:12345]))
+        fake = fake_module([first, second, third, page(2000, 0)])
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        observed: list[int] = []
+
+        def callback(ticks: POINTER(Mt5Tick), count: int, user_data: int) -> int:
+            del user_data
+            observed.extend(ticks[index].volume for index in range(count))
+            return 0
+
+        native_callback = self.tick_callback_type(callback)
+        request = Mt5TicksRequest(b"EURUSD", 1000, 3000, 0)
+        try:
+            status = self.module.mt5bridge_copy_ticks_range(
+                byref(request), 1024, native_callback, None
+            )
+            self.assertEqual(status, 0, self.last_error())
+            self.assertEqual(len(observed), 65537)
+            self.assertEqual(set(observed), set(range(65537)))
+        finally:
+            self.module.mt5bridge_shutdown()
+
     def test_copyticks_rows_before_requested_from_are_discarded(self) -> None:
         """Rows older than the requested range never cross the POD boundary."""
         values = page(1000, 3)
@@ -1001,8 +1030,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             [],
             history_sequence=[
                 lambda when: make_page(when, 1024),
-                lambda when: make_page(when, 1025, True),
-                lambda when: make_page(when, 1025, True),
+                lambda when: make_page(when, 2049, True),
+                lambda when: make_page(when, 2049, True),
             ],
         )
         sys.modules["MetaTrader5"] = fake
@@ -1019,7 +1048,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             if value.type == MT5_SUBSCRIPTION_TICK_BATCH and value.count:
                 ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
                 observed.extend(ticks[index].volume for index in range(value.count))
-                if len(observed) >= 1025:
+                if len(observed) >= 2049:
                     return 1
             return 0
 
@@ -1027,11 +1056,66 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         for _ in range(80):
             time.sleep(0.03)
             self.module.mt5bridge_process_events(128, native_callback, None)
-            if len(observed) >= 1025:
+            if len(observed) >= 2049:
                 break
         try:
-            self.assertEqual(len(observed), 1025)
-            self.assertEqual(set(observed), set(range(1025)))
+            self.assertEqual(len(observed), 2049, f"calls={fake.calls} observed={len(observed)}")
+            self.assertEqual(set(observed), set(range(2049)))
+        finally:
+            self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+            self.module.mt5bridge_shutdown()
+
+    def test_realtime_overlap_reordering_does_not_report_rewrite(self) -> None:
+        """Overlap pagination uses payload multiplicity across three reordered pages."""
+        import time
+        base: list[int] = []
+        calls = [0]
+
+        def make_page(when: object, count: int, rotate: int = 0) -> np.ndarray:
+            if not base:
+                base.append(int(when.timestamp() * 1000))
+            values = page(base[0], count)
+            values["time_msc"] = base[0]
+            values["time"] = values["time_msc"] // 1000
+            if rotate:
+                values = np.concatenate((values[rotate:], values[:rotate]))
+            return values
+
+        def scripted_page(when: object) -> np.ndarray:
+            calls[0] += 1
+            return make_page(when, 2049, (calls[0] * 337) % 2049)
+
+        fake = fake_module([], history_sequence=[scripted_page] * 64)
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 1024, 16, 0, 0, (0, 0))
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+        observed: list[int] = []
+        gaps: list[int] = []
+
+        def callback(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
+            del user_data
+            value = event.contents
+            if value.type == MT5_SUBSCRIPTION_GAP:
+                gaps.append(value.gap_reason)
+            elif value.type == MT5_SUBSCRIPTION_TICK_BATCH and value.count:
+                ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[index].volume for index in range(value.count))
+            return 0
+
+        native_callback = self.event_callback_type(callback)
+        for _ in range(160):
+            time.sleep(0.02)
+            self.module.mt5bridge_process_events(128, native_callback, None)
+            if fake.calls >= 12 and len(observed) >= 2049:
+                break
+        try:
+            self.assertGreaterEqual(fake.calls, 12)
+            self.assertEqual(len(observed), 2049)
+            self.assertEqual(set(observed), set(range(2049)))
+            self.assertNotIn(MT5_GAP_SOURCE_INCONSISTENCY, gaps)
         finally:
             self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
             self.module.mt5bridge_shutdown()
@@ -1091,7 +1175,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 
-    def test_realtime_identical_payload_multiplicity_increase_emits_one_tick(self) -> None:
+    def test_realtime_late_multiplicity_with_newer_tail_advances_cursor(self) -> None:
         """An A×2 to A×3 history change emits exactly one additional payload."""
         import time
         base: list[int] = []
@@ -1137,11 +1221,11 @@ class FakeMt5RuntimeTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         observed.clear()
-        increased = page(base[0], 3)
-        increased["time_msc"] = base[0]
+        increased = page(base[0], 5)
+        increased["time_msc"] = (base[0], base[0], base[0], base[0] + 1, base[0] + 1)
         increased["time"] = increased["time_msc"] // 1000
-        increased["volume"] = 7
-        increased["volume_real"] = 0.7
+        increased["volume"] = (7, 7, 7, 8, 9)
+        increased["volume_real"] = (0.7, 0.7, 0.7, 0.8, 0.9)
         fake.histories["EURUSD"] = increased
         for _ in range(40):
             time.sleep(0.03)
@@ -1149,7 +1233,11 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             if len(observed) >= 3:
                 break
         try:
-            self.assertEqual(observed, [7], f"calls={fake.calls} observed={observed}")
+            self.assertEqual(observed, [7, 8, 9], f"calls={fake.calls} observed={observed}")
+            for _ in range(10):
+                time.sleep(0.03)
+                self.module.mt5bridge_process_events(64, native_callback, None)
+            self.assertEqual(observed, [7, 8, 9])
         finally:
             self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
             self.module.mt5bridge_shutdown()

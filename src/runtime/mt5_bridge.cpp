@@ -769,8 +769,12 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         std::vector<Mt5Tick> deliver;
         deliver.reserve(page.size());
         const int64_t last_timestamp = page.back().time_msc;
-        std::unordered_map<std::string, std::size_t> new_boundary;
-        std::size_t new_boundary_count = 0;
+        // Matching is destructive only for this page.  Keep the persistent
+        // boundary intact so a third (or later) inclusive reread can still
+        // match every occurrence that was consumed at this timestamp.
+        auto remaining_consumed = consumed_boundary;
+        std::unordered_map<std::string, std::size_t> next_boundary;
+        std::size_t next_boundary_count = 0;
         for (const Mt5Tick &tick : page) {
             if (tick.time_msc < request->from_msc || tick.time_msc > request->to_msc)
                 continue;
@@ -778,16 +782,22 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
                 continue;
             if (tick.time_msc == cursor_msc) {
                 const auto key = tick_payload_key(tick);
-                auto it = consumed_boundary.find(key);
-                if (it != consumed_boundary.end() && it->second != 0) {
+                auto it = remaining_consumed.find(key);
+                if (it != remaining_consumed.end() && it->second != 0) {
                     --it->second;
                     continue;
                 }
-                ++new_boundary[key];
-                ++new_boundary_count;
+                // A boundary is retained only while traversal remains at the
+                // same timestamp.  Late records at the old timestamp must be
+                // delivered, but must not leak into the next timestamp's
+                // boundary state.
+                if (last_timestamp == cursor_msc) {
+                    ++next_boundary[key];
+                    ++next_boundary_count;
+                }
             } else if (tick.time_msc == last_timestamp) {
-                ++new_boundary[tick_payload_key(tick)];
-                ++new_boundary_count;
+                ++next_boundary[tick_payload_key(tick)];
+                ++next_boundary_count;
             }
             deliver.push_back(tick);
         }
@@ -798,7 +808,7 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         // multiplicity at its boundary; adding one millisecond would lose
         // tied ticks, while positional skipping would lose reordered ticks.
         if (last_timestamp < cursor_msc ||
-            (last_timestamp == cursor_msc && new_boundary_count == 0)) {
+            (last_timestamp == cursor_msc && next_boundary_count == 0)) {
             if (confirming_short_page && !partial_page) {
                 if (short_page_confirmations >= kShortPageProbes)
                     break;
@@ -812,12 +822,12 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         const bool stayed_on_boundary = last_timestamp == cursor_msc;
         cursor_msc = last_timestamp;
         if (stayed_on_boundary) {
-            consumed_boundary_count += new_boundary_count;
-            for (const auto &entry : new_boundary)
+            consumed_boundary_count += next_boundary_count;
+            for (const auto &entry : next_boundary)
                 consumed_boundary[entry.first] += entry.second;
         } else {
-            consumed_boundary = std::move(new_boundary);
-            consumed_boundary_count = new_boundary_count;
+            consumed_boundary = std::move(next_boundary);
+            consumed_boundary_count = next_boundary_count;
         }
         if (partial_page) {
             ++partial_page_count;
@@ -891,7 +901,6 @@ void realtime_poller() try {
             std::string symbol;
             uint32_t flags = 0, interval = 250, max_batch = 1024, capacity = 64;
             int64_t cursor = -1, overlap_ms = 1000;
-            std::size_t cursor_ordinal = 0;
             std::vector<Mt5Tick> old_overlap;
             std::vector<Mt5Tick> boundary_snapshot;
             {
@@ -903,7 +912,6 @@ void realtime_poller() try {
                 max_batch = source->max_batch; capacity = source->capacity;
                 const bool use_observed = source->observed_valid && !source->recovery_from_committed;
                 cursor = use_observed ? source->observed_cursor_time_msc : source->cursor_time_msc;
-                cursor_ordinal = use_observed ? source->observed_cursor_ordinal : source->cursor_ordinal;
                 boundary_snapshot = use_observed ? source->observed_boundary : source->cursor_boundary;
                 overlap_ms = source->overlap_ms; old_overlap = source->overlap_snapshot;
             }
@@ -962,6 +970,11 @@ void realtime_poller() try {
                         if (is_partial_read_error(error_code)) partial = true;
                         if (page.empty()) { forward_complete = true; break; }
                         const int64_t last_ts = page.back().time_msc;
+                        // Keep the persistent boundary immutable while this
+                        // page is matched.  Only the temporary copy is
+                        // decremented; otherwise repeated inclusive reads
+                        // lose the original multiplicities.
+                        auto remaining_consumed = consumed_boundary;
                         std::unordered_map<std::string, std::size_t> new_boundary;
                         std::size_t new_boundary_count = 0;
                         std::vector<Mt5Tick> new_boundary_records;
@@ -969,14 +982,20 @@ void realtime_poller() try {
                             if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
                             if (tick.time_msc == page_from) {
                                 const auto key = tick_payload_key(tick);
-                                auto it = consumed_boundary.find(key);
-                                if (it != consumed_boundary.end() && it->second != 0) {
+                                auto it = remaining_consumed.find(key);
+                                if (it != remaining_consumed.end() && it->second != 0) {
                                     --it->second;
                                     continue;
                                 }
-                                ++new_boundary[key];
-                                ++new_boundary_count;
-                                new_boundary_records.push_back(tick);
+                                // Retain only the current timestamp as the
+                                // next boundary.  A late insert at the old
+                                // timestamp is delivered but must not be
+                                // mixed with a newer boundary.
+                                if (last_ts == page_from) {
+                                    ++new_boundary[key];
+                                    ++new_boundary_count;
+                                    new_boundary_records.push_back(tick);
+                                }
                             } else if (tick.time_msc == last_ts) {
                                 ++new_boundary[tick_payload_key(tick)];
                                 ++new_boundary_count;
@@ -990,8 +1009,16 @@ void realtime_poller() try {
                             }
                         }
                         if (forward.size() >= kRealtimeEpochTickLimit) break;
-                        if (last_ts < page_from || (last_ts == page_from && new_boundary_count == 0))
+                        if (last_ts < page_from)
                             break;
+                        if (last_ts == page_from && new_boundary_count == 0) {
+                            // The inclusive boundary has been fully consumed;
+                            // a full page with no new payload multiplicity is
+                            // a successful end of traversal, not a partial
+                            // recovery state.
+                            forward_complete = true;
+                            break;
+                        }
                         const bool stayed_on_boundary = last_ts == page_from;
                         if (stayed_on_boundary && new_boundary_count == 0) {
                             forward_complete = true;
@@ -1009,7 +1036,7 @@ void realtime_poller() try {
                             consumed_boundary_count = new_boundary_count;
                             boundary_records = std::move(new_boundary_records);
                         }
-                        if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) {
+                        if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
                             forward_complete = true;
                             break;
                         }
@@ -1018,10 +1045,11 @@ void realtime_poller() try {
                     const int64_t overlap_from = std::max<int64_t>(
                         source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
                     int64_t tail_from = overlap_from;
-                    std::size_t tail_skip = 0;
+                    std::unordered_map<std::string, std::size_t> tail_boundary;
+                    std::size_t tail_boundary_count = 0;
                     for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
-                        const std::size_t boundary_skip = tail_skip;
-                        const uint64_t requested = static_cast<uint64_t>(physical_page_size) + tail_skip;
+                        const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
+                            tail_boundary_count;
                         const int count = static_cast<int>(std::min<uint64_t>(requested,
                             static_cast<uint64_t>(std::numeric_limits<int>::max())));
                         PyRef from(make_datetime(tail_from));
@@ -1043,11 +1071,30 @@ void realtime_poller() try {
                         if (is_partial_read_error(error_code)) partial = true;
                         if (page.empty()) { reconcile_complete = true; break; }
                         const int64_t last_ts = page.back().time_msc;
-                        std::size_t last_count = 0;
-                        for (auto it = page.rbegin(); it != page.rend() && it->time_msc == last_ts; ++it) ++last_count;
+                        auto remaining_boundary = tail_boundary;
+                        std::unordered_map<std::string, std::size_t> next_boundary;
+                        std::size_t next_boundary_count = 0;
+                        bool delivered_new_boundary = false;
                         for (const auto &tick : page) {
                             if (tick.time_msc < overlap_from || tick.time_msc > now_msc) continue;
-                            if (tick.time_msc == tail_from && tail_skip != 0) { --tail_skip; continue; }
+                            if (tick.time_msc < tail_from) continue;
+                            if (tick.time_msc == tail_from) {
+                                const auto key = tick_payload_key(tick);
+                                auto it = remaining_boundary.find(key);
+                                if (it != remaining_boundary.end() && it->second != 0) {
+                                    --it->second;
+                                    continue;
+                                }
+                                if (last_ts == tail_from) {
+                                    ++next_boundary[key];
+                                    ++next_boundary_count;
+                                    delivered_new_boundary = true;
+                                }
+                            } else if (tick.time_msc == last_ts) {
+                                ++next_boundary[tick_payload_key(tick)];
+                                ++next_boundary_count;
+                                delivered_new_boundary = true;
+                            }
                             reconcile.push_back(tick);
                             if (reconcile.size() >= kRealtimeEpochTickLimit) {
                                 partial = true;
@@ -1057,15 +1104,29 @@ void realtime_poller() try {
                         }
                         if (reconcile.size() >= kRealtimeEpochTickLimit)
                             break;
-                        if (last_ts < tail_from || (last_ts == tail_from && last_count <= boundary_skip)) {
+                        if (last_ts < tail_from) {
                             partial = true;
                             upstream_partial = true;
                             reconcile_complete = false;
                             break;
                         }
-                        tail_from = last_ts;
-                        tail_skip = last_count;
-                        if (page.size() < static_cast<std::size_t>(count) || last_ts >= now_msc) {
+                        if (last_ts == tail_from && !delivered_new_boundary) {
+                            // The inclusive boundary has been completely
+                            // consumed; there is no further page to seek.
+                            reconcile_complete = true;
+                            break;
+                        }
+                        const bool stayed_on_boundary = last_ts == tail_from;
+                        if (stayed_on_boundary) {
+                            tail_boundary_count += next_boundary_count;
+                            for (const auto &entry : next_boundary)
+                                tail_boundary[entry.first] += entry.second;
+                        } else {
+                            tail_from = last_ts;
+                            tail_boundary = std::move(next_boundary);
+                            tail_boundary_count = next_boundary_count;
+                        }
+                        if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
                             reconcile_complete = true;
                             break;
                         }
@@ -1202,27 +1263,6 @@ void realtime_poller() try {
                 source->diagnostics.history_lag_ms = std::max<int64_t>(0, now_msc - observed);
             }
             if (!fresh.empty()) {
-                const auto tail_it = std::max_element(fresh.begin(), fresh.end(),
-                    [](const Mt5Tick &a, const Mt5Tick &b) { return a.time_msc < b.time_msc; });
-                const int64_t tail_time = tail_it->time_msc;
-                std::size_t tail_count = 0;
-                for (const auto &tick : fresh)
-                    if (tick.time_msc == tail_time) ++tail_count;
-                if (cursor < tail_time) {
-                    source->observed_cursor_time_msc = tail_time;
-                    source->observed_cursor_ordinal = tail_count;
-                } else if (cursor == tail_time) {
-                    source->observed_cursor_time_msc = tail_time;
-                    source->observed_cursor_ordinal = cursor_ordinal + tail_count;
-                } else {
-                    source->observed_cursor_time_msc = cursor;
-                    source->observed_cursor_ordinal = cursor_ordinal;
-                }
-                source->observed_valid = true;
-                if (!partial && forward_complete) {
-                    source->cursor_time_msc = source->observed_cursor_time_msc;
-                    source->cursor_ordinal = source->observed_cursor_ordinal;
-                }
                 const bool grow_overlap = partial || reconnected || rewrite ||
                     source->diagnostics.history_lag_ms > source->overlap_ms;
                 if (grow_overlap)
@@ -1241,6 +1281,10 @@ void realtime_poller() try {
                 }
             }
             if (!forward_boundary.empty()) {
+                // forward_boundary is maintained as a single-timestamp
+                // payload multiset.  Late inserts from an older timestamp
+                // may be delivered in the same page, but they must never
+                // become part of the new cursor or make it move backwards.
                 const int64_t boundary_time = forward_boundary.front().time_msc;
                 source->observed_cursor_time_msc = boundary_time;
                 source->observed_cursor_ordinal = forward_boundary.size();

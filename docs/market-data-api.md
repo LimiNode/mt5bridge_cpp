@@ -79,11 +79,11 @@ every source-specific event carries `source_index`; no global chronological
 order is promised across symbols. The source uses the smallest requested
 interval and retains only a bounded ring of batches. Each poll epoch has two
 separate phases: a forward, lossless page traversal from the committed
-`(time_msc, ordinal)` cursor to the current observation time. `max_batch`
+`(time_msc, boundary payload multiset)` cursor to the current observation time. `max_batch`
 controls delivery batch size only; physical history pages use an independent
 minimum page size to avoid quadratic same-timestamp rereads. This is followed
-by a bounded tail reread for overlap
-reconciliation. The tail is never used as the forward cursor, so a dense
+by a bounded tail reread for overlap reconciliation using the same full-payload
+boundary matcher. The tail is never used as the forward cursor, so a dense
 overlap cannot trap the poller rereading the same first page forever.
 Each epoch has a hard one-million-tick safety budget and publishes catch-up in
 `max_batch`-sized ring batches. The validated product

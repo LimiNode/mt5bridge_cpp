@@ -13,10 +13,14 @@ MT5 has no push tick API in the Python package, so the implementation polls
 `copy_ticks_from()` in one physical source per `(symbol, flags)`. Group members
 have independent sequence cursors while each source owns a bounded ring. A
 source keeps a full-payload boundary multiset for its inclusive cursor, because
-MT5 may reorder rows that share one `time_msc` between reads.
+MT5 may reorder rows that share one `time_msc` between reads. The persistent
+boundary contains records for exactly one timestamp (the current cursor);
+late inserts from an older timestamp are delivered but never mixed into the
+new boundary.
 
 Each poll is split into a lossless forward pagination pass and a separately
-bounded overlap reconciliation pass. `max_batch` is the logical delivery batch
+bounded overlap reconciliation pass. Both passes use the same non-destructive
+full-payload boundary matcher. `max_batch` is the logical delivery batch
 size; physical history pages use a separate minimum page size and never limit
 the amount of forward history traversed. This distinction is required
 because MT5 may return thousands of records with one timestamp; using the

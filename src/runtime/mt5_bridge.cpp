@@ -810,8 +810,14 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             }
             deliver.push_back(tick);
         }
+        const bool made_progress = !deliver.empty();
         if (!deliver.empty() && consume(deliver.data(), deliver.size()) != 0)
             return false;
+
+        // Confirmation probes prove stability only after a page with no new
+        // accepted ticks. Any progress means history may still be warming up.
+        if (made_progress)
+            short_page_confirmations = 0;
 
         // copy_ticks_from is inclusive. Keep the timestamp and payload
         // multiplicity at its boundary; adding one millisecond would lose

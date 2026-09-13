@@ -671,6 +671,25 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(size, 2)
         self.assertGreaterEqual(diagnostics.attempts, 3)
 
+    def test_short_page_progress_resets_completion_confirmation(self) -> None:
+        """New ticks restart the EOF stability proof after empty probes."""
+        d = page(2000, 1)
+        de = page(2000, 2)
+        de["time_msc"] = (2000, 2100)
+        de["time"] = de["time_msc"] // 1000
+        fake = fake_module([
+            page(2000, 0),
+            page(2000, 0),
+            d,
+            de,
+            de,
+            de,
+        ])
+        status, size, _, error = self.query(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertGreaterEqual(fake.calls, 6)
+
     def test_exact_full_page_followed_by_boundary_only_is_confirmed_complete(self) -> None:
         """A consumed short boundary page is a valid, probe-confirmed EOF."""
         first = page(2000, 65536)

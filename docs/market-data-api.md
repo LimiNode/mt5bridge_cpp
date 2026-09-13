@@ -49,7 +49,9 @@ History reads are retrieved through bounded `copy_ticks_from()` pages and
 retried up to three times with bounded backoff when MT5 returns no result or a
 classified partial page during history warm-up. Empty and short successful
 pages receive bounded confirmation probes before the reader declares the range
-complete. Diagnostics record attempts, retries, warm-up detection, and
+complete. The confirmation counter resets whenever a page contributes a newly
+accepted tick, so only consecutive probes without progress can prove
+completion. Diagnostics record attempts, retries, warm-up detection, and
 completion status. The callback API delivers each page outside
 the Python/GIL and runtime-mutex critical sections, so a consumer does not need
 to retain a year-sized NumPy allocation in the DLL. Callbacks may return

@@ -90,7 +90,11 @@ not sent or advanced to `dispatching`. If the
 account changes during reconciliation, observation is suspended and the
 operation receives `ACCOUNT_MISMATCH` rather than attaching the new account's
 records to the old graph. A managed TradeManager holds a single-writer lease
-per AccountKey so two processes cannot maintain competing netting ledgers.
+per AccountKey so two processes cannot maintain competing netting ledgers. The
+lease must be an OS-backed exclusive ownership primitive held continuously
+through the dispatch barrier and `order_send`, or a fencing-token protocol;
+a bare time-based lease without fencing is insufficient because an expired
+owner could continue sending after a new owner takes over.
 
 ## Identity and certainty rules
 
@@ -120,9 +124,9 @@ not universal guarantees.
 
 Operation state, logical Trade state, and certainty are separate dimensions.
 Operation state includes `queued`, `prechecking`, `submitting`, `accepted`,
-`partially_filled`, `filled`, `cancelled`, `rejected`, `failed`, and
-`ambiguous`. Trade state includes `pending`, `partially_open`, `open`,
-`reducing`, `closing`, `closed`, `reversed`, and `ambiguous`. Certainty is
+`reconciling`, `partially_filled`, `filled`, `cancelled`, `expired`, `rejected`,
+`failed`, and `ambiguous`. Trade state includes `pending`, `partially_open`,
+`open`, `reducing`, `closing`, `closed`, `reversed`, and `ambiguous`. Certainty is
 `provisional`, `server_confirmed`, `reconciled`, or `ambiguous`. A filled close
 operation can therefore leave a trade `reducing` or `closed`; `filled` never
 means that the logical trade is open.
@@ -135,11 +139,20 @@ dimensions; they are not a fourth lifecycle state. `PENDING` means the
 operation is still being observed, `CONFIRMED` means matching server evidence
 has been found, `NOT_OBSERVED` means the deadline passed without evidence, and
 `ACCOUNT_MISMATCH` means observation was stopped because the terminal account
-changed. `TRADE_EVENT_GAP` (or another overflow reason) means that a hint
-stream was incomplete and an authoritative snapshot is required. These
-outcomes may accompany `OperationState::reconciling` with provisional
-certainty, and an unresolved `NOT_OBSERVED` operation can later become
-`CONFIRMED`, `RECONCILED`, or `AMBIGUOUS`.
+changed, and `AMBIGUOUS` means no unique attribution could be proven.
+`TRADE_EVENT_GAP` (or another overflow reason) means that a hint stream was
+incomplete and an authoritative snapshot is required. These outcomes may
+accompany `OperationState::reconciling` with provisional certainty. An
+unresolved `NOT_OBSERVED` operation can later resolve as
+`ReconciliationOutcome::CONFIRMED` with `Certainty::reconciled`, or as
+`ReconciliationOutcome::AMBIGUOUS` with `Certainty::ambiguous`.
+
+The canonical outcome vocabulary is:
+
+```text
+ReconciliationOutcome:
+PENDING, CONFIRMED, NOT_OBSERVED, ACCOUNT_MISMATCH, TRADE_EVENT_GAP, AMBIGUOUS
+```
 
 ## Safety constraints
 

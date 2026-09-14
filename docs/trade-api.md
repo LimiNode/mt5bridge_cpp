@@ -77,6 +77,11 @@ pending -> partially_open -> open -> reducing -> closing -> closed
                                   └───────────────> reversed
 ```
 
+The canonical `OperationState` vocabulary is `queued`, `prechecking`,
+`submitting`, `accepted`, `reconciling`, `partially_filled`, `filled`,
+`cancelled`, `expired`, `rejected`, `failed`, and `ambiguous`. `cancelled` and
+`expired` are distinct terminal causes.
+
 Certainty is reported independently:
 
 ```text
@@ -93,11 +98,20 @@ dimensions; they are not a fourth lifecycle enum. `PENDING` means observation
 is still in progress, `CONFIRMED` means matching server evidence was found,
 `NOT_OBSERVED` means the deadline passed without evidence, and
 `ACCOUNT_MISMATCH` means observation stopped because the terminal account
-changed. `TRADE_EVENT_GAP` (or another overflow reason) means a hint stream was
+changed, and `AMBIGUOUS` means no unique attribution could be proven.
+`TRADE_EVENT_GAP` (or another overflow reason) means a hint stream was
 incomplete and an authoritative snapshot/query is required. These outcomes
-may accompany `OperationState::reconciling` with provisional certainty, and an
-unresolved `NOT_OBSERVED` operation can later become `CONFIRMED`,
-`RECONCILED`, or `AMBIGUOUS`.
+may accompany `OperationState::reconciling` with provisional certainty. An
+unresolved `NOT_OBSERVED` operation can later resolve as
+`ReconciliationOutcome::CONFIRMED` with `Certainty::reconciled`, or as
+`ReconciliationOutcome::AMBIGUOUS` with `Certainty::ambiguous`.
+
+The canonical outcome vocabulary is:
+
+```text
+ReconciliationOutcome:
+PENDING, CONFIRMED, NOT_OBSERVED, ACCOUNT_MISMATCH, TRADE_EVENT_GAP, AMBIGUOUS
+```
 
 ## Submission and reconciliation algorithm
 
@@ -153,7 +167,11 @@ capabilities must allow the request, and the process must hold the matching
 single-writer lease. A mismatch prevents sending or advancing to `dispatching`.
 If the account changes during reconciliation, suspend observation with
 `ACCOUNT_MISMATCH`; never attach the new account's records to the old graph. A
-managed TradeManager uses a single-writer lease per AccountKey.
+managed TradeManager uses a single-writer lease per AccountKey. The lease must
+be an OS-backed exclusive ownership primitive held continuously through the
+dispatch barrier and `order_send`, or a fencing-token protocol; a bare
+time-based lease without fencing is insufficient because an expired owner
+could continue sending after a new owner takes over.
 
 History reads use sets/maps keyed by tickets and bounded overlap snapshots.
 They never rely on chronological order, the last array element, or an

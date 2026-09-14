@@ -36,6 +36,11 @@ may load it dynamically; they must not depend on private C++ or Python objects.
 - Keep transport/ABI, Python runtime, request dispatch, and domain operations
   separate. New MetaTrader methods belong in a narrow dispatcher, not in a
   second bridge implementation.
+- Keep public SDK headers in `include/mt5bridge/` (plus the root
+  `include/mt5bridge.hpp`) and private runtime implementation in
+  `src/runtime/`. Private headers stay beside their `.cpp` files; do not create
+  a parallel private include tree or split a single implementation unit until
+  a real responsibility boundary requires it.
 - Prefer one general helper over repeated validation/serialization blocks.
   Delete unreachable branches, redundant checks, and comments that only repeat
   the next line.

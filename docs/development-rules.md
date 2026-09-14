@@ -26,6 +26,12 @@ and future changes more expensive without adding behavior.
   ownership, invariants, and non-obvious compatibility constraints only.
 - Do not generate speculative layers, adapters, or configuration options. Add
   an abstraction only when at least two real callers share a stable contract.
+- Keep public SDK headers under `include/mt5bridge/` and private runtime
+  implementation under `src/runtime/`. Private headers belong beside their
+  implementation files; do not create a parallel private include tree.
+- Do not split a single implementation unit for visual symmetry. Extract a
+  private `.hpp`/`.cpp` pair only when a real responsibility boundary or a
+  second caller requires it.
 
 ## Review gates
 

@@ -68,11 +68,31 @@ is `mt5_bridge` and is optional via `MT5BRIDGE_BUILD_RUNTIME=OFF`. This keeps
 `Python3::Python` a PRIVATE build dependency of the DLL rather than a dependency
 of applications that only consume the client header.
 
-Source layout mirrors the split: `include/mt5bridge.hpp` is the stable umbrella;
-the focused headers `include/mt5bridge/abi.h`,
-`include/mt5bridge/client.hpp` and `include/mt5bridge/data.h` are
-consumer-facing, while
-`src/runtime/mt5_bridge.cpp` is the CPython-backed implementation.
+## Public and private source layout
+
+Source layout mirrors the component boundary:
+
+```text
+include/
+├── mt5bridge.hpp
+└── mt5bridge/
+    ├── abi.h
+    ├── client.hpp
+    └── data.h
+
+src/
+└── runtime/
+    └── mt5_bridge.cpp
+```
+
+Everything below `include/mt5bridge*` is consumer-facing SDK/API. Everything
+below `src/runtime/` is private implementation owned by the DLL and must not be
+included by applications. When the runtime grows, private `.hpp` and `.cpp`
+files should live side by side in `src/runtime/`; do not create a second
+private include tree merely to mirror the public one. Keep
+`src/runtime/mt5_bridge.cpp` as one implementation unit until a real
+responsibility boundary justifies a split; directory shape alone is not a
+reason to add speculative wrappers or adapters.
 
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).

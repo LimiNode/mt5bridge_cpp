@@ -765,14 +765,17 @@ bool copy_order_check_result(PyObject *object, Mt5OrderCheckResult *result) {
         return false;
     }
     Mt5OrderCheckResult converted{};
+    // MqlTradeCheckResult has a fixed documented shape.  Do not turn a
+    // malformed or truncated backend record into a successful result with
+    // indistinguishable zero/default fields; callers must see the failure.
     if (!trade_uint32(object, "retcode", &converted.retcode, true) ||
-        !trade_double(object, "balance", &converted.balance, false) ||
-        !trade_double(object, "equity", &converted.equity, false) ||
-        !trade_double(object, "profit", &converted.profit, false) ||
-        !trade_double(object, "margin", &converted.margin, false) ||
-        !trade_double(object, "margin_free", &converted.margin_free, false) ||
-        !trade_double(object, "margin_level", &converted.margin_level, false) ||
-        !trade_text(object, "comment", converted.comment, sizeof(converted.comment), false)) {
+        !trade_double(object, "balance", &converted.balance, true) ||
+        !trade_double(object, "equity", &converted.equity, true) ||
+        !trade_double(object, "profit", &converted.profit, true) ||
+        !trade_double(object, "margin", &converted.margin, true) ||
+        !trade_double(object, "margin_free", &converted.margin_free, true) ||
+        !trade_double(object, "margin_level", &converted.margin_level, true) ||
+        !trade_text(object, "comment", converted.comment, sizeof(converted.comment), true)) {
         return false;
     }
     *result = converted;

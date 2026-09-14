@@ -48,8 +48,11 @@ in [`include/mt5bridge/trade.h`](../include/mt5bridge/trade.h):
 - `mt5bridge_order_check()` forwards a plain-C request to the advisory MT5
   `order_check()` call and returns the `MqlTradeCheckResult` fields
   (retcode/comment and projected margin values). A rejected check is still a
-  successful transport call; it never submits an order. `retcode_external` is
-  deliberately reserved for the future `order_send` result.
+  successful transport call; it never submits an order. Every documented
+  result field is required; a truncated backend record fails closed instead of
+  becoming a result containing ambiguous zero/default values.
+  `retcode_external` is deliberately reserved for the future `order_send`
+  result.
 
 The C++ facade exposes these operations as `Client::account_info()`,
 `Client::symbol_capabilities()`, and `Client::order_check()`. Namedtuple and

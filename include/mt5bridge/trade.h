@@ -187,6 +187,8 @@ typedef struct Mt5OrderCheckRequest {
 ///
 /// This mirrors MqlTradeCheckResult. retcode_external belongs to the future
 /// side-effecting order_send result and is intentionally absent here.
+/// Every documented field is required in the backend record; a missing field
+/// is reported as an error instead of being silently returned as zero/default.
 typedef struct Mt5OrderCheckResult {
     uint32_t retcode;         ///< MT5 TRADE_RETCODE_* value.
     double balance;           ///< Projected balance.

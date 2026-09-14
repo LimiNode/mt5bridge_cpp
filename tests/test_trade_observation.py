@@ -310,6 +310,29 @@ class TradeObservationTests(unittest.TestCase):
         self.assertEqual(self.fake.order_requests[-1]["action"], 1)
         self.assertAlmostEqual(self.fake.order_requests[-1]["volume"], 0.25)
 
+    def test_incomplete_order_check_result_fails_closed(self) -> None:
+        """A missing documented result field must not become an ambiguous zero."""
+        def incomplete_order_check(request: dict[str, object]) -> object:
+            self.fake.order_requests.append(dict(request))
+            return {
+                "retcode": 10009,
+                "balance": 10000.0,
+                "equity": 10000.0,
+                "profit": 0.0,
+                "margin": 100.0,
+                # margin_free is intentionally absent.
+                "margin_level": 10000.0,
+                "comment": "accepted",
+            }
+
+        self.fake.order_check = incomplete_order_check
+        result = Mt5OrderCheckResult()
+        self.assertNotEqual(
+            self.dll.mt5bridge_order_check(byref(Mt5OrderCheckRequest()), byref(result)),
+            0,
+        )
+        self.assertIn("margin_free is required", self.last_error())
+
     def test_invalid_reserved_field_fails_closed(self) -> None:
         request = Mt5SymbolRequest(b"EURUSD", 1)
         capabilities = Mt5SymbolCapabilities()

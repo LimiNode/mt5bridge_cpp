@@ -118,6 +118,47 @@ ticket/identifier-graph reconciliation flow is documented in
 [`docs/trade-api.md`](docs/trade-api.md) and
 [`docs/adr/0004-trade-reconciliation.md`](docs/adr/0004-trade-reconciliation.md).
 
+## Typed trade observation quickstart
+
+The first Stage 1 slice is read-only: it observes the account, asks MT5 for
+symbol execution capabilities, and runs an advisory `order_check`. It never
+calls `order_send`.
+
+1. Build the `trade_observation_example` target with the runtime enabled:
+
+   ```powershell
+   cmake --build build --config Release --target trade_observation_example
+   ```
+2. Start and log in to the MetaTrader 5 terminal.
+3. Make the Python package visible to the embedded runtime:
+
+   ```powershell
+   $env:PYTHONPATH = (Resolve-Path ..\..\..\venv\Lib\site-packages).Path
+   ```
+
+4. Run the example from the build output directory:
+
+   ```powershell
+   .\trade_observation_example.exe EURUSD
+   ```
+
+The program performs three concrete observations:
+
+- `Client::account_info()` prints the immutable server/login identity and
+  permission fields. Check `known_fields` before using an optional capability;
+  an absent `hedge_allowed` field is reported as unknown, never inferred from
+  the margin mode.
+- `Client::symbol_capabilities()` prints trade mode, execution mode, filling
+  and order masks, volume limits, and the `CLOSEBY` capability. Its
+  `known_fields` mask distinguishes a real zero from a missing Python field.
+- `Client::order_check()` sends a market-buy-shaped request to the advisory
+  MT5 validator. The example uses a recent ask and `volume_min` when both are
+  available; otherwise it deliberately requests zero volume to demonstrate a
+  safe rejection such as `Invalid volume`. Neither path has a trading side
+  effect.
+
+The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
+
 With a logged-in terminal, run the bounded native market-data smoke check from
 the build output directory (optionally pass a broker-specific symbol):
 
@@ -134,8 +175,13 @@ embedded runtime cannot discover it automatically.
 
 ## Notes
 
-- The current public contract is ABI 7. Tick POD records preserve separate
+- The current public contract is ABI 8. Tick POD records preserve separate
   integer `volume` and floating-point `volume_real` fields.
+- The first typed trade-observation slice exposes account snapshots, symbol
+  capabilities, and advisory `order_check` through `trade.h`; it does not
+  expose an unmanaged `order_send`.
+- The legacy JSON `open_market_buy` convenience method is disabled in ABI 8;
+  durable order dispatch will arrive only with the Stage 2 journal.
 - Realtime consumers use `mt5bridge_subscribe_ticks()` and host-driven
   `mt5bridge_process_events()`; overflow is reported as an explicit GAP event.
 - Only 64‑bit Windows builds are supported.

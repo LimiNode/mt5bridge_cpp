@@ -13,3 +13,5 @@ arbitrary CPython versions.
 - Convert non-zero return codes into `RuntimeError` using `last_error()`.
 - Keep the DLL name and exported symbols identical to the C++ examples.
 - Do not retain pointers returned by the DLL after the call returns.
+- Do not add a convenience wrapper that invokes `order_send`; ABI 8 keeps
+  trade observations advisory until the durable Stage 2 journal exists.

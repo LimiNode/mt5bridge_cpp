@@ -32,6 +32,69 @@ side-effecting `order_send` to production callers; that primitive remains
 internal until stage 2 supplies durable intent, account/lease verification,
 and the non-resendable dispatch barrier.
 
+## Implemented Stage 1 slice
+
+The current ABI 8 implementation exposes the first bounded observation slice
+in [`include/mt5bridge/trade.h`](../include/mt5bridge/trade.h):
+
+- `mt5bridge_account_info()` returns account identity, permissions, margin mode,
+  and balance/equity fields as a fixed-size `Mt5AccountInfo` snapshot. Its
+  `known_fields` mask makes an unavailable permission (for example
+  `hedge_allowed`, which current Python packages do not expose) explicit.
+- `mt5bridge_symbol_capabilities()` returns execution, filling, expiration,
+  sizing, stop/freeze, and `SYMBOL_ORDER_CLOSEBY` capability bits. The
+  `trade_exemode` field is distinct from `trade_mode`; use the symbol
+  `known_fields` mask before resolving a filling policy.
+- `mt5bridge_order_check()` forwards a plain-C request to the advisory MT5
+  `order_check()` call and returns the `MqlTradeCheckResult` fields
+  (retcode/comment and projected margin values). A rejected check is still a
+  successful transport call; it never submits an order. Every documented
+  result field is required; a truncated backend record fails closed instead of
+  becoming a result containing ambiguous zero/default values.
+  `retcode_external` is deliberately reserved for the future `order_send`
+  result.
+
+The C++ facade exposes these operations as `Client::account_info()`,
+`Client::symbol_capabilities()`, and `Client::order_check()`. Namedtuple and
+mapping results are converted under the runtime mutex and GIL into POD values;
+no Python object crosses the ABI. Active orders, positions, history orders, and
+history deals remain subsequent Stage 1 slices so each observation contract can
+be tested independently. A public side-effecting `order_send` remains
+intentionally absent until the durable journal and reconciliation barrier in
+Stage 2 are implemented.
+
+## Quickstart scenarios
+
+The runnable [`trade_observation_example.cpp`](../examples/trade_observation_example.cpp)
+shows the intended caller sequence:
+
+1. Build the example with `cmake --build build --config Release --target trade_observation_example`,
+   then load `mt5_bridge.dll` with `mt5bridge::Client` and initialize the terminal.
+2. Read `Client::account_info()` and retain the server/login `AccountKey`
+   evidence. Test `known_fields` before making decisions from optional
+   permissions; unknown is not the same as `false`.
+3. Read `Client::symbol_capabilities("EURUSD")`. Use `trade_mode`,
+   `trade_exemode`, filling/order masks, and volume/tick constraints to choose
+   a candidate request policy. Test the corresponding symbol known bits first.
+4. Build `Mt5OrderCheckRequest` and call `Client::order_check()`. The returned
+   `retcode` and `comment` explain the advisory result; even a rejection is a
+   successful transport call and no order is sent.
+5. Shut down the client before it is destroyed or the DLL is unloaded.
+
+This sequence is useful for two common scenarios:
+
+- **Pre-trade validation:** inspect account/symbol capabilities, then run
+  `order_check` to explain an invalid volume, filling mode, or permission.
+- **Startup diagnostics:** record the account identity and known-field masks,
+  then fail closed if a required capability is unavailable. The later Stage 2
+  journal can safely reuse these observations without guessing missing values.
+
+The example uses the standard MT5 numeric values `TRADE_ACTION_DEAL = 1` and
+`ORDER_TYPE_BUY = 0` only to shape the advisory request. When a recent ask and
+known volume limits are available, it checks `volume_min`; otherwise it uses
+zero volume to produce a safe diagnostic rejection. It intentionally does not
+expose or invoke `order_send`; durable dispatch is a separate stage.
+
 ## Identity model
 
 The bridge owns two IDs:

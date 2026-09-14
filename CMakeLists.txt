@@ -117,6 +117,15 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         set_tests_properties(mt5bridge_python_adapter PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
+        add_test(
+            NAME mt5bridge_trade_observation
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "MT5BRIDGE_DLL=$<TARGET_FILE:mt5_bridge>"
+                    "${Python3_EXECUTABLE}" -m unittest tests.test_trade_observation -v
+        )
+        set_tests_properties(mt5bridge_trade_observation PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
     endif()
 endif()
 
@@ -152,4 +161,8 @@ if(BUILD_EXAMPLES)
     add_executable(live_market_smoke examples/live_market_smoke.cpp)
     target_link_libraries(live_market_smoke PRIVATE mt5bridge::client)
     set_target_properties(live_market_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+
+    add_executable(trade_observation_example examples/trade_observation_example.cpp)
+    target_link_libraries(trade_observation_example PRIVATE mt5bridge::client)
+    set_target_properties(trade_observation_example PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 endif()

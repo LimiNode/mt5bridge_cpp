@@ -92,7 +92,8 @@ remains the diagnostic fallback for development and clean-machine testing.
 ## Delivery sequence
 
 1. Stabilize realtime subscriptions and assign ABI v7 (completed in the
-   realtime branch).
+   realtime branch); ABI 8 subsequently adds typed trade observation while
+   preserving that realtime surface.
 2. Build and validate an external runtime ZIP on a clean Windows machine.
 3. Split the current implementation into bootstrap and
    `mt5_bridge_runtime.dll`; verify that the bootstrap has no Python imports.

@@ -4,14 +4,15 @@
 
 The project builds one Windows x64 shared library, `mt5_bridge.dll`. The DLL
 embeds CPython, imports `MetaTrader5`, validates a small request object, calls a
-named operation, and returns UTF-8 JSON. C++ applications use the lightweight
-`mt5bridge::Client` facade (or the plain C ABI); the Python binding uses ctypes.
+named operation, and returns UTF-8 JSON or typed POD observations. C++
+applications use the lightweight `mt5bridge::Client` facade (or the plain C
+ABI); the Python binding uses ctypes.
 
 The boundary is deliberately narrower than the implementation:
 
 ```text
 consumer (C++ / ctypes)
-        |  mt5bridge::Client or C ABI: UTF-8 JSON + explicit free
+        |  mt5bridge::Client or C ABI: UTF-8 JSON + POD snapshots
 mt5_bridge.dll
         |  serialized lifecycle + GIL
 request dispatcher
@@ -33,8 +34,9 @@ version-independent.
   string. The caller releases it with `mt5bridge_free()`.
 - `mt5bridge_shutdown()` is idempotent, returns a status, and completes before
   unloading the DLL.
-- ABI 7 is checked by both `mt5bridge::Client` and the ctypes adapter before
-  use. POD sizes and field offsets are compile-time assertions in `data.h`.
+- ABI 8 is checked by both `mt5bridge::Client` and the ctypes adapter before
+  use. POD sizes and field offsets are compile-time assertions in `data.h` and
+  `trade.h`; the additive trade observation surface has its own API version.
 - Calls that touch Python are serialized. Diagnostics are thread-local and are
   valid until the next call on the same thread.
 - Native callbacks run without the Python GIL or runtime mutex held. Exported
@@ -78,7 +80,8 @@ include/
 └── mt5bridge/
     ├── abi.h
     ├── client.hpp
-    └── data.h
+    ├── data.h
+    └── trade.h
 
 src/
 └── runtime/
@@ -131,8 +134,11 @@ worker process.
 ## Migration path
 
 1. Keep the current embedded-Python backend as the release path.
-2. Add typed raw observation methods and tests (`order_check`, capabilities,
-   and active/history snapshots) without exposing an unmanaged send.
+2. Add typed raw observation methods and tests. The first Stage 1 slice now
+   covers account snapshots, symbol capabilities, and advisory `order_check`
+   through `trade.h`; active orders, positions, and history snapshots remain
+   subsequent bounded slices. Capability snapshots carry explicit known-field
+   masks, and no unmanaged public `order_send` is exposed.
 3. Add the durable dispatch journal and reconciliation graph described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier.

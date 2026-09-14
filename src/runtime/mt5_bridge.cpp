@@ -3,6 +3,7 @@
 
 #include <mt5bridge/abi.h>
 #include "mt5bridge/data.h"
+#include "mt5bridge/trade.h"
 
 #include <Python.h>
 
@@ -329,6 +330,455 @@ bool read_double(PyObject *dict, const char *key, double *value) {
         set_python_error();
         return false;
     }
+    return true;
+}
+
+/// \brief Retrieves a named attribute or mapping value as an owned reference.
+/// \param object Borrowed Python object returned by MetaTrader.
+/// \param name Field name to retrieve.
+/// \return Owned field reference, or nullptr when the field is absent.
+PyRef trade_field(PyObject *object, const char *name) {
+    if (PyDict_Check(object)) {
+        PyObject *value = PyDict_GetItemString(object, name);
+        if (!value)
+            return PyRef();
+        Py_INCREF(value);
+        return PyRef(value);
+    }
+    return PyRef(PyObject_GetAttrString(object, name));
+}
+
+/// \brief Tests whether a trade record contains a non-None field.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \return True when the field is present and carries a value.
+bool trade_has_field(PyObject *object, const char *name) {
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        return false;
+    }
+    return field.get() != Py_None;
+}
+
+/// \brief Reads an optional or required signed integer field from a trade record.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] value Destination value.
+/// \param required Whether absence or an invalid value is an error.
+/// \return True when the field was copied or was optional and absent.
+bool trade_int64(PyObject *object, const char *name, int64_t *value, bool required) {
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (field.get() == Py_None) {
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (!PyLong_Check(field.get())) {
+        PyErr_Clear();
+        set_error(name);
+        g_last_error += " must be an integer";
+        return false;
+    }
+    const long long converted = PyLong_AsLongLong(field.get());
+    if (PyErr_Occurred()) {
+        set_python_error();
+        return false;
+    }
+    *value = static_cast<int64_t>(converted);
+    return true;
+}
+
+/// \brief Reads a signed 32-bit field with range validation.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] value Destination value.
+/// \param required Whether absence is an error.
+/// \return True when the field was copied or was optional and absent.
+bool trade_int32(PyObject *object, const char *name, int32_t *value, bool required) {
+    int64_t converted = 0;
+    if (!trade_int64(object, name, &converted, required))
+        return false;
+    if (converted < std::numeric_limits<int32_t>::min() ||
+        converted > std::numeric_limits<int32_t>::max()) {
+        set_error(name);
+        g_last_error += " is out of range";
+        return false;
+    }
+    *value = static_cast<int32_t>(converted);
+    return true;
+}
+
+/// \brief Reads an unsigned 32-bit field with range validation.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] value Destination value.
+/// \param required Whether absence is an error.
+/// \return True when the field was copied or was optional and absent.
+bool trade_uint32(PyObject *object, const char *name, uint32_t *value, bool required) {
+    int64_t converted = 0;
+    if (!trade_int64(object, name, &converted, required))
+        return false;
+    if (converted < 0 || converted > std::numeric_limits<uint32_t>::max()) {
+        set_error(name);
+        g_last_error += " is out of range";
+        return false;
+    }
+    *value = static_cast<uint32_t>(converted);
+    return true;
+}
+
+/// \brief Reads an optional or required floating-point field from a trade record.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] value Destination value.
+/// \param required Whether absence or an invalid value is an error.
+/// \return True when the field was copied or was optional and absent.
+bool trade_double(PyObject *object, const char *name, double *value, bool required) {
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (field.get() == Py_None) {
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (!PyFloat_Check(field.get()) && !PyLong_Check(field.get())) {
+        PyErr_Clear();
+        set_error(name);
+        g_last_error += " must be a number";
+        return false;
+    }
+    *value = PyFloat_AsDouble(field.get());
+    if (PyErr_Occurred()) {
+        set_python_error();
+        return false;
+    }
+    return true;
+}
+
+/// \brief Reads an optional boolean field from a trade record.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] value Destination byte value.
+/// \return True when the field was copied or absent.
+bool trade_bool(PyObject *object, const char *name, uint8_t *value) {
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        return true;
+    }
+    if (field.get() == Py_None)
+        return true;
+    const int converted = PyObject_IsTrue(field.get());
+    if (converted < 0) {
+        set_python_error();
+        return false;
+    }
+    *value = converted != 0 ? 1u : 0u;
+    return true;
+}
+
+/// \brief Copies an optional UTF-8 field into a fixed-size ABI text slot.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] destination Fixed-size destination buffer.
+/// \param capacity Destination capacity in bytes.
+/// \return True when copied, absent, or empty; false on type/length errors.
+bool trade_text(PyObject *object, const char *name, char *destination, std::size_t capacity,
+                bool required = false) {
+    destination[0] = '\0';
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (field.get() == Py_None) {
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (!PyUnicode_Check(field.get())) {
+        set_error(name);
+        g_last_error += " must be a string";
+        PyErr_Clear();
+        return false;
+    }
+    const char *text = PyUnicode_AsUTF8(field.get());
+    if (!text) {
+        set_python_error();
+        return false;
+    }
+    const std::size_t length = std::strlen(text);
+    if (length >= capacity) {
+        set_error(name);
+        g_last_error += " is too long";
+        return false;
+    }
+    std::memcpy(destination, text, length + 1);
+    return true;
+}
+
+/// \brief Sets a borrowed UTF-8 string in a Python dictionary.
+/// \param dictionary Destination dictionary.
+/// \param name Key name.
+/// \param value Optional UTF-8 value.
+/// \return True when the key was inserted or omitted.
+bool set_trade_text(PyObject *dictionary, const char *name, const char *value) {
+    if (!value)
+        return true;
+    PyRef text(PyUnicode_FromString(value));
+    return text && PyDict_SetItemString(dictionary, name, text.get()) == 0;
+}
+
+/// \brief Sets an unsigned integer request field in a Python dictionary.
+/// \param dictionary Destination dictionary.
+/// \param name Key name.
+/// \param value Integer value.
+/// \return True when the key was inserted.
+bool set_trade_uint(PyObject *dictionary, const char *name, uint64_t value) {
+    PyRef integer(PyLong_FromUnsignedLongLong(value));
+    return integer && PyDict_SetItemString(dictionary, name, integer.get()) == 0;
+}
+
+/// \brief Sets a signed integer request field in a Python dictionary.
+/// \param dictionary Destination dictionary.
+/// \param name Key name.
+/// \param value Integer value.
+/// \return True when the key was inserted.
+bool set_trade_int(PyObject *dictionary, const char *name, int64_t value) {
+    PyRef integer(PyLong_FromLongLong(value));
+    return integer && PyDict_SetItemString(dictionary, name, integer.get()) == 0;
+}
+
+/// \brief Sets a floating-point request field in a Python dictionary.
+/// \param dictionary Destination dictionary.
+/// \param name Key name.
+/// \param value Floating-point value.
+/// \return True when the key was inserted.
+bool set_trade_double(PyObject *dictionary, const char *name, double value) {
+    PyRef number(PyFloat_FromDouble(value));
+    return number && PyDict_SetItemString(dictionary, name, number.get()) == 0;
+}
+
+/// \brief Converts a plain-C order-check request into an MT5 Python mapping.
+/// \param request Borrowed ABI request.
+/// \return Owned Python dictionary, or nullptr on allocation failure.
+PyRef make_order_check_request(const Mt5OrderCheckRequest *request) {
+    PyRef dictionary(PyDict_New());
+    if (!dictionary)
+        return PyRef();
+    const bool valid = set_trade_text(dictionary.get(), "symbol", request->symbol_utf8) &&
+        set_trade_text(dictionary.get(), "comment", request->comment_utf8) &&
+        set_trade_uint(dictionary.get(), "magic", request->magic) &&
+        set_trade_uint(dictionary.get(), "order", request->order) &&
+        set_trade_uint(dictionary.get(), "position", request->position) &&
+        set_trade_uint(dictionary.get(), "position_by", request->position_by) &&
+        set_trade_double(dictionary.get(), "volume", request->volume) &&
+        set_trade_double(dictionary.get(), "price", request->price) &&
+        set_trade_double(dictionary.get(), "stoplimit", request->stoplimit) &&
+        set_trade_double(dictionary.get(), "sl", request->sl) &&
+        set_trade_double(dictionary.get(), "tp", request->tp) &&
+        set_trade_int(dictionary.get(), "expiration", request->expiration) &&
+        set_trade_uint(dictionary.get(), "action", request->action) &&
+        set_trade_uint(dictionary.get(), "type", request->type) &&
+        set_trade_uint(dictionary.get(), "type_filling", request->type_filling) &&
+        set_trade_uint(dictionary.get(), "type_time", request->type_time) &&
+        set_trade_uint(dictionary.get(), "deviation", request->deviation);
+    if (!valid)
+        return PyRef();
+    return dictionary;
+}
+
+/// \brief Copies an account_info() result into the stable account POD.
+/// \param object Borrowed namedtuple or mapping returned by MetaTrader5.
+/// \param[out] info Destination snapshot.
+/// \return True when the required identity fields and all supplied values fit.
+bool copy_account_info(PyObject *object, Mt5AccountInfo *info) {
+    if (!object || object == Py_None || !info) {
+        set_error("MetaTrader5 account_info returned no snapshot");
+        return false;
+    }
+    Mt5AccountInfo converted{};
+    if (!trade_text(object, "server", converted.server, sizeof(converted.server), true) ||
+        !trade_text(object, "currency", converted.currency, sizeof(converted.currency), true)) {
+        return false;
+    }
+    int64_t login = 0;
+    if (!trade_int64(object, "login", &login, true) || login < 0) {
+        set_error("login must be a non-negative integer");
+        return false;
+    }
+    converted.login = static_cast<uint64_t>(login);
+    if (!trade_int32(object, "margin_mode", &converted.margin_mode, true) ||
+        !trade_int32(object, "trade_mode", &converted.trade_mode, true) ||
+        !trade_int32(object, "leverage", &converted.leverage, false) ||
+        !trade_bool(object, "trade_allowed", &converted.trade_allowed) ||
+        !trade_bool(object, "trade_expert", &converted.trade_expert) ||
+        !trade_bool(object, "fifo_close", &converted.fifo_close) ||
+        !trade_bool(object, "hedge_allowed", &converted.hedge_allowed) ||
+        !trade_double(object, "balance", &converted.balance, true) ||
+        !trade_double(object, "equity", &converted.equity, true)) {
+        return false;
+    }
+    uint64_t known_fields = 0;
+    if (trade_has_field(object, "server"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_SERVER;
+    if (trade_has_field(object, "currency"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_CURRENCY;
+    if (trade_has_field(object, "login"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_LOGIN;
+    if (trade_has_field(object, "margin_mode"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_MARGIN_MODE;
+    if (trade_has_field(object, "trade_mode"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_TRADE_MODE;
+    if (trade_has_field(object, "leverage"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_LEVERAGE;
+    if (trade_has_field(object, "trade_allowed"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_TRADE_ALLOWED;
+    if (trade_has_field(object, "trade_expert"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_TRADE_EXPERT;
+    if (trade_has_field(object, "fifo_close"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_FIFO_CLOSE;
+    if (trade_has_field(object, "hedge_allowed"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_HEDGE_ALLOWED;
+    if (trade_has_field(object, "balance"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_BALANCE;
+    if (trade_has_field(object, "equity"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_EQUITY;
+    converted.known_fields = known_fields;
+    *info = converted;
+    return true;
+}
+
+/// \brief Copies a symbol_info() result into the stable capability POD.
+/// \param object Borrowed namedtuple or mapping returned by MetaTrader5.
+/// \param mt5 Borrowed MetaTrader5 module used for capability constants.
+/// \param[out] capabilities Destination snapshot.
+/// \return True when the symbol record is valid and fits the ABI fields.
+bool copy_symbol_capabilities(PyObject *object, PyObject *mt5,
+                              Mt5SymbolCapabilities *capabilities) {
+    if (!object || object == Py_None || !mt5 || !capabilities) {
+        set_error("MetaTrader5 symbol_info returned no snapshot");
+        return false;
+    }
+    Mt5SymbolCapabilities converted{};
+    if (!trade_text(object, "name", converted.symbol, sizeof(converted.symbol), true) ||
+        !trade_uint32(object, "trade_mode", &converted.trade_mode, true) ||
+        !trade_uint32(object, "trade_exemode", &converted.trade_exemode, true) ||
+        !trade_uint32(object, "order_mode", &converted.order_mode, true) ||
+        !trade_uint32(object, "filling_mode", &converted.filling_mode, false) ||
+        !trade_uint32(object, "expiration_mode", &converted.expiration_mode, false) ||
+        !trade_uint32(object, "order_gtc_mode", &converted.order_gtc_mode, false) ||
+        !trade_int32(object, "trade_stops_level", &converted.trade_stops_level, false) ||
+        !trade_int32(object, "trade_freeze_level", &converted.trade_freeze_level, false) ||
+        !trade_uint32(object, "visible", &converted.visible, false) ||
+        !trade_uint32(object, "select", &converted.selected, false) ||
+        !trade_double(object, "volume_min", &converted.volume_min, false) ||
+        !trade_double(object, "volume_max", &converted.volume_max, false) ||
+        !trade_double(object, "volume_step", &converted.volume_step, false) ||
+        !trade_double(object, "volume_limit", &converted.volume_limit, false) ||
+        !trade_double(object, "trade_tick_size", &converted.trade_tick_size, false) ||
+        !trade_double(object, "point", &converted.point, false)) {
+        return false;
+    }
+    PyRef closeby(PyObject_GetAttrString(mt5, "SYMBOL_ORDER_CLOSEBY"));
+    if (closeby) {
+        const long long flag = PyLong_AsLongLong(closeby.get());
+        if (PyErr_Occurred() || flag < 0 ||
+            static_cast<unsigned long long>(flag) > std::numeric_limits<uint32_t>::max()) {
+            if (PyErr_Occurred())
+                set_python_error();
+            else
+                set_error("SYMBOL_ORDER_CLOSEBY is out of range");
+            return false;
+        }
+        converted.closeby_allowed =
+            (converted.order_mode & static_cast<uint32_t>(flag)) != 0 ? 1u : 0u;
+    } else {
+        PyErr_Clear();
+        // SYMBOL_ORDER_CLOSEBY is 64 in the current MT5 API.  Keep the
+        // fallback local so fake/minimal modules can still expose capabilities.
+        converted.closeby_allowed = (converted.order_mode & 64u) != 0 ? 1u : 0u;
+    }
+    uint64_t known_fields = MT5BRIDGE_SYMBOL_KNOWN_TRADE_MODE |
+                            MT5BRIDGE_SYMBOL_KNOWN_ORDER_MODE |
+                            MT5BRIDGE_SYMBOL_KNOWN_TRADE_EXEMODE;
+    if (trade_has_field(object, "filling_mode"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_FILLING_MODE;
+    if (trade_has_field(object, "expiration_mode"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_EXPIRATION_MODE;
+    if (trade_has_field(object, "order_gtc_mode"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_ORDER_GTC_MODE;
+    if (trade_has_field(object, "trade_stops_level"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_STOPS_LEVEL;
+    if (trade_has_field(object, "trade_freeze_level"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_FREEZE_LEVEL;
+    if (trade_has_field(object, "visible"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_VISIBLE;
+    if (trade_has_field(object, "select"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_SELECTED;
+    if (trade_has_field(object, "volume_min") && trade_has_field(object, "volume_max") &&
+        trade_has_field(object, "volume_step") && trade_has_field(object, "volume_limit"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_VOLUME_LIMITS;
+    if (trade_has_field(object, "trade_tick_size"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_TICK_SIZE;
+    if (trade_has_field(object, "point"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_POINT;
+    known_fields |= MT5BRIDGE_SYMBOL_KNOWN_CLOSEBY;
+    converted.known_fields = known_fields;
+    *capabilities = converted;
+    return true;
+}
+
+/// \brief Copies an order_check() result into the stable result POD.
+/// \param object Borrowed namedtuple or mapping returned by MetaTrader5.
+/// \param[out] result Destination result structure.
+/// \return True when the retcode and supplied numeric fields are valid.
+bool copy_order_check_result(PyObject *object, Mt5OrderCheckResult *result) {
+    if (!object || object == Py_None || !result) {
+        set_error("MetaTrader5 order_check returned no result");
+        return false;
+    }
+    Mt5OrderCheckResult converted{};
+    // MqlTradeCheckResult has a fixed documented shape.  Do not turn a
+    // malformed or truncated backend record into a successful result with
+    // indistinguishable zero/default fields; callers must see the failure.
+    if (!trade_uint32(object, "retcode", &converted.retcode, true) ||
+        !trade_double(object, "balance", &converted.balance, true) ||
+        !trade_double(object, "equity", &converted.equity, true) ||
+        !trade_double(object, "profit", &converted.profit, true) ||
+        !trade_double(object, "margin", &converted.margin, true) ||
+        !trade_double(object, "margin_free", &converted.margin_free, true) ||
+        !trade_double(object, "margin_level", &converted.margin_level, true) ||
+        !trade_text(object, "comment", converted.comment, sizeof(converted.comment), true)) {
+        return false;
+    }
+    *result = converted;
     return true;
 }
 
@@ -1330,6 +1780,132 @@ extern "C" {
 
 MT5BRIDGE_EXPORT uint32_t mt5bridge_abi_version() { return MT5BRIDGE_ABI_VERSION; }
 
+MT5BRIDGE_EXPORT uint32_t mt5bridge_trade_api_version() {
+    return MT5BRIDGE_TRADE_API_VERSION;
+}
+
+MT5BRIDGE_API int mt5bridge_account_info(Mt5AccountInfo *info) try {
+    clear_error();
+    if (!info) {
+        set_error("info is required");
+        return -1;
+    }
+    *info = Mt5AccountInfo{};
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> python_lock(g_python_mutex);
+    if (g_runtime_state != RuntimeState::running) {
+        set_error(g_runtime_state == RuntimeState::shutting_down
+                      ? "bridge is shutting down"
+                      : "bridge not initialized");
+        return -1;
+    }
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef snapshot(PyObject_CallMethod(mt5.get(), "account_info", nullptr));
+    if (!snapshot) {
+        set_python_error();
+        return -1;
+    }
+    if (!copy_account_info(snapshot.get(), info))
+        return -1;
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_API int mt5bridge_symbol_capabilities(
+    const Mt5SymbolRequest *request, Mt5SymbolCapabilities *capabilities) try {
+    clear_error();
+    if (!request || !capabilities || !request->symbol_utf8 || !*request->symbol_utf8) {
+        set_error("valid symbol request and capabilities are required");
+        return -1;
+    }
+    *capabilities = Mt5SymbolCapabilities{};
+    if (request->reserved != 0) {
+        set_error("symbol request reserved fields must be zero");
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> python_lock(g_python_mutex);
+    if (g_runtime_state != RuntimeState::running) {
+        set_error(g_runtime_state == RuntimeState::shutting_down
+                      ? "bridge is shutting down"
+                      : "bridge not initialized");
+        return -1;
+    }
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef snapshot(PyObject_CallMethod(mt5.get(), "symbol_info", "s", request->symbol_utf8));
+    if (!snapshot) {
+        set_python_error();
+        return -1;
+    }
+    return copy_symbol_capabilities(snapshot.get(), mt5.get(), capabilities) ? 0 : -1;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_API int mt5bridge_order_check(const Mt5OrderCheckRequest *request,
+                                        Mt5OrderCheckResult *result) try {
+    clear_error();
+    if (!request || !result) {
+        set_error("valid order_check request and result are required");
+        return -1;
+    }
+    *result = Mt5OrderCheckResult{};
+    if (request->reserved[0] != 0 || request->reserved[1] != 0 || request->reserved[2] != 0) {
+        set_error("order_check reserved fields must be zero");
+        return -1;
+    }
+    if (!std::isfinite(request->volume) || !std::isfinite(request->price) ||
+         !std::isfinite(request->stoplimit) || !std::isfinite(request->sl) ||
+         !std::isfinite(request->tp)) {
+        set_error("valid order_check request and result are required");
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> python_lock(g_python_mutex);
+    if (g_runtime_state != RuntimeState::running) {
+        set_error(g_runtime_state == RuntimeState::shutting_down
+                      ? "bridge is shutting down"
+                      : "bridge not initialized");
+        return -1;
+    }
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef request_dict(make_order_check_request(request));
+    if (!request_dict) {
+        if (PyErr_Occurred())
+            set_python_error();
+        else
+            set_error("failed to build order_check request");
+        return -1;
+    }
+    PyRef checked(PyObject_CallMethod(mt5.get(), "order_check", "O", request_dict.get()));
+    if (!checked) {
+        set_python_error();
+        return -1;
+    }
+    return copy_order_check_result(checked.get(), result) ? 0 : -1;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
 MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home) try {
     std::lock_guard<std::mutex> lock(g_mutex);
     std::lock_guard<std::mutex> python_lock(g_python_mutex);
@@ -1545,25 +2121,10 @@ MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_
                                                    symbol, timeframe.get(), 0, count));
             }
         } else if (std::strcmp(method, "open_market_buy") == 0) {
-            const char *symbol = nullptr;
-            double volume = 0.0;
-            if (read_string(request.get(), "symbol", &symbol) &&
-                read_double(request.get(), "volume", &volume) &&
-                std::isfinite(volume) && volume > 0.0) {
-                PyRef action(PyObject_GetAttrString(mt5.get(), "TRADE_ACTION_DEAL"));
-                PyRef order_type(PyObject_GetAttrString(mt5.get(), "ORDER_TYPE_BUY"));
-                if (!action) { PyErr_Clear(); action = PyRef(PyLong_FromLong(1)); }
-                if (!order_type) { PyErr_Clear(); order_type = PyRef(PyLong_FromLong(0)); }
-                PyRef order(action && order_type ? Py_BuildValue("{s:s,s:d,s:O,s:O}",
-                    "symbol", symbol, "volume", volume, "action", action.get(),
-                    "type", order_type.get()) : nullptr);
-                if (order)
-                    result = PyRef(PyObject_CallMethod(mt5.get(), "order_send", "O", order.get()));
-                else if (g_last_error.empty())
-                    set_python_error();
-            } else if (g_last_error.empty() && !PyErr_Occurred()) {
-                set_error("symbol and positive finite volume are required");
-            }
+            // Stage 1 deliberately exposes no unmanaged side-effecting send.
+            // The old convenience method is rejected before touching MT5;
+            // durable journal dispatch belongs to the Stage 2 implementation.
+            set_error("open_market_buy is disabled until durable trade dispatch is implemented");
         } else {
             set_error("unknown method");
         }

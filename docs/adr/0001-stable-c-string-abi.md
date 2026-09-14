@@ -18,10 +18,14 @@ bounded tick callback. Responses and buffers are allocated and released by the
 DLL. Keep all implementation libraries and Python objects private. The
 header-only `mt5bridge::Client` validates the version before resolving calls.
 
-The original control/data contract was ABI version 5. ABI 7 adds the realtime
-subscription records and exports. Any incompatible change to exported
+The original control/data contract was ABI version 5. ABI 7 added the realtime
+subscription records and exports; ABI 8 adds the typed Stage 1 trade
+observation records and exports. Any incompatible change to exported
 signatures or POD layout requires a version bump and a coordinated client
-update.
+update. The trade observation API has a separate additive version constant so
+new trade slices can evolve without silently changing the ABI contract.
+Account and symbol snapshots carry explicit known-field masks; an absent Python
+field is never silently encoded as a meaningful zero.
 
 ABI 4 separated integer tick `volume` from `volume_real`, made request padding
 explicit, fixed public POD sizes and offsets with compile-time assertions, and

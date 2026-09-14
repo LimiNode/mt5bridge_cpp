@@ -25,7 +25,7 @@ single JSON `order_send` result would hide the hard cases instead of solving
 them.
 
 The first stage is intentionally “raw”: it must not synthesize a managed trade
-from one result object. It includes the complete request/result fields and the
+from one result object. It defines the typed request/result structures and
 capability records needed to explain why a broker accepted, delayed, partially
 filled, or rejected an operation. Stage 1 does not expose an unmanaged
 side-effecting `order_send` to production callers; that primitive remains

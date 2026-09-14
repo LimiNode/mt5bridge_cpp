@@ -137,7 +137,8 @@ worker process.
 2. Add typed raw observation methods and tests. The first Stage 1 slice now
    covers account snapshots, symbol capabilities, and advisory `order_check`
    through `trade.h`; active orders, positions, and history snapshots remain
-   subsequent bounded slices. No unmanaged public `order_send` is exposed.
+   subsequent bounded slices. Capability snapshots carry explicit known-field
+   masks, and no unmanaged public `order_send` is exposed.
 3. Add the durable dispatch journal and reconciliation graph described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier.

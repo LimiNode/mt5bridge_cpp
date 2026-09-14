@@ -12,6 +12,10 @@ from ctypes import c_int64, c_uint8, c_uint32, c_uint64, c_void_p
 
 
 TEXT_CAPACITY = 128
+ACCOUNT_KNOWN_HEDGE_ALLOWED = 1 << 9
+SYMBOL_KNOWN_FILLING_MODE = 1 << 3
+SYMBOL_KNOWN_VOLUME_LIMITS = 1 << 11
+SYMBOL_KNOWN_TRADE_EXEMODE = 1 << 2
 
 
 class Mt5AccountInfo(Structure):
@@ -28,7 +32,7 @@ class Mt5AccountInfo(Structure):
         ("hedge_allowed", c_uint8),
         ("balance", c_double),
         ("equity", c_double),
-        ("reserved", c_uint32 * 2),
+        ("known_fields", c_uint64),
     ]
 
 
@@ -40,6 +44,7 @@ class Mt5SymbolCapabilities(Structure):
     _fields_ = [
         ("symbol", c_char * 64),
         ("trade_mode", c_uint32),
+        ("trade_exemode", c_uint32),
         ("order_mode", c_uint32),
         ("filling_mode", c_uint32),
         ("expiration_mode", c_uint32),
@@ -55,7 +60,7 @@ class Mt5SymbolCapabilities(Structure):
         ("volume_limit", c_double),
         ("trade_tick_size", c_double),
         ("point", c_double),
-        ("reserved", c_uint32 * 2),
+        ("known_fields", c_uint64),
     ]
 
 
@@ -84,8 +89,7 @@ class Mt5OrderCheckRequest(Structure):
 
 class Mt5OrderCheckResult(Structure):
     _fields_ = [
-        ("retcode", c_int32),
-        ("retcode_external", c_int32),
+        ("retcode", c_uint32),
         ("balance", c_double),
         ("equity", c_double),
         ("profit", c_double),
@@ -130,6 +134,7 @@ def fake_module(*, symbol_none: bool = False, order_none: bool = False) -> types
         return {
             "name": symbol,
             "trade_mode": 4,
+            "trade_exemode": 2,
             "order_mode": 1 | module.SYMBOL_ORDER_CLOSEBY,
             "filling_mode": 3,
             "expiration_mode": 7,
@@ -152,7 +157,6 @@ def fake_module(*, symbol_none: bool = False, order_none: bool = False) -> types
             return None
         return {
             "retcode": 10030,
-            "retcode_external": 77,
             "balance": 10000.5,
             "equity": 9980.0,
             "profit": -10.25,
@@ -176,7 +180,7 @@ class TradeObservationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        if ctypes.sizeof(Mt5AccountInfo) != 192 or ctypes.sizeof(Mt5SymbolCapabilities) != 160:
+        if ctypes.sizeof(Mt5AccountInfo) != 192 or ctypes.sizeof(Mt5SymbolCapabilities) != 168:
             raise unittest.SkipTest("ctypes trade ABI layout does not match the public header")
         path = os.environ.get("MT5BRIDGE_DLL")
         if not path:
@@ -225,9 +229,25 @@ class TradeObservationTests(unittest.TestCase):
         self.assertEqual(info.currency, b"USD")
         self.assertEqual(info.login, 4_294_967_297)
         self.assertEqual(info.margin_mode, 2)
-        self.assertEqual(info.hedge_allowed, 1)
+        self.assertEqual(info.hedge_allowed, 0)
+        self.assertEqual(info.known_fields & ACCOUNT_KNOWN_HEDGE_ALLOWED, 0)
         self.assertEqual(info.trade_allowed, 1)
         self.assertAlmostEqual(info.equity, 9990.25)
+
+    def test_explicit_hedge_permission_is_distinguished_from_missing_field(self) -> None:
+        """A reported false permission is known; an absent field is not."""
+        original = self.fake.account_info
+
+        def account_with_explicit_permission() -> object:
+            snapshot = original()
+            snapshot.hedge_allowed = False
+            return snapshot
+
+        self.fake.account_info = account_with_explicit_permission
+        info = Mt5AccountInfo()
+        self.assertEqual(self.dll.mt5bridge_account_info(byref(info)), 0, self.last_error())
+        self.assertEqual(info.hedge_allowed, 0)
+        self.assertNotEqual(info.known_fields & ACCOUNT_KNOWN_HEDGE_ALLOWED, 0)
 
     def test_symbol_capabilities_and_closeby_bit(self) -> None:
         request = Mt5SymbolRequest(b"EURUSD", 0)
@@ -239,9 +259,42 @@ class TradeObservationTests(unittest.TestCase):
         )
         self.assertEqual(capabilities.symbol, b"EURUSD")
         self.assertEqual(capabilities.order_mode, 65)
+        self.assertEqual(capabilities.trade_exemode, 2)
         self.assertEqual(capabilities.closeby_allowed, 1)
+        self.assertNotEqual(capabilities.known_fields & SYMBOL_KNOWN_TRADE_EXEMODE, 0)
         self.assertEqual(capabilities.selected, 1)
         self.assertAlmostEqual(capabilities.volume_step, 0.01)
+
+    def test_missing_symbol_capabilities_are_reported_as_unknown(self) -> None:
+        """Optional zero values never masquerade as supported capabilities."""
+        original = self.fake.symbol_info
+
+        def sparse_symbol(symbol: str) -> object:
+            snapshot = dict(original(symbol))
+            for name in (
+                "filling_mode", "expiration_mode", "order_gtc_mode",
+                "trade_stops_level", "trade_freeze_level", "visible", "select",
+                "volume_min", "volume_max", "volume_step", "volume_limit",
+                "trade_tick_size", "point",
+            ):
+                snapshot.pop(name, None)
+            return snapshot
+
+        self.fake.symbol_info = sparse_symbol
+        request = Mt5SymbolRequest(b"EURUSD", 0)
+        capabilities = Mt5SymbolCapabilities()
+        self.assertEqual(
+            self.dll.mt5bridge_symbol_capabilities(byref(request), byref(capabilities)),
+            0,
+            self.last_error(),
+        )
+        self.assertEqual(capabilities.filling_mode, 0)
+        self.assertEqual(capabilities.volume_min, 0.0)
+        self.assertEqual(capabilities.volume_max, 0.0)
+        self.assertEqual(capabilities.volume_step, 0.0)
+        self.assertEqual(capabilities.volume_limit, 0.0)
+        self.assertEqual(capabilities.known_fields & SYMBOL_KNOWN_FILLING_MODE, 0)
+        self.assertEqual(capabilities.known_fields & SYMBOL_KNOWN_VOLUME_LIMITS, 0)
 
     def test_order_check_maps_request_and_preserves_rejection(self) -> None:
         request = Mt5OrderCheckRequest(
@@ -251,7 +304,6 @@ class TradeObservationTests(unittest.TestCase):
         result = Mt5OrderCheckResult()
         self.assertEqual(self.dll.mt5bridge_order_check(byref(request), byref(result)), 0)
         self.assertEqual(result.retcode, 10030)
-        self.assertEqual(result.retcode_external, 77)
         self.assertEqual(result.comment, b"invalid filling mode")
         self.assertEqual(self.fake.order_requests[-1]["symbol"], "EURUSD")
         self.assertEqual(self.fake.order_requests[-1]["position_by"], 9)

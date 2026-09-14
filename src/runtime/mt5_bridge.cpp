@@ -348,6 +348,19 @@ PyRef trade_field(PyObject *object, const char *name) {
     return PyRef(PyObject_GetAttrString(object, name));
 }
 
+/// \brief Tests whether a trade record contains a non-None field.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \return True when the field is present and carries a value.
+bool trade_has_field(PyObject *object, const char *name) {
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        return false;
+    }
+    return field.get() != Py_None;
+}
+
 /// \brief Reads an optional or required signed integer field from a trade record.
 /// \param object Borrowed Python trade record.
 /// \param name Field name.
@@ -632,10 +645,32 @@ bool copy_account_info(PyObject *object, Mt5AccountInfo *info) {
         !trade_double(object, "equity", &converted.equity, true)) {
         return false;
     }
-    // MetaTrader's account_info() does not expose hedge_allowed directly.
-    // ACCOUNT_MARGIN_MODE_RETAIL_HEDGING is the documented hedging mode (2).
-    if (!converted.hedge_allowed && converted.margin_mode == 2)
-        converted.hedge_allowed = 1;
+    uint64_t known_fields = 0;
+    if (trade_has_field(object, "server"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_SERVER;
+    if (trade_has_field(object, "currency"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_CURRENCY;
+    if (trade_has_field(object, "login"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_LOGIN;
+    if (trade_has_field(object, "margin_mode"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_MARGIN_MODE;
+    if (trade_has_field(object, "trade_mode"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_TRADE_MODE;
+    if (trade_has_field(object, "leverage"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_LEVERAGE;
+    if (trade_has_field(object, "trade_allowed"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_TRADE_ALLOWED;
+    if (trade_has_field(object, "trade_expert"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_TRADE_EXPERT;
+    if (trade_has_field(object, "fifo_close"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_FIFO_CLOSE;
+    if (trade_has_field(object, "hedge_allowed"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_HEDGE_ALLOWED;
+    if (trade_has_field(object, "balance"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_BALANCE;
+    if (trade_has_field(object, "equity"))
+        known_fields |= MT5BRIDGE_ACCOUNT_KNOWN_EQUITY;
+    converted.known_fields = known_fields;
     *info = converted;
     return true;
 }
@@ -654,6 +689,7 @@ bool copy_symbol_capabilities(PyObject *object, PyObject *mt5,
     Mt5SymbolCapabilities converted{};
     if (!trade_text(object, "name", converted.symbol, sizeof(converted.symbol), true) ||
         !trade_uint32(object, "trade_mode", &converted.trade_mode, true) ||
+        !trade_uint32(object, "trade_exemode", &converted.trade_exemode, true) ||
         !trade_uint32(object, "order_mode", &converted.order_mode, true) ||
         !trade_uint32(object, "filling_mode", &converted.filling_mode, false) ||
         !trade_uint32(object, "expiration_mode", &converted.expiration_mode, false) ||
@@ -689,6 +725,32 @@ bool copy_symbol_capabilities(PyObject *object, PyObject *mt5,
         // fallback local so fake/minimal modules can still expose capabilities.
         converted.closeby_allowed = (converted.order_mode & 64u) != 0 ? 1u : 0u;
     }
+    uint64_t known_fields = MT5BRIDGE_SYMBOL_KNOWN_TRADE_MODE |
+                            MT5BRIDGE_SYMBOL_KNOWN_ORDER_MODE |
+                            MT5BRIDGE_SYMBOL_KNOWN_TRADE_EXEMODE;
+    if (trade_has_field(object, "filling_mode"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_FILLING_MODE;
+    if (trade_has_field(object, "expiration_mode"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_EXPIRATION_MODE;
+    if (trade_has_field(object, "order_gtc_mode"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_ORDER_GTC_MODE;
+    if (trade_has_field(object, "trade_stops_level"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_STOPS_LEVEL;
+    if (trade_has_field(object, "trade_freeze_level"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_FREEZE_LEVEL;
+    if (trade_has_field(object, "visible"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_VISIBLE;
+    if (trade_has_field(object, "select"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_SELECTED;
+    if (trade_has_field(object, "volume_min") && trade_has_field(object, "volume_max") &&
+        trade_has_field(object, "volume_step") && trade_has_field(object, "volume_limit"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_VOLUME_LIMITS;
+    if (trade_has_field(object, "trade_tick_size"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_TICK_SIZE;
+    if (trade_has_field(object, "point"))
+        known_fields |= MT5BRIDGE_SYMBOL_KNOWN_POINT;
+    known_fields |= MT5BRIDGE_SYMBOL_KNOWN_CLOSEBY;
+    converted.known_fields = known_fields;
     *capabilities = converted;
     return true;
 }
@@ -703,8 +765,7 @@ bool copy_order_check_result(PyObject *object, Mt5OrderCheckResult *result) {
         return false;
     }
     Mt5OrderCheckResult converted{};
-    if (!trade_int32(object, "retcode", &converted.retcode, true) ||
-        !trade_int32(object, "retcode_external", &converted.retcode_external, false) ||
+    if (!trade_uint32(object, "retcode", &converted.retcode, true) ||
         !trade_double(object, "balance", &converted.balance, false) ||
         !trade_double(object, "equity", &converted.equity, false) ||
         !trade_double(object, "profit", &converted.profit, false) ||
@@ -2057,25 +2118,10 @@ MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_
                                                    symbol, timeframe.get(), 0, count));
             }
         } else if (std::strcmp(method, "open_market_buy") == 0) {
-            const char *symbol = nullptr;
-            double volume = 0.0;
-            if (read_string(request.get(), "symbol", &symbol) &&
-                read_double(request.get(), "volume", &volume) &&
-                std::isfinite(volume) && volume > 0.0) {
-                PyRef action(PyObject_GetAttrString(mt5.get(), "TRADE_ACTION_DEAL"));
-                PyRef order_type(PyObject_GetAttrString(mt5.get(), "ORDER_TYPE_BUY"));
-                if (!action) { PyErr_Clear(); action = PyRef(PyLong_FromLong(1)); }
-                if (!order_type) { PyErr_Clear(); order_type = PyRef(PyLong_FromLong(0)); }
-                PyRef order(action && order_type ? Py_BuildValue("{s:s,s:d,s:O,s:O}",
-                    "symbol", symbol, "volume", volume, "action", action.get(),
-                    "type", order_type.get()) : nullptr);
-                if (order)
-                    result = PyRef(PyObject_CallMethod(mt5.get(), "order_send", "O", order.get()));
-                else if (g_last_error.empty())
-                    set_python_error();
-            } else if (g_last_error.empty() && !PyErr_Occurred()) {
-                set_error("symbol and positive finite volume are required");
-            }
+            // Stage 1 deliberately exposes no unmanaged side-effecting send.
+            // The old convenience method is rejected before touching MT5;
+            // durable journal dispatch belongs to the Stage 2 implementation.
+            set_error("open_market_buy is disabled until durable trade dispatch is implemented");
         } else {
             set_error("unknown method");
         }

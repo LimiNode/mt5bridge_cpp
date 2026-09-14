@@ -109,12 +109,3 @@ def _eval(request: dict) -> str:
 def get_m1_bars_json(symbol: str, count: int) -> str:
     """Return the latest *count* M1 bars for *symbol* as a JSON string."""
     return _eval({"method": "get_m1_bars", "symbol": symbol, "count": count})
-
-
-## \brief Submits one market buy request without automatic retry.
-#  \param symbol MetaTrader symbol name.
-#  \param volume Order volume in lots.
-#  \return UTF-8 JSON representation of the MetaTrader result.
-def open_market_buy(symbol: str, volume: float) -> str:
-    """Open a market buy order for *symbol* with *volume* lots."""
-    return _eval({"method": "open_market_buy", "symbol": symbol, "volume": volume})

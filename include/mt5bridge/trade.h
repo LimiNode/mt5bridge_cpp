@@ -16,6 +16,86 @@
 /// \brief Maximum UTF-8 bytes stored in fixed-size observation text fields.
 #define MT5BRIDGE_TEXT_CAPACITY 128u
 
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_SERVER
+/// \brief Bit identifying a present account server field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_SERVER (UINT64_C(1) << 0)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_CURRENCY
+/// \brief Bit identifying a present account currency field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_CURRENCY (UINT64_C(1) << 1)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_LOGIN
+/// \brief Bit identifying a present account login field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_LOGIN (UINT64_C(1) << 2)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_MARGIN_MODE
+/// \brief Bit identifying a present margin mode field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_MARGIN_MODE (UINT64_C(1) << 3)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_TRADE_MODE
+/// \brief Bit identifying a present account trade mode field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_TRADE_MODE (UINT64_C(1) << 4)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_LEVERAGE
+/// \brief Bit identifying a present leverage field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_LEVERAGE (UINT64_C(1) << 5)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_TRADE_ALLOWED
+/// \brief Bit identifying a present account trade permission field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_TRADE_ALLOWED (UINT64_C(1) << 6)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_TRADE_EXPERT
+/// \brief Bit identifying a present expert/API permission field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_TRADE_EXPERT (UINT64_C(1) << 7)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_FIFO_CLOSE
+/// \brief Bit identifying a present FIFO-close policy field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_FIFO_CLOSE (UINT64_C(1) << 8)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_HEDGE_ALLOWED
+/// \brief Bit identifying a directly reported hedge permission field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_HEDGE_ALLOWED (UINT64_C(1) << 9)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_BALANCE
+/// \brief Bit identifying a present balance field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_BALANCE (UINT64_C(1) << 10)
+/// \def MT5BRIDGE_ACCOUNT_KNOWN_EQUITY
+/// \brief Bit identifying a present equity field.
+#define MT5BRIDGE_ACCOUNT_KNOWN_EQUITY (UINT64_C(1) << 11)
+
+/// \def MT5BRIDGE_SYMBOL_KNOWN_TRADE_MODE
+/// \brief Bit identifying a present symbol trade mode field.
+#define MT5BRIDGE_SYMBOL_KNOWN_TRADE_MODE (UINT64_C(1) << 0)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_ORDER_MODE
+/// \brief Bit identifying a present symbol order mode field.
+#define MT5BRIDGE_SYMBOL_KNOWN_ORDER_MODE (UINT64_C(1) << 1)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_TRADE_EXEMODE
+/// \brief Bit identifying a present symbol execution mode field.
+#define MT5BRIDGE_SYMBOL_KNOWN_TRADE_EXEMODE (UINT64_C(1) << 2)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_FILLING_MODE
+/// \brief Bit identifying a present symbol filling mode field.
+#define MT5BRIDGE_SYMBOL_KNOWN_FILLING_MODE (UINT64_C(1) << 3)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_EXPIRATION_MODE
+/// \brief Bit identifying a present symbol expiration mode field.
+#define MT5BRIDGE_SYMBOL_KNOWN_EXPIRATION_MODE (UINT64_C(1) << 4)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_ORDER_GTC_MODE
+/// \brief Bit identifying a present GTC policy field.
+#define MT5BRIDGE_SYMBOL_KNOWN_ORDER_GTC_MODE (UINT64_C(1) << 5)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_STOPS_LEVEL
+/// \brief Bit identifying a present stops-level field.
+#define MT5BRIDGE_SYMBOL_KNOWN_STOPS_LEVEL (UINT64_C(1) << 6)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_FREEZE_LEVEL
+/// \brief Bit identifying a present freeze-level field.
+#define MT5BRIDGE_SYMBOL_KNOWN_FREEZE_LEVEL (UINT64_C(1) << 7)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_CLOSEBY
+/// \brief Bit identifying a derived CLOSEBY capability.
+#define MT5BRIDGE_SYMBOL_KNOWN_CLOSEBY (UINT64_C(1) << 8)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_VISIBLE
+/// \brief Bit identifying a present visibility field.
+#define MT5BRIDGE_SYMBOL_KNOWN_VISIBLE (UINT64_C(1) << 9)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_SELECTED
+/// \brief Bit identifying a present Market Watch selection field.
+#define MT5BRIDGE_SYMBOL_KNOWN_SELECTED (UINT64_C(1) << 10)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_VOLUME_LIMITS
+/// \brief Bit identifying all symbol volume limit fields.
+#define MT5BRIDGE_SYMBOL_KNOWN_VOLUME_LIMITS (UINT64_C(1) << 11)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_TICK_SIZE
+/// \brief Bit identifying a present trade tick size field.
+#define MT5BRIDGE_SYMBOL_KNOWN_TICK_SIZE (UINT64_C(1) << 12)
+/// \def MT5BRIDGE_SYMBOL_KNOWN_POINT
+/// \brief Bit identifying a present point field.
+#define MT5BRIDGE_SYMBOL_KNOWN_POINT (UINT64_C(1) << 13)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -24,6 +104,8 @@ extern "C" {
 /// \brief Snapshot of account identity, permissions, and margin state.
 ///
 /// Text fields are UTF-8 and are always null-terminated when the call succeeds.
+/// A field is usable only when its bit is set in known_fields; zero can be a
+/// valid MT5 value and is never used to represent an absent field.
 typedef struct Mt5AccountInfo {
     char server[MT5BRIDGE_TEXT_CAPACITY]; ///< Immutable terminal server identity.
     char currency[16];                    ///< Account currency code.
@@ -34,10 +116,10 @@ typedef struct Mt5AccountInfo {
     uint8_t trade_allowed;                ///< Non-zero when trading is allowed.
     uint8_t trade_expert;                 ///< Non-zero when expert/API trading is allowed.
     uint8_t fifo_close;                   ///< Non-zero when FIFO close is enforced.
-    uint8_t hedge_allowed;                ///< Non-zero when hedging is permitted.
+    uint8_t hedge_allowed;                ///< Direct hedge permission, when known.
     double balance;                       ///< Current account balance.
     double equity;                        ///< Current account equity.
-    uint32_t reserved[2];                 ///< Reserved; must be zero.
+    uint64_t known_fields;                ///< MT5BRIDGE_ACCOUNT_KNOWN_* mask.
 } Mt5AccountInfo;
 
 /// \struct Mt5SymbolRequest
@@ -49,9 +131,13 @@ typedef struct Mt5SymbolRequest {
 
 /// \struct Mt5SymbolCapabilities
 /// \brief Snapshot of symbol execution, order, and sizing capabilities.
+///
+/// Consumers must check known_fields before making a policy decision. The
+/// bridge reports missing fields as unknown rather than guessing from zero.
 typedef struct Mt5SymbolCapabilities {
     char symbol[64];          ///< Canonical symbol name returned by MT5.
     uint32_t trade_mode;      ///< MT5 SYMBOL_TRADE_MODE_* value.
+    uint32_t trade_exemode;    ///< MT5 SYMBOL_TRADE_EXECUTION_* value.
     uint32_t order_mode;      ///< MT5 SYMBOL_ORDER_* bit mask.
     uint32_t filling_mode;    ///< MT5 SYMBOL_FILLING_* bit mask.
     uint32_t expiration_mode; ///< MT5 SYMBOL_EXPIRATION_* bit mask.
@@ -67,7 +153,7 @@ typedef struct Mt5SymbolCapabilities {
     double volume_limit;        ///< Aggregate directional volume limit.
     double trade_tick_size;     ///< Minimum price increment.
     double point;               ///< Symbol point size.
-    uint32_t reserved[2];       ///< Reserved; must be zero.
+    uint64_t known_fields;      ///< MT5BRIDGE_SYMBOL_KNOWN_* mask.
 } Mt5SymbolCapabilities;
 
 /// \struct Mt5OrderCheckRequest
@@ -98,9 +184,11 @@ typedef struct Mt5OrderCheckRequest {
 
 /// \struct Mt5OrderCheckResult
 /// \brief Raw advisory result returned by MetaTrader's order_check call.
+///
+/// This mirrors MqlTradeCheckResult. retcode_external belongs to the future
+/// side-effecting order_send result and is intentionally absent here.
 typedef struct Mt5OrderCheckResult {
-    int32_t retcode;          ///< MT5 TRADE_RETCODE_* value.
-    int32_t retcode_external; ///< Broker/exchange return code, when supplied.
+    uint32_t retcode;         ///< MT5 TRADE_RETCODE_* value.
     double balance;           ///< Projected balance.
     double equity;            ///< Projected equity.
     double profit;            ///< Projected profit.
@@ -138,21 +226,47 @@ MT5BRIDGE_EXPORT int mt5bridge_order_check(const Mt5OrderCheckRequest *request,
 #if defined(__cplusplus)
 static_assert(sizeof(Mt5AccountInfo) == 192, "Mt5AccountInfo ABI size changed");
 static_assert(sizeof(Mt5SymbolRequest) == 16, "Mt5SymbolRequest ABI size changed");
-static_assert(sizeof(Mt5SymbolCapabilities) == 160,
+static_assert(sizeof(Mt5SymbolCapabilities) == 168,
               "Mt5SymbolCapabilities ABI size changed");
 static_assert(sizeof(Mt5OrderCheckRequest) == 128,
               "Mt5OrderCheckRequest ABI size changed");
 static_assert(sizeof(Mt5OrderCheckResult) == 192,
               "Mt5OrderCheckResult ABI size changed");
+static_assert(offsetof(Mt5AccountInfo, login) == 144, "Mt5AccountInfo login offset changed");
+static_assert(offsetof(Mt5AccountInfo, known_fields) == 184,
+              "Mt5AccountInfo known_fields offset changed");
+static_assert(offsetof(Mt5SymbolCapabilities, trade_exemode) == 68,
+              "Mt5SymbolCapabilities trade_exemode offset changed");
+static_assert(offsetof(Mt5SymbolCapabilities, volume_min) == 112,
+              "Mt5SymbolCapabilities volume_min offset changed");
+static_assert(offsetof(Mt5SymbolCapabilities, known_fields) == 160,
+              "Mt5SymbolCapabilities known_fields offset changed");
+static_assert(offsetof(Mt5OrderCheckRequest, action) == 96,
+              "Mt5OrderCheckRequest action offset changed");
+static_assert(offsetof(Mt5OrderCheckResult, balance) == 8,
+              "Mt5OrderCheckResult balance offset changed");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(Mt5AccountInfo) == 192, "Mt5AccountInfo ABI size changed");
 _Static_assert(sizeof(Mt5SymbolRequest) == 16, "Mt5SymbolRequest ABI size changed");
-_Static_assert(sizeof(Mt5SymbolCapabilities) == 160,
+_Static_assert(sizeof(Mt5SymbolCapabilities) == 168,
                "Mt5SymbolCapabilities ABI size changed");
 _Static_assert(sizeof(Mt5OrderCheckRequest) == 128,
                "Mt5OrderCheckRequest ABI size changed");
 _Static_assert(sizeof(Mt5OrderCheckResult) == 192,
                "Mt5OrderCheckResult ABI size changed");
+_Static_assert(offsetof(Mt5AccountInfo, login) == 144, "Mt5AccountInfo login offset changed");
+_Static_assert(offsetof(Mt5AccountInfo, known_fields) == 184,
+               "Mt5AccountInfo known_fields offset changed");
+_Static_assert(offsetof(Mt5SymbolCapabilities, trade_exemode) == 68,
+               "Mt5SymbolCapabilities trade_exemode offset changed");
+_Static_assert(offsetof(Mt5SymbolCapabilities, volume_min) == 112,
+               "Mt5SymbolCapabilities volume_min offset changed");
+_Static_assert(offsetof(Mt5SymbolCapabilities, known_fields) == 160,
+               "Mt5SymbolCapabilities known_fields offset changed");
+_Static_assert(offsetof(Mt5OrderCheckRequest, action) == 96,
+               "Mt5OrderCheckRequest action offset changed");
+_Static_assert(offsetof(Mt5OrderCheckResult, balance) == 8,
+               "Mt5OrderCheckResult balance offset changed");
 #endif
 
 #ifdef __cplusplus

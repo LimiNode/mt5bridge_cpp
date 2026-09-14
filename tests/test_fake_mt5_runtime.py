@@ -827,8 +827,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(callback_calls, 2)
         self.assertEqual(observed_volumes, [(2**53 + 1, 1.25), (42, 2.5)])
 
-    def test_order_timeout_path_has_one_call(self) -> None:
-        """The side-effecting order operation is never retried by the bridge."""
+    def test_legacy_order_method_is_disabled_without_side_effect(self) -> None:
+        """The legacy JSON order method cannot reach MetaTrader order_send."""
         fake = fake_module([], order_error=TimeoutError("trade timeout"))
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
@@ -838,13 +838,14 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             byref(response),
         )
         self.assertNotEqual(status, 0)
-        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(fake.order_calls, 0)
+        self.assertIn("disabled", self.last_error())
         if response.value:
             self.module.mt5bridge_free(response)
         self.module.mt5bridge_shutdown()
 
-    def test_order_none_is_reported_as_failure(self) -> None:
-        """MT5's None trade result must not become a successful JSON null."""
+    def test_legacy_order_method_does_not_probe_none_result(self) -> None:
+        """The disabled path rejects before inspecting a trade result."""
         fake = fake_module([], order_none=True)
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
@@ -854,7 +855,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             byref(response),
         )
         self.assertNotEqual(status, 0)
-        self.assertIn("returned None", self.last_error())
+        self.assertEqual(fake.order_calls, 0)
+        self.assertIn("disabled", self.last_error())
         if response.value:
             self.module.mt5bridge_free(response)
         self.module.mt5bridge_shutdown()

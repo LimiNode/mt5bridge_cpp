@@ -24,6 +24,8 @@ observation records and exports. Any incompatible change to exported
 signatures or POD layout requires a version bump and a coordinated client
 update. The trade observation API has a separate additive version constant so
 new trade slices can evolve without silently changing the ABI contract.
+Account and symbol snapshots carry explicit known-field masks; an absent Python
+field is never silently encoded as a meaningful zero.
 
 ABI 4 separated integer tick `volume` from `volume_real`, made request padding
 explicit, fixed public POD sizes and offsets with compile-time assertions, and

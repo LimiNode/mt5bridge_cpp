@@ -2,15 +2,20 @@
 
 ## Control plane versus data plane
 
-JSON remains the control/RPC plane for initialization, terminal/account
-metadata, orders, symbol selection, and rare operations. Ticks and rates use
-typed POD buffers so a large numeric result does not make a JSON → UTF-8 → JSON
-round trip.
+JSON remains the control/RPC plane for initialization, terminal metadata, and
+legacy read-only operations. Typed trade observations use `trade.h`; ticks and
+rates use typed POD buffers so a large numeric result does not make a JSON →
+UTF-8 → JSON round trip.
 
 ```text
-control: initialize / account_info / order_send  -> eval_json()
-data:    ticks / rates                           -> POD buffer or chunks
+control: initialize / terminal_info / read-only RPC -> eval_json()
+trade:   account_info / symbol_info / order_check  -> trade.h POD
+data:    ticks / rates                              -> POD buffer or chunks
 ```
+
+ABI 8 does not expose a side-effecting JSON order helper. The historical
+`open_market_buy` method is rejected before reaching MetaTrader; order sending
+is reserved for the durable Stage 2 journal.
 
 The public types live in [include/mt5bridge/data.h](../include/mt5bridge/data.h)
 and are C-compatible. `mt5bridge::Client` exposes `copy_ticks_range()` and

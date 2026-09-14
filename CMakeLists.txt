@@ -161,4 +161,8 @@ if(BUILD_EXAMPLES)
     add_executable(live_market_smoke examples/live_market_smoke.cpp)
     target_link_libraries(live_market_smoke PRIVATE mt5bridge::client)
     set_target_properties(live_market_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+
+    add_executable(trade_observation_example examples/trade_observation_example.cpp)
+    target_link_libraries(trade_observation_example PRIVATE mt5bridge::client)
+    set_target_properties(trade_observation_example PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 endif()

@@ -18,6 +18,9 @@ pulls in the heavy runtime.
   `Python.h`, Jansson, or link to `Python3::Python`.
 - `data.h` contains only POD requests/results, opaque buffer handles, and C
   callbacks. Keep it free of STL, exceptions, and Python/JSON dependencies.
+- `trade.h` contains the typed Stage 1 account/symbol/order-check PODs. Use its
+  `known_fields` masks to distinguish an absent MT5 field from a valid zero;
+  never infer trading permissions from a related enum.
 
 When the ABI changes, update the C++ examples, `python/mt5bridge_py.py`, and
 `docs/architecture.md` in the same change.

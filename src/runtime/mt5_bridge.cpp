@@ -44,6 +44,10 @@ std::mutex g_mutex;
 // Serializes calls into the embedded interpreter without extending the state mutex
 // across potentially slow MT5 IPC operations.
 std::mutex g_python_mutex;
+// Tracks admitted calls so shutdown can wait for them without extending the
+// lifecycle mutex across potentially slow MT5 IPC operations.
+std::size_t g_active_runtime_calls = 0;
+std::condition_variable g_runtime_calls_cv;
 bool g_initialized = false;
 enum class RuntimeState { stopped, running, shutting_down };
 RuntimeState g_runtime_state = RuntimeState::stopped;
@@ -133,6 +137,64 @@ void set_error(const char *message) { g_last_error = message ? message : "unknow
 
 /// \brief Clears the calling thread's bridge diagnostic.
 void clear_error() { g_last_error.clear(); }
+
+/// \class RuntimeCallAdmission
+/// \brief Admits one serialized Python/MT5 operation without holding g_mutex.
+///
+/// Admission validates the running state and increments the in-flight count
+/// while holding the lifecycle mutex, then releases it before waiting for the
+/// interpreter mutex. Shutdown closes admission and waits for this count to
+/// reach zero before finalization.
+class RuntimeCallAdmission {
+public:
+    RuntimeCallAdmission() : python_lock_(g_python_mutex, std::defer_lock) {
+        {
+            std::unique_lock<std::mutex> state_lock(g_mutex);
+            if (g_runtime_state != RuntimeState::running) {
+                set_error(g_runtime_state == RuntimeState::shutting_down
+                              ? "bridge is shutting down"
+                              : "bridge not initialized");
+                return;
+            }
+            ++g_active_runtime_calls;
+            counted_ = true;
+        }
+        try {
+            python_lock_.lock();
+            acquired_ = true;
+        } catch (...) {
+            std::lock_guard<std::mutex> state_lock(g_mutex);
+            --g_active_runtime_calls;
+            counted_ = false;
+            if (g_active_runtime_calls == 0)
+                g_runtime_calls_cv.notify_all();
+            throw;
+        }
+    }
+
+    RuntimeCallAdmission(const RuntimeCallAdmission &) = delete;
+    RuntimeCallAdmission &operator=(const RuntimeCallAdmission &) = delete;
+
+    ~RuntimeCallAdmission() {
+        if (python_lock_.owns_lock())
+            python_lock_.unlock();
+        if (counted_) {
+            std::lock_guard<std::mutex> state_lock(g_mutex);
+            --g_active_runtime_calls;
+            if (g_active_runtime_calls == 0)
+                g_runtime_calls_cv.notify_all();
+        }
+    }
+
+    /// \brief Tests whether the operation was admitted while the runtime ran.
+    /// \return True when the in-flight admission and interpreter mutex are held.
+    explicit operator bool() const noexcept { return acquired_; }
+
+private:
+    std::unique_lock<std::mutex> python_lock_;
+    bool counted_ = false;
+    bool acquired_ = false;
+};
 
 /// \brief Converts the active C++ exception into a non-throwing ABI diagnostic.
 /// \note Call only while handling an exception at an exported C ABI boundary.
@@ -1149,13 +1211,9 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
                        Consumer consume) {
     int flags = 0;
     {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        std::lock_guard<std::mutex> python_lock(g_python_mutex);
-        if (g_runtime_state != RuntimeState::running) {
-            set_error(g_runtime_state == RuntimeState::shutting_down
-                          ? "bridge is shutting down" : "bridge not initialized");
+        RuntimeCallAdmission call;
+        if (!call)
             return false;
-        }
         GilScope gil(true);
         PyRef mt5(PyImport_ImportModule("MetaTrader5"));
         if (!mt5) {
@@ -1182,13 +1240,9 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         }
         page_size += static_cast<int>(consumed_boundary_count);
         {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            std::lock_guard<std::mutex> python_lock(g_python_mutex);
-            if (g_runtime_state != RuntimeState::running) {
-                set_error(g_runtime_state == RuntimeState::shutting_down
-                              ? "bridge is shutting down" : "bridge not initialized");
+            RuntimeCallAdmission call;
+            if (!call)
                 return false;
-            }
             GilScope gil(true);
             PyRef mt5(PyImport_ImportModule("MetaTrader5"));
             if (!mt5) {
@@ -1388,220 +1442,225 @@ void realtime_poller() try {
             std::vector<Mt5Tick> forward_boundary;
             const auto poll_started = std::chrono::steady_clock::now();
             {
-                std::lock_guard<std::mutex> python_lock(g_python_mutex);
-                GilScope gil(true);
-                PyRef mt5(PyImport_ImportModule("MetaTrader5"));
-                if (!mt5) {
-                    PyErr_Clear(); ok = false; fatal = true; error_code = 0;
+                RuntimeCallAdmission call;
+                if (!call) {
+                    ok = false;
+                    error_code = 0;
                 } else {
-                    const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<
-                        std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                    int64_t page_from = cursor >= 0 ? cursor :
-                        (source->initial_from_msc >= 0 ? source->initial_from_msc
-                                                       : std::max<int64_t>(0, now_msc - static_cast<int64_t>(interval) * 4));
-                    std::unordered_map<std::string, std::size_t> consumed_boundary;
-                    for (const auto &tick : boundary_snapshot)
-                        ++consumed_boundary[tick_payload_key(tick)];
-                    std::size_t consumed_boundary_count = boundary_snapshot.size();
-                    std::vector<Mt5Tick> boundary_records = boundary_snapshot;
-                    const uint32_t physical_page_size = std::max<uint32_t>(1024u, max_batch);
-                    for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
-                        const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
-                            consumed_boundary_count;
-                        const int count = static_cast<int>(std::min<uint64_t>(requested,
-                            static_cast<uint64_t>(std::numeric_limits<int>::max())));
-                        PyRef from(make_datetime(page_from));
-                        PyRef ticks(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
-                            symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
-                        if (!ticks || ticks.get() == Py_None) {
-                            PyErr_Clear(); error_code = mt5_last_error_code(mt5.get());
-                            failure_code = error_code;
-                            partial = is_transient_read_error(error_code);
-                            upstream_partial = partial;
-                            ok = false; break;
-                        }
-                        std::vector<Mt5Tick> page;
-                        if (!copy_ticks_array(ticks.get(), &page)) { PyErr_Clear(); ok = false; fatal = true; error_code = 0; failure_code = 0; break; }
-                        error_code = mt5_last_error_code(mt5.get());
-                        if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
-                        if (is_partial_read_error(error_code)) partial = true;
-                        if (page.empty()) { forward_complete = true; break; }
-                        // copy_ticks_from() has no upper time bound.  Rows
-                        // newer than this poll's snapshot may therefore be
-                        // present in the response, but they must not advance
-                        // the committed cursor.
-                        bool saw_after_snapshot = false;
-                        int64_t last_ts = page_from - 1;
-                        for (const auto &tick : page) {
-                            if (tick.time_msc > now_msc) {
-                                saw_after_snapshot = true;
-                                continue;
+                    GilScope gil(true);
+                    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+                    if (!mt5) {
+                        PyErr_Clear(); ok = false; fatal = true; error_code = 0;
+                    } else {
+                        const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<
+                            std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+                        int64_t page_from = cursor >= 0 ? cursor :
+                            (source->initial_from_msc >= 0 ? source->initial_from_msc
+                                                           : std::max<int64_t>(0, now_msc - static_cast<int64_t>(interval) * 4));
+                        std::unordered_map<std::string, std::size_t> consumed_boundary;
+                        for (const auto &tick : boundary_snapshot)
+                            ++consumed_boundary[tick_payload_key(tick)];
+                        std::size_t consumed_boundary_count = boundary_snapshot.size();
+                        std::vector<Mt5Tick> boundary_records = boundary_snapshot;
+                        const uint32_t physical_page_size = std::max<uint32_t>(1024u, max_batch);
+                        for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
+                            const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
+                                consumed_boundary_count;
+                            const int count = static_cast<int>(std::min<uint64_t>(requested,
+                                static_cast<uint64_t>(std::numeric_limits<int>::max())));
+                            PyRef from(make_datetime(page_from));
+                            PyRef ticks(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
+                                symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
+                            if (!ticks || ticks.get() == Py_None) {
+                                PyErr_Clear(); error_code = mt5_last_error_code(mt5.get());
+                                failure_code = error_code;
+                                partial = is_transient_read_error(error_code);
+                                upstream_partial = partial;
+                                ok = false; break;
                             }
-                            if (tick.time_msc >= page_from)
-                                last_ts = std::max(last_ts, tick.time_msc);
-                        }
-                        // Keep the persistent boundary immutable while this
-                        // page is matched.  Only the temporary copy is
-                        // decremented; otherwise repeated inclusive reads
-                        // lose the original multiplicities.
-                        auto remaining_consumed = consumed_boundary;
-                        std::unordered_map<std::string, std::size_t> new_boundary;
-                        std::size_t new_boundary_count = 0;
-                        std::vector<Mt5Tick> new_boundary_records;
-                        for (const auto &tick : page) {
-                            if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
-                            if (tick.time_msc == page_from) {
-                                const auto key = tick_payload_key(tick);
-                                auto it = remaining_consumed.find(key);
-                                if (it != remaining_consumed.end() && it->second != 0) {
-                                    --it->second;
+                            std::vector<Mt5Tick> page;
+                            if (!copy_ticks_array(ticks.get(), &page)) { PyErr_Clear(); ok = false; fatal = true; error_code = 0; failure_code = 0; break; }
+                            error_code = mt5_last_error_code(mt5.get());
+                            if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
+                            if (is_partial_read_error(error_code)) partial = true;
+                            if (page.empty()) { forward_complete = true; break; }
+                            // copy_ticks_from() has no upper time bound.  Rows
+                            // newer than this poll's snapshot may therefore be
+                            // present in the response, but they must not advance
+                            // the committed cursor.
+                            bool saw_after_snapshot = false;
+                            int64_t last_ts = page_from - 1;
+                            for (const auto &tick : page) {
+                                if (tick.time_msc > now_msc) {
+                                    saw_after_snapshot = true;
                                     continue;
                                 }
-                                // Retain only the current timestamp as the
-                                // next boundary.  A late insert at the old
-                                // timestamp is delivered but must not be
-                                // mixed with a newer boundary.
-                                if (last_ts == page_from) {
-                                    ++new_boundary[key];
+                                if (tick.time_msc >= page_from)
+                                    last_ts = std::max(last_ts, tick.time_msc);
+                            }
+                            // Keep the persistent boundary immutable while this
+                            // page is matched.  Only the temporary copy is
+                            // decremented; otherwise repeated inclusive reads
+                            // lose the original multiplicities.
+                            auto remaining_consumed = consumed_boundary;
+                            std::unordered_map<std::string, std::size_t> new_boundary;
+                            std::size_t new_boundary_count = 0;
+                            std::vector<Mt5Tick> new_boundary_records;
+                            for (const auto &tick : page) {
+                                if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
+                                if (tick.time_msc == page_from) {
+                                    const auto key = tick_payload_key(tick);
+                                    auto it = remaining_consumed.find(key);
+                                    if (it != remaining_consumed.end() && it->second != 0) {
+                                        --it->second;
+                                        continue;
+                                    }
+                                    // Retain only the current timestamp as the
+                                    // next boundary.  A late insert at the old
+                                    // timestamp is delivered but must not be
+                                    // mixed with a newer boundary.
+                                    if (last_ts == page_from) {
+                                        ++new_boundary[key];
+                                        ++new_boundary_count;
+                                        new_boundary_records.push_back(tick);
+                                    }
+                                } else if (tick.time_msc == last_ts) {
+                                    ++new_boundary[tick_payload_key(tick)];
                                     ++new_boundary_count;
                                     new_boundary_records.push_back(tick);
                                 }
-                            } else if (tick.time_msc == last_ts) {
-                                ++new_boundary[tick_payload_key(tick)];
-                                ++new_boundary_count;
-                                new_boundary_records.push_back(tick);
+                                forward.push_back(tick);
+                                if (forward.size() >= kRealtimeEpochTickLimit) {
+                                    partial = true;
+                                    budget_exhausted = true;
+                                    break;
+                                }
                             }
-                            forward.push_back(tick);
-                            if (forward.size() >= kRealtimeEpochTickLimit) {
-                                partial = true;
-                                budget_exhausted = true;
+                            if (forward.size() >= kRealtimeEpochTickLimit) break;
+                            if (last_ts < page_from) {
+                                if (saw_after_snapshot)
+                                    forward_complete = true;
+                                break;
+                            }
+                            if (last_ts == page_from && new_boundary_count == 0) {
+                                // The inclusive boundary has been fully consumed;
+                                // a full page with no new payload multiplicity is
+                                // a successful end of traversal, not a partial
+                                // recovery state.
+                                forward_complete = true;
+                                break;
+                            }
+                            const bool stayed_on_boundary = last_ts == page_from;
+                            if (stayed_on_boundary) {
+                                consumed_boundary_count += new_boundary_count;
+                                for (const auto &entry : new_boundary)
+                                    consumed_boundary[entry.first] += entry.second;
+                                boundary_records.insert(boundary_records.end(),
+                                    new_boundary_records.begin(), new_boundary_records.end());
+                            } else {
+                                page_from = last_ts;
+                                consumed_boundary = std::move(new_boundary);
+                                consumed_boundary_count = new_boundary_count;
+                                boundary_records = std::move(new_boundary_records);
+                            }
+                            if (saw_after_snapshot || page.size() < static_cast<std::size_t>(count)) {
+                                forward_complete = true;
                                 break;
                             }
                         }
-                        if (forward.size() >= kRealtimeEpochTickLimit) break;
-                        if (last_ts < page_from) {
-                            if (saw_after_snapshot)
-                                forward_complete = true;
-                            break;
-                        }
-                        if (last_ts == page_from && new_boundary_count == 0) {
-                            // The inclusive boundary has been fully consumed;
-                            // a full page with no new payload multiplicity is
-                            // a successful end of traversal, not a partial
-                            // recovery state.
-                            forward_complete = true;
-                            break;
-                        }
-                        const bool stayed_on_boundary = last_ts == page_from;
-                        if (stayed_on_boundary) {
-                            consumed_boundary_count += new_boundary_count;
-                            for (const auto &entry : new_boundary)
-                                consumed_boundary[entry.first] += entry.second;
-                            boundary_records.insert(boundary_records.end(),
-                                new_boundary_records.begin(), new_boundary_records.end());
-                        } else {
-                            page_from = last_ts;
-                            consumed_boundary = std::move(new_boundary);
-                            consumed_boundary_count = new_boundary_count;
-                            boundary_records = std::move(new_boundary_records);
-                        }
-                        if (saw_after_snapshot || page.size() < static_cast<std::size_t>(count)) {
-                            forward_complete = true;
-                            break;
-                        }
-                    }
-                    forward_boundary = std::move(boundary_records);
-                    const int64_t overlap_from = std::max<int64_t>(
-                        source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
-                    int64_t tail_from = overlap_from;
-                    std::unordered_map<std::string, std::size_t> tail_boundary;
-                    std::size_t tail_boundary_count = 0;
-                    for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
-                        const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
-                            tail_boundary_count;
-                        const int count = static_cast<int>(std::min<uint64_t>(requested,
-                            static_cast<uint64_t>(std::numeric_limits<int>::max())));
-                        PyRef from(make_datetime(tail_from));
-                        PyRef tail(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
-                            symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
-                        if (!tail || tail.get() == Py_None) {
-                            PyErr_Clear();
+                        forward_boundary = std::move(boundary_records);
+                        const int64_t overlap_from = std::max<int64_t>(
+                            source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
+                        int64_t tail_from = overlap_from;
+                        std::unordered_map<std::string, std::size_t> tail_boundary;
+                        std::size_t tail_boundary_count = 0;
+                        for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
+                            const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
+                                tail_boundary_count;
+                            const int count = static_cast<int>(std::min<uint64_t>(requested,
+                                static_cast<uint64_t>(std::numeric_limits<int>::max())));
+                            PyRef from(make_datetime(tail_from));
+                            PyRef tail(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
+                                symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
+                            if (!tail || tail.get() == Py_None) {
+                                PyErr_Clear();
+                                error_code = mt5_last_error_code(mt5.get());
+                                failure_code = error_code;
+                                partial = is_transient_read_error(error_code);
+                                upstream_partial = upstream_partial || partial;
+                                ok = false;
+                                break;
+                            }
+                            std::vector<Mt5Tick> page;
+                            if (!copy_ticks_array(tail.get(), &page)) { PyErr_Clear(); ok = false; fatal = true; error_code = 0; failure_code = 0; break; }
                             error_code = mt5_last_error_code(mt5.get());
-                            failure_code = error_code;
-                            partial = is_transient_read_error(error_code);
-                            upstream_partial = upstream_partial || partial;
-                            ok = false;
-                            break;
-                        }
-                        std::vector<Mt5Tick> page;
-                        if (!copy_ticks_array(tail.get(), &page)) { PyErr_Clear(); ok = false; fatal = true; error_code = 0; failure_code = 0; break; }
-                        error_code = mt5_last_error_code(mt5.get());
-                        if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
-                        if (is_partial_read_error(error_code)) partial = true;
-                        if (page.empty()) { reconcile_complete = true; break; }
-                        const int64_t last_ts = page.back().time_msc;
-                        auto remaining_boundary = tail_boundary;
-                        std::unordered_map<std::string, std::size_t> next_boundary;
-                        std::size_t next_boundary_count = 0;
-                        bool delivered_new_boundary = false;
-                        for (const auto &tick : page) {
-                            if (tick.time_msc < overlap_from || tick.time_msc > now_msc) continue;
-                            if (tick.time_msc < tail_from) continue;
-                            if (tick.time_msc == tail_from) {
-                                const auto key = tick_payload_key(tick);
-                                auto it = remaining_boundary.find(key);
-                                if (it != remaining_boundary.end() && it->second != 0) {
-                                    --it->second;
-                                    continue;
-                                }
-                                if (last_ts == tail_from) {
-                                    ++next_boundary[key];
+                            if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
+                            if (is_partial_read_error(error_code)) partial = true;
+                            if (page.empty()) { reconcile_complete = true; break; }
+                            const int64_t last_ts = page.back().time_msc;
+                            auto remaining_boundary = tail_boundary;
+                            std::unordered_map<std::string, std::size_t> next_boundary;
+                            std::size_t next_boundary_count = 0;
+                            bool delivered_new_boundary = false;
+                            for (const auto &tick : page) {
+                                if (tick.time_msc < overlap_from || tick.time_msc > now_msc) continue;
+                                if (tick.time_msc < tail_from) continue;
+                                if (tick.time_msc == tail_from) {
+                                    const auto key = tick_payload_key(tick);
+                                    auto it = remaining_boundary.find(key);
+                                    if (it != remaining_boundary.end() && it->second != 0) {
+                                        --it->second;
+                                        continue;
+                                    }
+                                    if (last_ts == tail_from) {
+                                        ++next_boundary[key];
+                                        ++next_boundary_count;
+                                        delivered_new_boundary = true;
+                                    }
+                                } else if (tick.time_msc == last_ts) {
+                                    ++next_boundary[tick_payload_key(tick)];
                                     ++next_boundary_count;
                                     delivered_new_boundary = true;
                                 }
-                            } else if (tick.time_msc == last_ts) {
-                                ++next_boundary[tick_payload_key(tick)];
-                                ++next_boundary_count;
-                                delivered_new_boundary = true;
+                                reconcile.push_back(tick);
+                                if (reconcile.size() >= kRealtimeEpochTickLimit) {
+                                    partial = true;
+                                    budget_exhausted = true;
+                                    break;
+                                }
                             }
-                            reconcile.push_back(tick);
-                            if (reconcile.size() >= kRealtimeEpochTickLimit) {
+                            if (reconcile.size() >= kRealtimeEpochTickLimit)
+                                break;
+                            if (last_ts < tail_from) {
                                 partial = true;
-                                budget_exhausted = true;
+                                upstream_partial = true;
+                                reconcile_complete = false;
+                                break;
+                            }
+                            if (last_ts == tail_from && !delivered_new_boundary) {
+                                // The inclusive boundary has been completely
+                                // consumed; there is no further page to seek.
+                                reconcile_complete = true;
+                                break;
+                            }
+                            const bool stayed_on_boundary = last_ts == tail_from;
+                            if (stayed_on_boundary) {
+                                tail_boundary_count += next_boundary_count;
+                                for (const auto &entry : next_boundary)
+                                    tail_boundary[entry.first] += entry.second;
+                            } else {
+                                tail_from = last_ts;
+                                tail_boundary = std::move(next_boundary);
+                                tail_boundary_count = next_boundary_count;
+                            }
+                            if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
+                                reconcile_complete = true;
                                 break;
                             }
                         }
-                        if (reconcile.size() >= kRealtimeEpochTickLimit)
-                            break;
-                        if (last_ts < tail_from) {
-                            partial = true;
-                            upstream_partial = true;
-                            reconcile_complete = false;
-                            break;
-                        }
-                        if (last_ts == tail_from && !delivered_new_boundary) {
-                            // The inclusive boundary has been completely
-                            // consumed; there is no further page to seek.
-                            reconcile_complete = true;
-                            break;
-                        }
-                        const bool stayed_on_boundary = last_ts == tail_from;
-                        if (stayed_on_boundary) {
-                            tail_boundary_count += next_boundary_count;
-                            for (const auto &entry : next_boundary)
-                                tail_boundary[entry.first] += entry.second;
-                        } else {
-                            tail_from = last_ts;
-                            tail_boundary = std::move(next_boundary);
-                            tail_boundary_count = next_boundary_count;
-                        }
-                        if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
-                            reconcile_complete = true;
-                            break;
-                        }
+                        if (is_ipc_error(failure_code) && reinitialize_terminal(mt5.get()))
+                            reconnected = true;
                     }
-                    if (is_ipc_error(failure_code) && reinitialize_terminal(mt5.get()))
-                        reconnected = true;
                 }
             }
             const auto duration_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1791,14 +1850,9 @@ MT5BRIDGE_API int mt5bridge_account_info(Mt5AccountInfo *info) try {
         return -1;
     }
     *info = Mt5AccountInfo{};
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::lock_guard<std::mutex> python_lock(g_python_mutex);
-    if (g_runtime_state != RuntimeState::running) {
-        set_error(g_runtime_state == RuntimeState::shutting_down
-                      ? "bridge is shutting down"
-                      : "bridge not initialized");
+    RuntimeCallAdmission call;
+    if (!call)
         return -1;
-    }
     GilScope gil(true);
     PyRef mt5(PyImport_ImportModule("MetaTrader5"));
     if (!mt5) {
@@ -1830,14 +1884,9 @@ MT5BRIDGE_API int mt5bridge_symbol_capabilities(
         set_error("symbol request reserved fields must be zero");
         return -1;
     }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::lock_guard<std::mutex> python_lock(g_python_mutex);
-    if (g_runtime_state != RuntimeState::running) {
-        set_error(g_runtime_state == RuntimeState::shutting_down
-                      ? "bridge is shutting down"
-                      : "bridge not initialized");
+    RuntimeCallAdmission call;
+    if (!call)
         return -1;
-    }
     GilScope gil(true);
     PyRef mt5(PyImport_ImportModule("MetaTrader5"));
     if (!mt5) {
@@ -1873,14 +1922,9 @@ MT5BRIDGE_API int mt5bridge_order_check(const Mt5OrderCheckRequest *request,
         set_error("valid order_check request and result are required");
         return -1;
     }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::lock_guard<std::mutex> python_lock(g_python_mutex);
-    if (g_runtime_state != RuntimeState::running) {
-        set_error(g_runtime_state == RuntimeState::shutting_down
-                      ? "bridge is shutting down"
-                      : "bridge not initialized");
+    RuntimeCallAdmission call;
+    if (!call)
         return -1;
-    }
     GilScope gil(true);
     PyRef mt5(PyImport_ImportModule("MetaTrader5"));
     if (!mt5) {
@@ -2018,6 +2062,12 @@ MT5BRIDGE_API int mt5bridge_shutdown() try {
     if (poller.joinable())
         poller.join();
     std::unique_lock<std::mutex> lock(g_mutex);
+    // New admissions are rejected by the shutting_down state above.  Waiting
+    // on the condition variable releases g_mutex while an admitted call
+    // finishes, so its destructor can decrement the in-flight count.
+    g_runtime_calls_cv.wait(lock, [] {
+        return g_active_runtime_calls == 0;
+    });
     std::unique_lock<std::mutex> python_lock(g_python_mutex);
 
     int shutdown_status = 0;
@@ -2072,15 +2122,10 @@ MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::lock_guard<std::mutex> python_lock(g_python_mutex);
     clear_error();
-    if (g_runtime_state != RuntimeState::running) {
-        set_error(g_runtime_state == RuntimeState::shutting_down
-                      ? "bridge is shutting down"
-                      : "bridge not initialized");
+    RuntimeCallAdmission call;
+    if (!call)
         return -1;
-    }
 
     GilScope gil(true);
     const int status = [&]() {
@@ -2273,15 +2318,10 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
     if (!result || !request || request->reserved != 0 ||
         !valid_range(request->symbol_utf8, request->from_msc, request->to_msc))
         return -1;
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::lock_guard<std::mutex> python_lock(g_python_mutex);
     clear_error();
-    if (g_runtime_state != RuntimeState::running) {
-        set_error(g_runtime_state == RuntimeState::shutting_down
-                      ? "bridge is shutting down"
-                      : "bridge not initialized");
+    RuntimeCallAdmission call;
+    if (!call)
         return -1;
-    }
     GilScope gil(true);
     const int status = [&]() {
         PyRef mt5(PyImport_ImportModule("MetaTrader5"));
@@ -2440,57 +2480,79 @@ MT5BRIDGE_EXPORT int mt5bridge_subscribe_ticks(const Mt5SubscriptionRequest *req
         set_error("valid subscription request and handle are required");
         return -1;
     }
-    std::lock_guard<std::mutex> lock(g_mutex);
-    std::lock_guard<std::mutex> python_lock(g_python_mutex);
     clear_error();
+    const uint32_t interval = request->interval_ms ? request->interval_ms : 250u;
+    const uint32_t max_batch = request->max_batch ? request->max_batch : 1024u;
+    const uint32_t capacity = request->ring_capacity ? request->ring_capacity : 64u;
+    struct PreparedSource { std::string symbol; uint32_t flags; };
+    std::vector<PreparedSource> prepared;
+    bool needs_default_flags = false;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_runtime_state != RuntimeState::running) {
+            set_error(g_runtime_state == RuntimeState::shutting_down
+                          ? "bridge is shutting down"
+                          : "bridge not initialized");
+            return -1;
+        }
+        if (interval < 10u || max_batch == 0 || max_batch > 1000000u ||
+            max_batch > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            capacity == 0 || capacity > 65536u ||
+            static_cast<std::uint64_t>(max_batch) * capacity > kRealtimeMaxRetainedTicks ||
+            (request->delivery_flags & ~(MT5_DELIVERY_TICK_BATCH | MT5_DELIVERY_COHERENT_SNAPSHOT)) != 0) {
+            set_error("invalid subscription limits");
+            return -1;
+        }
+        if (request->stale_after_ms != 0 &&
+            (request->delivery_flags & MT5_DELIVERY_COHERENT_SNAPSHOT) == 0) {
+            set_error("stale_after_ms requires coherent snapshot delivery");
+            return -1;
+        }
+        if ((request->delivery_flags & MT5_DELIVERY_COHERENT_SNAPSHOT) != 0) {
+            set_error("coherent snapshots are not implemented yet");
+            return -1;
+        }
+        prepared.reserve(request->source_count);
+        for (size_t index = 0; index < request->source_count; ++index) {
+            const auto &source_request = request->sources[index];
+            if (!source_request.symbol_utf8 || !*source_request.symbol_utf8 ||
+                source_request.reserved != 0 ||
+                source_request.flags > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                set_error("invalid subscription source");
+                return -1;
+            }
+            prepared.push_back(PreparedSource{source_request.symbol_utf8, source_request.flags});
+            needs_default_flags = needs_default_flags || source_request.flags == 0;
+        }
+    }
+
+    // Resolve the default COPY_TICKS_ALL flag without extending the lifecycle
+    // mutex across the Python import.  A shutdown racing this phase rejects
+    // the admission; the mutation phase below checks the state again.
+    if (needs_default_flags) {
+        RuntimeCallAdmission call;
+        if (!call)
+            return -1;
+        GilScope gil(true);
+        PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+        if (!mt5) {
+            set_python_error();
+            return -1;
+        }
+        for (auto &prepared_source : prepared)
+            if (prepared_source.flags == 0)
+                prepared_source.flags = static_cast<uint32_t>(resolve_tick_flags(mt5.get(), 0));
+    }
+
+    // All validation and flag resolution above is complete before mutating any
+    // shared source or subscription state.
+    std::lock_guard<std::mutex> lock(g_mutex);
     if (g_runtime_state != RuntimeState::running) {
         set_error(g_runtime_state == RuntimeState::shutting_down
                       ? "bridge is shutting down"
                       : "bridge not initialized");
         return -1;
     }
-    const uint32_t interval = request->interval_ms ? request->interval_ms : 250u;
-    const uint32_t max_batch = request->max_batch ? request->max_batch : 1024u;
-    const uint32_t capacity = request->ring_capacity ? request->ring_capacity : 64u;
-    if (interval < 10u || max_batch == 0 || max_batch > 1000000u ||
-        max_batch > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-        capacity == 0 || capacity > 65536u ||
-        static_cast<std::uint64_t>(max_batch) * capacity > kRealtimeMaxRetainedTicks ||
-        (request->delivery_flags & ~(MT5_DELIVERY_TICK_BATCH | MT5_DELIVERY_COHERENT_SNAPSHOT)) != 0) {
-        set_error("invalid subscription limits");
-        return -1;
-    }
-    if (request->stale_after_ms != 0 &&
-        (request->delivery_flags & MT5_DELIVERY_COHERENT_SNAPSHOT) == 0) {
-        set_error("stale_after_ms requires coherent snapshot delivery");
-        return -1;
-    }
-    if ((request->delivery_flags & MT5_DELIVERY_COHERENT_SNAPSHOT) != 0) {
-        set_error("coherent snapshots are not implemented yet");
-        return -1;
-    }
-    struct PreparedSource { std::string symbol; uint32_t flags; };
-    std::vector<PreparedSource> prepared;
-    prepared.reserve(request->source_count);
-    for (size_t index = 0; index < request->source_count; ++index) {
-        const auto &source_request = request->sources[index];
-        if (!source_request.symbol_utf8 || !*source_request.symbol_utf8 || source_request.reserved != 0 ||
-            source_request.flags > static_cast<uint32_t>(std::numeric_limits<int>::max()))
-            throw std::runtime_error("invalid subscription source");
-        uint32_t effective_flags = source_request.flags;
-        if (effective_flags == 0) {
-            GilScope gil(true);
-            PyRef mt5(PyImport_ImportModule("MetaTrader5"));
-            if (mt5)
-                effective_flags = static_cast<uint32_t>(resolve_tick_flags(mt5.get(), 0));
-            else
-                PyErr_Clear();
-        }
-        prepared.push_back(PreparedSource{source_request.symbol_utf8, effective_flags});
-    }
-
-    // All validation and flag resolution above is complete before mutating any
-    // shared source or subscription state.
     for (const auto &prepared_source : prepared) {
         const auto it = g_realtime_sources.find(
             realtime_source_key(prepared_source.symbol.c_str(), prepared_source.flags));

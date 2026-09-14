@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 import types
 import unittest
 from ctypes import POINTER, Structure, byref, c_char, c_char_p, c_double, c_int, c_int32
@@ -206,6 +207,8 @@ class TradeObservationTests(unittest.TestCase):
             POINTER(Mt5OrderCheckRequest), POINTER(Mt5OrderCheckResult)
         ]
         cls.dll.mt5bridge_order_check.restype = c_int
+        cls.dll.mt5bridge_unsubscribe_all.argtypes = []
+        cls.dll.mt5bridge_unsubscribe_all.restype = c_int
         if cls.dll.mt5bridge_abi_version() != 8 or cls.dll.mt5bridge_trade_api_version() != 1:
             raise unittest.SkipTest("test DLL does not expose ABI 8 trade observation")
 
@@ -332,6 +335,114 @@ class TradeObservationTests(unittest.TestCase):
             0,
         )
         self.assertIn("margin_free is required", self.last_error())
+
+    def test_order_check_does_not_hold_lifecycle_mutex_during_python_call(self) -> None:
+        """State-only operations remain responsive while MT5 IPC is blocked."""
+        entered = threading.Event()
+        release = threading.Event()
+        original = self.fake.order_check
+
+        def blocking_order_check(request: dict[str, object]) -> object:
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test release timeout")
+            return original(request)
+
+        self.fake.order_check = blocking_order_check
+        result = Mt5OrderCheckResult()
+        call_status: list[int] = []
+
+        def invoke_order_check() -> None:
+            call_status.append(
+                self.dll.mt5bridge_order_check(
+                    byref(Mt5OrderCheckRequest()), byref(result)
+                )
+            )
+
+        worker = threading.Thread(target=invoke_order_check)
+        worker.start()
+        state_probe_done = threading.Event()
+        state_probe_status: list[int] = []
+
+        def probe_state_mutex() -> None:
+            state_probe_status.append(self.dll.mt5bridge_unsubscribe_all())
+            state_probe_done.set()
+
+        probe = threading.Thread(target=probe_state_mutex)
+        probe_started = False
+        try:
+            self.assertTrue(entered.wait(2), "fake order_check did not start")
+            probe.start()
+            probe_started = True
+            self.assertTrue(
+                state_probe_done.wait(1),
+                "state-only operation was blocked by a slow Python call",
+            )
+        finally:
+            release.set()
+            worker.join(5)
+            if probe_started:
+                probe.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(probe.is_alive())
+        self.assertEqual(call_status, [0])
+        self.assertEqual(state_probe_status, [0])
+
+    def test_shutdown_waits_for_inflight_python_call(self) -> None:
+        """Finalization must not race a Python/MT5 call already in progress."""
+        entered = threading.Event()
+        release = threading.Event()
+        original = self.fake.order_check
+
+        def blocking_order_check(request: dict[str, object]) -> object:
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test release timeout")
+            return original(request)
+
+        self.fake.order_check = blocking_order_check
+        result = Mt5OrderCheckResult()
+        call_status: list[int] = []
+
+        def invoke_order_check() -> None:
+            call_status.append(
+                self.dll.mt5bridge_order_check(
+                    byref(Mt5OrderCheckRequest()), byref(result)
+                )
+            )
+
+        worker = threading.Thread(target=invoke_order_check)
+        worker.start()
+        shutdown_done = threading.Event()
+        shutdown_status: list[int] = []
+
+        def invoke_shutdown() -> None:
+            shutdown_status.append(self.dll.mt5bridge_shutdown())
+            shutdown_done.set()
+
+        shutdown_thread = threading.Thread(target=invoke_shutdown)
+        shutdown_started = False
+        try:
+            self.assertTrue(entered.wait(2), "fake order_check did not start")
+            shutdown_thread.start()
+            shutdown_started = True
+            self.assertFalse(
+                shutdown_done.wait(0.5),
+                "shutdown finalized while a Python call was still in flight",
+            )
+        finally:
+            release.set()
+            worker.join(5)
+            if shutdown_started:
+                shutdown_thread.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(call_status, [0])
+        self.assertEqual(shutdown_status, [0])
+
+        # setUp/tearDown owns one lifecycle per test; restore it after the
+        # explicit barrier check so tearDown remains idempotent.
+        self.assertEqual(self.dll.mt5bridge_initialize(None), 0, self.last_error())
 
     def test_invalid_reserved_field_fails_closed(self) -> None:
         request = Mt5SymbolRequest(b"EURUSD", 1)

@@ -21,9 +21,14 @@ private include tree. Leave `mt5_bridge.cpp` as one unit until a real
 responsibility boundary justifies extracting a pair.
 
 Keep `g_mutex` for lifecycle/state transitions and use the separate
-`g_python_mutex` for serialized interpreter calls. Never hold either mutex
-while invoking user callbacks or while joining the poller. Acquire the GIL
-only while calling Python and release it before returning to native code.
+`g_python_mutex` for serialized interpreter calls. Python/MT5 operations must
+enter through the runtime-call admission gate: check `RuntimeState` and
+increment the in-flight count under `g_mutex`, release it, and hold only the
+admission count plus `g_python_mutex` while invoking Python. Never hold either
+mutex while invoking user callbacks or while joining the poller. Acquire the
+GIL only while calling Python and release it before returning to native code.
+Shutdown closes new admission and waits for in-flight calls before
+finalization.
 `initialize()` and `shutdown()` are serialized state-machine operations;
 `shutting_down` rejects concurrent re-entry. A failed initialization must
 finalize the interpreter and leave the bridge ready for a later retry.

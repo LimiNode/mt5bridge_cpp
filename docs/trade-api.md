@@ -6,10 +6,14 @@ explicitly uncertain.
 
 ## Four implementation stages
 
-1. **Raw typed access:** `order_check`, one-shot `order_send`, active orders,
-   positions, history orders, history deals, and symbol capabilities.
-2. **Reconciliation:** ticket-keyed snapshots and bounded overlap reads build a
-   graph of independently observed entities.
+1. **Raw typed observation:** `order_check`, active orders, positions, history
+   orders, history deals, and symbol/account capabilities. This stage has no
+   public side-effecting send method; an internal send primitive is used only
+   after the journal barrier is delivered in stage 2.
+2. **Durable dispatch and reconciliation:** persist the operation journal,
+   execute one `order_send` behind the durable dispatch barrier, and use
+   ticket-keyed snapshots and bounded overlap reads to build a graph of
+   independently observed entities.
 3. **TradeManager:** stable logical IDs, asynchronous worker delivery, and
    callbacks/state events.
 4. **Optional native backend:** an MQL5 EA/service provides
@@ -23,7 +27,10 @@ them.
 The first stage is intentionally “raw”: it must not synthesize a managed trade
 from one result object. It includes the complete request/result fields and the
 capability records needed to explain why a broker accepted, delayed, partially
-filled, or rejected an operation.
+filled, or rejected an operation. Stage 1 does not expose an unmanaged
+side-effecting `order_send` to production callers; that primitive remains
+internal until stage 2 supplies durable intent, account/lease verification,
+and the non-resendable dispatch barrier.
 
 ## Identity model
 
@@ -49,9 +56,9 @@ TradeId
 same field as `POSITION_TICKET`. Neither is the bridge's `TradeId`.
 `request_id` is available in the Python `MqlTradeResult` too, but without
 `OnTradeTransaction` it is diagnostic/correlation evidence only. A native MQL
-backend can additionally correlate the request transaction with it. It must be
-scoped by `TerminalSessionId` and never correlated across terminal sessions or
-restarts.
+backend can additionally correlate the request transaction with it. The bridge
+stores it with an explicit `TerminalSessionId`; it must never be correlated
+across terminal sessions or restarts.
 
 ## State and certainty
 
@@ -81,20 +88,36 @@ For example, `retcode == DONE` with `deal == 0` can be
 `accepted/server_confirmed`, but it is not `open/reconciled` until a deal and
 the relevant position evidence are observed.
 
+Reconciliation outcomes and reasons are metadata alongside these three
+dimensions; they are not a fourth lifecycle enum. `PENDING` means observation
+is still in progress, `CONFIRMED` means matching server evidence was found,
+`NOT_OBSERVED` means the deadline passed without evidence, and
+`ACCOUNT_MISMATCH` means observation stopped because the terminal account
+changed. `TRADE_EVENT_GAP` (or another overflow reason) means a hint stream was
+incomplete and an authoritative snapshot/query is required. These outcomes
+may accompany `OperationState::reconciling` with provisional certainty, and an
+unresolved `NOT_OBSERVED` operation can later become `CONFIRMED`,
+`RECONCILED`, or `AMBIGUOUS`.
+
 ## Submission and reconciliation algorithm
 
 ```text
-generate TradeId + OperationId
-capture before-snapshot (active orders, positions, relevant history)
-resolve symbol execution/filling capabilities
-order_check
-persist durable dispatch intent (AccountKey + operation state)
-verify current AccountKey still matches the immutable operation key
-order_send exactly once
-persist raw result, retcode_external, and every non-zero ID
-poll bounded snapshots of orders + deals + positions + history orders
-reconcile by ticket/identifier graph and publish transitions
+created
+  -> prechecked
+  -> dispatch_intent_persisted
+  -> verify AccountKey / single-writer lease
+  -> dispatching DURABLY COMMITTED
+  -> order_send EXACTLY ONCE
+  -> result_persisted
+  -> reconciling
 ```
+
+The states above are reached after generating `TradeId` + `OperationId`,
+capturing a before-snapshot, resolving symbol execution/filling capabilities,
+and running `order_check`. The durable `dispatching` record is committed
+before entering `order_send`, not after it. Only then are the raw result,
+`retcode_external`, and every non-zero ID persisted, followed by bounded
+snapshots of orders, deals, positions, and history orders.
 
 If `order_send` returns a timeout, the bridge performs no second send. It
 reconciles the before/after observations and returns `PENDING`, `CONFIRMED`,
@@ -111,21 +134,26 @@ emit a new transition to `CONFIRMED`, `RECONCILED`, or `AMBIGUOUS`.
 
 Before the side effect, the operation journal durably records its
 `AccountKey` (at minimum server and login), `TradeId`, `OperationId`, request
-payload, and `dispatch_intent_persisted`. After the call it records the raw
-result before moving to `reconciling`. On restart, a `dispatching` record with
-no result is reconciled from snapshots and is never resent. The durable
-`dispatching` commit is written before entering `order_send()`, giving the
-system at-most-once dispatch semantics even if the process dies before the
-call or before its result is persisted.
+payload, and `dispatch_intent_persisted`. This record is still pre-side-effect:
+recovery may reacquire the same lease, re-check the account, advance to
+`dispatching`, and perform the one send. The `dispatching` record is a durable
+may-have-been-sent barrier. On restart, a `dispatching` record with no result
+is reconciled from snapshots and is never resent; this includes a crash after
+the barrier but before entering `order_send()`. The system therefore provides
+at-most-once dispatch, not exactly-once delivery. After the call it records
+the raw result before moving to `reconciling`.
 
 `AccountKey` is immutable for the operation and scopes graph keys as
 `(AccountKey, OrderTicket)`, `(AccountKey, DealTicket)`, and
-`(AccountKey, PositionIdentifier)`. Immediately before any side effect the
-current terminal account (`server`, `login`, and trade permissions) must match
-the operation key. A mismatch prevents sending. If the account changes during
-reconciliation, suspend observation with `ACCOUNT_MISMATCH`; never attach the
-new account's records to the old graph. A managed TradeManager uses a
-single-writer lease per AccountKey.
+`(AccountKey, PositionIdentifier)`. It contains the terminal `server` and
+`login`; `ACCOUNT_TRADE_ALLOWED`, `ACCOUNT_TRADE_EXPERT`, and other trade
+permissions are capabilities checked separately. Immediately before any side
+effect the current terminal account must match the immutable key, the required
+capabilities must allow the request, and the process must hold the matching
+single-writer lease. A mismatch prevents sending or advancing to `dispatching`.
+If the account changes during reconciliation, suspend observation with
+`ACCOUNT_MISMATCH`; never attach the new account's records to the old graph. A
+managed TradeManager uses a single-writer lease per AccountKey.
 
 History reads use sets/maps keyed by tickets and bounded overlap snapshots.
 They never rely on chronological order, the last array element, or an
@@ -164,10 +192,12 @@ reversals and CloseBy, respectively.
 
 The current Python package has synchronous `order_check`, `order_send`,
 `history_orders_get`, `history_deals_get`, `orders_get`, and `positions_get`.
-It does not expose terminal `OrderSendAsync` or `OnTradeTransaction`. The
-first production manager can therefore be asynchronous to the C++ caller by
-running these calls on a dedicated worker and delivering bounded events, but
-it is not terminal-native async.
+The package's `order_send` is an implementation primitive, not a public raw
+bridge method until stage 2 supplies the journal barrier. The package also
+does not expose terminal `OrderSendAsync` or `OnTradeTransaction`. The first
+production manager can therefore be asynchronous to the C++ caller by running
+these calls on a dedicated worker and delivering bounded events, but it is not
+terminal-native async.
 
 `order_check` is advisory: a successful check does not reserve price,
 liquidity, or permissions for the subsequent send. Return codes are

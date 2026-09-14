@@ -111,16 +111,19 @@ worker process.
 ## Migration path
 
 1. Keep the current embedded-Python backend as the release path.
-2. Add typed raw trade methods and tests, then implement the reconciliation
-   graph described in [trade-api.md](trade-api.md).
-3. Add the high-level TradeManager only after raw observations and identity
-   rules are covered by fake-runtime tests. Side-effecting methods must follow
-   [ADR-0004](adr/0004-trade-reconciliation.md).
-4. If startup/reliability requires process isolation, introduce a transport
+2. Add typed raw observation methods and tests (`order_check`, capabilities,
+   and active/history snapshots) without exposing an unmanaged send.
+3. Add the durable dispatch journal and reconciliation graph described in
+   [trade-api.md](trade-api.md); commit `dispatching` before the one internal
+   `order_send` and never resend after that barrier.
+4. Add the high-level TradeManager only after raw observations, journal
+   recovery, and identity rules are covered by fake-runtime tests. Side-effecting
+   methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
+5. If startup/reliability requires process isolation, introduce a transport
    implementation behind the same C ABI; do not duplicate business methods.
-5. Add a native or alternate MT5 backend only behind a backend interface after
+6. Add a native or alternate MT5 backend only behind a backend interface after
    measuring lifecycle, error, and compatibility behavior.
-6. After realtime ABI stabilization, ship an external runtime ZIP, split the
+7. After realtime ABI stabilization, ship an external runtime ZIP, split the
    bootstrap/core DLLs, and then produce the self-extracting artifact described
    by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
 

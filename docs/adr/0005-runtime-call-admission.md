@@ -59,6 +59,7 @@ the initial interpreter setup through the transition to `running`.
 
 The fake-runtime test suite blocks an `order_check` call in Python and checks
 that a concurrent state-only `unsubscribe_all` completes before the blocked
-call is released. The full CTest suite must remain green, including owned
+call is released, while a concurrent shutdown remains pending until the call
+finishes. The full CTest suite must remain green, including owned
 interpreter/realtime shutdown tests and the client-only build with
 `MT5BRIDGE_BUILD_RUNTIME=OFF`.

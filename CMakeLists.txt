@@ -117,6 +117,15 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         set_tests_properties(mt5bridge_python_adapter PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
+        add_test(
+            NAME mt5bridge_trade_observation
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "MT5BRIDGE_DLL=$<TARGET_FILE:mt5_bridge>"
+                    "${Python3_EXECUTABLE}" -m unittest tests.test_trade_observation -v
+        )
+        set_tests_properties(mt5bridge_trade_observation PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
     endif()
 endif()
 

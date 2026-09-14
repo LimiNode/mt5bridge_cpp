@@ -1,5 +1,8 @@
 # ADR 0003: Host-driven realtime subscriptions (ABI 7)
 
+> Historical note: ABI 8 preserves this realtime surface unchanged and adds
+> the typed trade-observation contracts documented in `trade.h`.
+
 ## Status
 
 Accepted for realtime v1.

@@ -81,13 +81,13 @@ class Mt5Tick(Structure):
 
 
 class Mt5TickSourceRequest(Structure):
-    """Matches one ABI 7 physical source request."""
+    """Matches one ABI 8 physical source request."""
 
     _fields_ = [("symbol_utf8", c_char_p), ("flags", c_uint32), ("reserved", c_uint32)]
 
 
 class Mt5SubscriptionRequest(Structure):
-    """Matches the ABI 7 multi-source realtime subscription request."""
+    """Matches the ABI 8 multi-source realtime subscription request."""
 
     _fields_ = [
         ("sources", POINTER(Mt5TickSourceRequest)),
@@ -102,7 +102,7 @@ class Mt5SubscriptionRequest(Structure):
 
 
 class Mt5SubscriptionHandle(Structure):
-    """Matches the ABI 7 generation-qualified handle."""
+    """Matches the ABI 8 generation-qualified handle."""
 
     _fields_ = [("generation", c_uint64), ("id", c_uint64)]
 
@@ -319,7 +319,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Loads the DLL and installs the deterministic fake module."""
         if ctypes.sizeof(Mt5TicksRequest) != 32 or ctypes.sizeof(Mt5Tick) != 56:
-            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 7")
+            raise unittest.SkipTest("ctypes ABI layout does not match ABI version 8")
         dll_path = os.environ.get("MT5BRIDGE_DLL")
         if not dll_path:
             raise unittest.SkipTest("set MT5BRIDGE_DLL to a built mt5_bridge.dll")
@@ -383,8 +383,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             Mt5SubscriptionHandle, c_uint32, POINTER(Mt5SubscriptionDiagnostics)
         ]
         cls.module.mt5bridge_subscription_source_diagnostics.restype = c_int
-        if cls.module.mt5bridge_abi_version() != 7:
-            raise unittest.SkipTest("test DLL does not expose ABI version 7")
+        if cls.module.mt5bridge_abi_version() != 8:
+            raise unittest.SkipTest("test DLL does not expose ABI version 8")
 
     def tearDown(self) -> None:
         """Restores the module registry after each scenario."""

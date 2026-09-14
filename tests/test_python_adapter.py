@@ -9,8 +9,10 @@ class PythonAdapterTests(unittest.TestCase):
     def test_adapter_abi_version(self) -> None:
         import mt5bridge_py
 
-        self.assertEqual(mt5bridge_py._ABI_VERSION, 7)
-        self.assertEqual(mt5bridge_py._lib.mt5bridge_abi_version(), 7)
+        self.assertEqual(mt5bridge_py._ABI_VERSION, 8)
+        self.assertEqual(mt5bridge_py._lib.mt5bridge_abi_version(), 8)
+        self.assertEqual(mt5bridge_py._TRADE_API_VERSION, 1)
+        self.assertEqual(mt5bridge_py._lib.mt5bridge_trade_api_version(), 1)
 
 
 if __name__ == "__main__":

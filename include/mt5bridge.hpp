@@ -11,4 +11,5 @@
 // MetaTrader5 remain implementation details of the runtime DLL.
 #include <mt5bridge/abi.h>
 #include <mt5bridge/data.h>
+#include <mt5bridge/trade.h>
 #include <mt5bridge/client.hpp>

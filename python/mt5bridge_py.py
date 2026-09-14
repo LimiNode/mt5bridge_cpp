@@ -30,10 +30,11 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-from ctypes import POINTER, byref, c_char_p, c_int, c_void_p, c_wchar_p
+from ctypes import POINTER, byref, c_char_p, c_int, c_uint32, c_void_p, c_wchar_p
 
 ## \brief ABI version required by this ctypes adapter.
-_ABI_VERSION = 7
+_ABI_VERSION = 8
+_TRADE_API_VERSION = 1
 
 # Load the mt5bridge shared library.
 _lib = ctypes.WinDLL(os.environ.get("MT5BRIDGE_DLL", "mt5_bridge.dll"))
@@ -51,9 +52,13 @@ _lib.mt5bridge_free.argtypes = [c_void_p]
 _lib.mt5bridge_free.restype = None
 _lib.mt5bridge_last_error.argtypes = []
 _lib.mt5bridge_last_error.restype = c_char_p
+_lib.mt5bridge_trade_api_version.argtypes = []
+_lib.mt5bridge_trade_api_version.restype = c_uint32
 
 if _lib.mt5bridge_abi_version() != _ABI_VERSION:
     raise RuntimeError("incompatible mt5_bridge.dll ABI version")
+if _lib.mt5bridge_trade_api_version() != _TRADE_API_VERSION:
+    raise RuntimeError("incompatible mt5_bridge trade API version")
 
 
 ## \brief Raises the current DLL error when an ABI call fails.

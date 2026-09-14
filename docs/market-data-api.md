@@ -83,7 +83,7 @@ cannot stall the reader. A page that does not advance either the timestamp or
 the consumed boundary multiset fails instead of looping forever. On IPC
 reconnect, traversal resumes from the last committed cursor.
 
-## Realtime subscriptions (ABI 7)
+## Realtime subscriptions (ABI 7, preserved by ABI 8)
 
 `mt5bridge_copy_ticks_range()` is finite chunked delivery of one historical
 range. ABI 7 adds host-driven realtime subscriptions. `mt5bridge_subscribe_ticks()`

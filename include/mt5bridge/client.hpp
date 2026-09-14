@@ -4,6 +4,7 @@
 /// \brief Defines the lightweight C++ facade for dynamically loaded mt5_bridge.dll.
 
 #include "data.h"
+#include "trade.h"
 
 #if !defined(_WIN32)
 #  error "mt5bridge::Client is only supported on Windows"
@@ -126,6 +127,7 @@ public:
         if (!module_)
             throw std::runtime_error("failed to load mt5_bridge.dll");
         abi_version_ = resolve<AbiVersion>("mt5bridge_abi_version");
+        trade_api_version_ = resolve<TradeApiVersion>("mt5bridge_trade_api_version");
         initialize_ = resolve<Initialize>("mt5bridge_initialize");
         shutdown_ = resolve<Shutdown>("mt5bridge_shutdown");
         eval_json_ = resolve<EvalJson>("mt5bridge_eval_json");
@@ -150,13 +152,18 @@ public:
         process_events_ = resolve<ProcessEvents>("mt5bridge_process_events");
         subscription_diagnostics_ = resolve<SubscriptionDiagnostics>("mt5bridge_subscription_diagnostics");
         subscription_source_diagnostics_ = resolve<SubscriptionSourceDiagnostics>("mt5bridge_subscription_source_diagnostics");
-        if (!abi_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
+        account_info_ = resolve<AccountInfo>("mt5bridge_account_info");
+        symbol_capabilities_ = resolve<SymbolCapabilities>("mt5bridge_symbol_capabilities");
+        order_check_ = resolve<OrderCheck>("mt5bridge_order_check");
+        if (!abi_version_ || !trade_api_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
             !rate_free_ || !rate_diagnostics_ || !last_fetch_diagnostics_ ||
             !copy_ticks_chunks_ || !subscribe_ticks_ || !unsubscribe_ || !unsubscribe_all_ ||
             !process_events_ || !subscription_diagnostics_ || !subscription_source_diagnostics_ ||
-            abi_version_() != MT5BRIDGE_ABI_VERSION) {
+            !account_info_ || !symbol_capabilities_ || !order_check_ ||
+            abi_version_() != MT5BRIDGE_ABI_VERSION ||
+            trade_api_version_() != MT5BRIDGE_TRADE_API_VERSION) {
             unload();
             throw std::runtime_error("incompatible mt5_bridge.dll ABI");
         }
@@ -186,6 +193,7 @@ public:
             FreeLibrary(module_);
         module_ = nullptr;
         abi_version_ = nullptr;
+        trade_api_version_ = nullptr;
         initialize_ = nullptr;
         shutdown_ = nullptr;
         eval_json_ = nullptr;
@@ -209,6 +217,9 @@ public:
         process_events_ = nullptr;
         subscription_diagnostics_ = nullptr;
         subscription_source_diagnostics_ = nullptr;
+        account_info_ = nullptr;
+        symbol_capabilities_ = nullptr;
+        order_check_ = nullptr;
         initialized_ = false;
     }
 
@@ -286,6 +297,49 @@ public:
     /// \brief Returns diagnostic text from the loaded runtime.
     /// \return Borrowed UTF-8 text, or nullptr when unavailable.
     const char *last_error() const noexcept { return last_error_ ? last_error_() : nullptr; }
+
+    /// \brief Copies the current account identity and capabilities.
+    /// \return Typed account snapshot owned by the caller.
+    /// \throws std::runtime_error If the runtime is unavailable or the snapshot cannot be read.
+    Mt5AccountInfo account_info() {
+        check_loaded();
+        Mt5AccountInfo info{};
+        if (account_info_(&info) != 0)
+            throw std::runtime_error(error_message());
+        return info;
+    }
+
+    /// \brief Copies execution and sizing capabilities for one symbol.
+    /// \param request Symbol request and reserved-field contract.
+    /// \return Typed symbol capability snapshot owned by the caller.
+    /// \throws std::runtime_error If the runtime is unavailable or the symbol cannot be read.
+    Mt5SymbolCapabilities symbol_capabilities(const Mt5SymbolRequest &request) {
+        check_loaded();
+        Mt5SymbolCapabilities capabilities{};
+        if (symbol_capabilities_(&request, &capabilities) != 0)
+            throw std::runtime_error(error_message());
+        return capabilities;
+    }
+
+    /// \brief Convenience overload for symbol capability lookup.
+    /// \param symbol MetaTrader symbol encoded as UTF-8.
+    /// \return Typed symbol capability snapshot owned by the caller.
+    /// \throws std::runtime_error If the runtime is unavailable or the symbol cannot be read.
+    Mt5SymbolCapabilities symbol_capabilities(const std::string &symbol) {
+        return symbol_capabilities(Mt5SymbolRequest{symbol.c_str(), 0});
+    }
+
+    /// \brief Runs the advisory MetaTrader order_check operation.
+    /// \param request Plain-C order-check request; no order is submitted.
+    /// \return Raw advisory result, including rejection retcodes.
+    /// \throws std::runtime_error If the runtime call fails before returning a result.
+    Mt5OrderCheckResult order_check(const Mt5OrderCheckRequest &request) {
+        check_loaded();
+        Mt5OrderCheckResult result{};
+        if (order_check_(&request, &result) != 0)
+            throw std::runtime_error(error_message());
+        return result;
+    }
 
     /// \brief Copies diagnostics from the most recent market-data call on this thread.
     /// \param[out] diagnostics Destination for the diagnostic snapshot.
@@ -454,6 +508,7 @@ public:
 
 private:
     using AbiVersion = std::uint32_t (*)();
+    using TradeApiVersion = std::uint32_t (*)();
     using Initialize = int (*)(const wchar_t *);
     using Shutdown = int (*)();
     using EvalJson = int (*)(const char *, char **);
@@ -478,6 +533,9 @@ private:
     using ProcessEvents = int (*)(std::size_t, Mt5SubscriptionEventCallback, void *);
     using SubscriptionDiagnostics = int (*)(Mt5SubscriptionHandle, Mt5SubscriptionDiagnostics *);
     using SubscriptionSourceDiagnostics = int (*)(Mt5SubscriptionHandle, std::uint32_t, Mt5SubscriptionDiagnostics *);
+    using AccountInfo = int (*)(Mt5AccountInfo *);
+    using SymbolCapabilities = int (*)(const Mt5SymbolRequest *, Mt5SymbolCapabilities *);
+    using OrderCheck = int (*)(const Mt5OrderCheckRequest *, Mt5OrderCheckResult *);
 
     /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
     /// \param path Caller-provided DLL path.
@@ -526,6 +584,7 @@ private:
     void move_from(Client &other) noexcept {
         module_ = other.module_;
         abi_version_ = other.abi_version_;
+        trade_api_version_ = other.trade_api_version_;
         initialize_ = other.initialize_;
         shutdown_ = other.shutdown_;
         eval_json_ = other.eval_json_;
@@ -549,6 +608,9 @@ private:
         process_events_ = other.process_events_;
         subscription_diagnostics_ = other.subscription_diagnostics_;
         subscription_source_diagnostics_ = other.subscription_source_diagnostics_;
+        account_info_ = other.account_info_;
+        symbol_capabilities_ = other.symbol_capabilities_;
+        order_check_ = other.order_check_;
         subscription_state_ = std::move(other.subscription_state_);
         initialized_ = other.initialized_;
         owner_thread_ = other.owner_thread_;
@@ -558,6 +620,7 @@ private:
         active_client_.compare_exchange_strong(expected, this);
         other.module_ = nullptr;
         other.abi_version_ = nullptr;
+        other.trade_api_version_ = nullptr;
         other.initialize_ = nullptr;
         other.shutdown_ = nullptr;
         other.eval_json_ = nullptr;
@@ -581,12 +644,16 @@ private:
         other.process_events_ = nullptr;
         other.subscription_diagnostics_ = nullptr;
         other.subscription_source_diagnostics_ = nullptr;
+        other.account_info_ = nullptr;
+        other.symbol_capabilities_ = nullptr;
+        other.order_check_ = nullptr;
         other.initialized_ = false;
         other.owner_thread_ = std::thread::id{};
     }
 
     HMODULE module_ = nullptr;
     AbiVersion abi_version_ = nullptr;
+    TradeApiVersion trade_api_version_ = nullptr;
     Initialize initialize_ = nullptr;
     Shutdown shutdown_ = nullptr;
     EvalJson eval_json_ = nullptr;
@@ -610,6 +677,9 @@ private:
     ProcessEvents process_events_ = nullptr;
     SubscriptionDiagnostics subscription_diagnostics_ = nullptr;
     SubscriptionSourceDiagnostics subscription_source_diagnostics_ = nullptr;
+    AccountInfo account_info_ = nullptr;
+    SymbolCapabilities symbol_capabilities_ = nullptr;
+    OrderCheck order_check_ = nullptr;
     std::shared_ptr<SubscriptionState> subscription_state_;
     bool initialized_ = false;
     std::thread::id owner_thread_;

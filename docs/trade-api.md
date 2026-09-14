@@ -32,6 +32,28 @@ side-effecting `order_send` to production callers; that primitive remains
 internal until stage 2 supplies durable intent, account/lease verification,
 and the non-resendable dispatch barrier.
 
+## Implemented Stage 1 slice
+
+The current ABI 8 implementation exposes the first bounded observation slice
+in [`include/mt5bridge/trade.h`](../include/mt5bridge/trade.h):
+
+- `mt5bridge_account_info()` returns account identity, permissions, margin mode,
+  and balance/equity fields as a fixed-size `Mt5AccountInfo` snapshot.
+- `mt5bridge_symbol_capabilities()` returns execution, filling, expiration,
+  sizing, stop/freeze, and `SYMBOL_ORDER_CLOSEBY` capability bits.
+- `mt5bridge_order_check()` forwards a plain-C request to the advisory MT5
+  `order_check()` call and returns its raw retcode/comment. A rejected check is
+  still a successful transport call; it never submits an order.
+
+The C++ facade exposes these operations as `Client::account_info()`,
+`Client::symbol_capabilities()`, and `Client::order_check()`. Namedtuple and
+mapping results are converted under the runtime mutex and GIL into POD values;
+no Python object crosses the ABI. Active orders, positions, history orders, and
+history deals remain subsequent Stage 1 slices so each observation contract can
+be tested independently. A public side-effecting `order_send` remains
+intentionally absent until the durable journal and reconciliation barrier in
+Stage 2 are implemented.
+
 ## Identity model
 
 The bridge owns two IDs:

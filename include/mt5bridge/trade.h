@@ -477,6 +477,14 @@ static_assert(offsetof(Mt5OrderCheckRequest, action) == 96,
               "Mt5OrderCheckRequest action offset changed");
 static_assert(offsetof(Mt5OrderCheckResult, balance) == 8,
               "Mt5OrderCheckResult balance offset changed");
+static_assert(offsetof(Mt5HistoryOrdersRequest, order_ticket) == 24,
+              "Mt5HistoryOrdersRequest order_ticket offset changed");
+static_assert(offsetof(Mt5HistoryDealsRequest, deal_ticket) == 24,
+              "Mt5HistoryDealsRequest deal_ticket offset changed");
+static_assert(offsetof(Mt5HistoryDealsRequest, order_ticket) == 32,
+              "Mt5HistoryDealsRequest order_ticket offset changed");
+static_assert(offsetof(Mt5HistoryDealsRequest, position_id) == 40,
+              "Mt5HistoryDealsRequest position_id offset changed");
 static_assert(offsetof(Mt5OrderSnapshot, position_id) == 8,
               "Mt5OrderSnapshot position_id offset changed");
 static_assert(offsetof(Mt5OrderSnapshot, time_setup_msc) == 112,
@@ -516,6 +524,14 @@ _Static_assert(offsetof(Mt5OrderCheckRequest, action) == 96,
                "Mt5OrderCheckRequest action offset changed");
 _Static_assert(offsetof(Mt5OrderCheckResult, balance) == 8,
                "Mt5OrderCheckResult balance offset changed");
+_Static_assert(offsetof(Mt5HistoryOrdersRequest, order_ticket) == 24,
+               "Mt5HistoryOrdersRequest order_ticket offset changed");
+_Static_assert(offsetof(Mt5HistoryDealsRequest, deal_ticket) == 24,
+               "Mt5HistoryDealsRequest deal_ticket offset changed");
+_Static_assert(offsetof(Mt5HistoryDealsRequest, order_ticket) == 32,
+               "Mt5HistoryDealsRequest order_ticket offset changed");
+_Static_assert(offsetof(Mt5HistoryDealsRequest, position_id) == 40,
+               "Mt5HistoryDealsRequest position_id offset changed");
 #endif
 
 #ifdef __cplusplus

@@ -97,6 +97,10 @@ class Mt5OrderSnapshot(Structure):
     ]
 
 
+# History orders intentionally use the same evidence shape as active orders.
+Mt5HistoryOrderSnapshot = Mt5OrderSnapshot
+
+
 class Mt5PositionSnapshot(Structure):
     """Typed active-position evidence returned by the DLL."""
 

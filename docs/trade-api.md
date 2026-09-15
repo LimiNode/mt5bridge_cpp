@@ -119,6 +119,23 @@ The managed lifecycle boundaries are recorded in
 `OperationId`, and `CloseObligation` are domain identities above raw MT5
 evidence; they must never be inferred from one observation response.
 
+## Observation-only graph
+
+The C++ header [`reconciliation.hpp`](../include/mt5bridge/reconciliation.hpp)
+provides `mt5bridge::ObservationGraph` for the next stage. It accepts batches
+of the typed snapshots together with an immutable `(server, login)`
+`AccountKey`, upserts records by their primary MT5 tickets, and exposes
+deterministic links for `ORDER_POSITION_ID`, `DEAL_ORDER`,
+`DEAL_POSITION_ID`, and `POSITION_IDENTIFIER`.
+
+The graph is intentionally observation-only: it does not call MetaTrader,
+generate managed `TradeId`/`OperationId` values, persist a journal, or invoke
+`order_send`. An unbound graph adopts the first valid account; a different
+account is rejected atomically, so account-switch evidence can never be mixed
+into the existing graph. Invalid primary tickets fail closed. Every accepted
+batch advances a monotonic revision, and `clear_evidence()` retains the
+account scope while removing records.
+
 ## Quickstart scenarios
 
 The runnable [`trade_observation_example.cpp`](../examples/trade_observation_example.cpp)

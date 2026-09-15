@@ -111,9 +111,12 @@ int run(const std::string &symbol, const wchar_t *dll_path) {
         const auto active_positions =
             bridge.positions(Mt5PositionsRequest{symbol.c_str(), nullptr, 0, 0, 0});
         const auto history_from = now_msc - 60 * 60 * 1000;
-        const Mt5HistoryRequest history{history_from, now_msc, nullptr, 0, 0, 0};
-        const auto history_orders = bridge.history_orders(history);
-        const auto history_deals = bridge.history_deals(history);
+        const Mt5HistoryOrdersRequest history_orders_request{
+            history_from, now_msc, nullptr, 0, 0, 0};
+        const Mt5HistoryDealsRequest history_deals_request{
+            history_from, now_msc, nullptr, 0, 0, 0, 0};
+        const auto history_orders = bridge.history_orders(history_orders_request);
+        const auto history_deals = bridge.history_deals(history_deals_request);
         std::cout << "snapshots: orders=" << active_orders.size()
                   << " positions=" << active_positions.size()
                   << " history_orders=" << history_orders.size()

@@ -204,32 +204,44 @@ typedef struct Mt5OrderCheckResult {
 /// \struct Mt5OrdersRequest
 /// \brief Filters an active-order snapshot.
 typedef struct Mt5OrdersRequest {
-    const char *symbol_utf8; ///< Optional UTF-8 symbol filter.
-    const char *group_utf8;  ///< Optional MT5 group mask.
-    uint64_t ticket;         ///< Optional order ticket; zero means all.
+    const char *symbol_utf8; ///< Optional symbol selector; exclusive with group/ticket.
+    const char *group_utf8;  ///< Optional MT5 group selector; exclusive with symbol/ticket.
+    uint64_t ticket;         ///< Optional order ticket selector; exclusive with symbol/group.
     uint32_t reserved;       ///< Reserved; must be zero.
 } Mt5OrdersRequest;
 
 /// \struct Mt5PositionsRequest
 /// \brief Filters an active-position snapshot.
 typedef struct Mt5PositionsRequest {
-    const char *symbol_utf8; ///< Optional UTF-8 symbol filter.
-    const char *group_utf8;  ///< Optional MT5 group mask.
-    uint64_t ticket;         ///< Optional position ticket; zero means all.
-    uint64_t identifier;     ///< Optional POSITION_IDENTIFIER; zero means all.
+    const char *symbol_utf8; ///< Optional symbol selector; exclusive with group/ticket.
+    const char *group_utf8;  ///< Optional MT5 group selector; exclusive with symbol/ticket.
+    uint64_t ticket;         ///< Optional position ticket selector; exclusive with symbol/group.
+    uint64_t identifier;     ///< Optional POSITION_IDENTIFIER, applied as a local post-filter.
     uint32_t reserved;       ///< Reserved; must be zero.
 } Mt5PositionsRequest;
 
-/// \struct Mt5HistoryRequest
-/// \brief Filters history orders or deals by time and optional identity.
-typedef struct Mt5HistoryRequest {
+/// \struct Mt5HistoryOrdersRequest
+/// \brief Bounds history orders by time and optional local identity filters.
+typedef struct Mt5HistoryOrdersRequest {
     int64_t from_msc;        ///< Inclusive UTC range start in milliseconds.
     int64_t to_msc;          ///< Inclusive UTC range end in milliseconds.
-    const char *group_utf8;  ///< Optional MT5 group mask.
-    uint64_t ticket;         ///< Optional order/deal ticket; zero means all.
-    uint64_t position_id;    ///< Optional POSITION_IDENTIFIER; zero means all.
+    const char *group_utf8;  ///< Optional MT5 group selector sent to the server.
+    uint64_t order_ticket;   ///< Optional ORDER_TICKET local post-filter; zero means all.
+    uint64_t position_id;    ///< Optional POSITION_IDENTIFIER local post-filter; zero means all.
     uint32_t reserved;       ///< Reserved; must be zero.
-} Mt5HistoryRequest;
+} Mt5HistoryOrdersRequest;
+
+/// \struct Mt5HistoryDealsRequest
+/// \brief Bounds history deals by time and local deal/order/position filters.
+typedef struct Mt5HistoryDealsRequest {
+    int64_t from_msc;        ///< Inclusive UTC range start in milliseconds.
+    int64_t to_msc;          ///< Inclusive UTC range end in milliseconds.
+    const char *group_utf8;  ///< Optional MT5 group selector sent to the server.
+    uint64_t deal_ticket;    ///< Optional DEAL_TICKET local post-filter; zero means all.
+    uint64_t order_ticket;   ///< Optional DEAL_ORDER local post-filter; zero means all.
+    uint64_t position_id;    ///< Optional DEAL_POSITION_ID local post-filter; zero means all.
+    uint32_t reserved;       ///< Reserved; must be zero.
+} Mt5HistoryDealsRequest;
 
 /// \name Snapshot known-field masks
 /// \brief Bits distinguish an absent MT5 field from a valid zero value.
@@ -395,7 +407,7 @@ MT5BRIDGE_EXPORT size_t mt5bridge_position_buffer_size(const Mt5PositionBuffer *
 MT5BRIDGE_EXPORT void mt5bridge_position_buffer_free(Mt5PositionBuffer *buffer);
 
 /// \brief Returns a bounded history-order snapshot.
-MT5BRIDGE_EXPORT int mt5bridge_query_history_orders(const Mt5HistoryRequest *request,
+MT5BRIDGE_EXPORT int mt5bridge_query_history_orders(const Mt5HistoryOrdersRequest *request,
                                                     Mt5HistoryOrderBuffer **result);
 MT5BRIDGE_EXPORT const Mt5HistoryOrderSnapshot *mt5bridge_history_order_buffer_data(
     const Mt5HistoryOrderBuffer *buffer);
@@ -404,7 +416,7 @@ MT5BRIDGE_EXPORT size_t mt5bridge_history_order_buffer_size(
 MT5BRIDGE_EXPORT void mt5bridge_history_order_buffer_free(Mt5HistoryOrderBuffer *buffer);
 
 /// \brief Returns a bounded history-deal snapshot.
-MT5BRIDGE_EXPORT int mt5bridge_query_history_deals(const Mt5HistoryRequest *request,
+MT5BRIDGE_EXPORT int mt5bridge_query_history_deals(const Mt5HistoryDealsRequest *request,
                                                    Mt5DealBuffer **result);
 MT5BRIDGE_EXPORT const Mt5DealSnapshot *mt5bridge_deal_buffer_data(const Mt5DealBuffer *buffer);
 MT5BRIDGE_EXPORT size_t mt5bridge_deal_buffer_size(const Mt5DealBuffer *buffer);
@@ -445,7 +457,10 @@ static_assert(sizeof(Mt5OrderCheckResult) == 192,
               "Mt5OrderCheckResult ABI size changed");
 static_assert(sizeof(Mt5OrdersRequest) == 32, "Mt5OrdersRequest ABI size changed");
 static_assert(sizeof(Mt5PositionsRequest) == 40, "Mt5PositionsRequest ABI size changed");
-static_assert(sizeof(Mt5HistoryRequest) == 48, "Mt5HistoryRequest ABI size changed");
+static_assert(sizeof(Mt5HistoryOrdersRequest) == 48,
+              "Mt5HistoryOrdersRequest ABI size changed");
+static_assert(sizeof(Mt5HistoryDealsRequest) == 56,
+              "Mt5HistoryDealsRequest ABI size changed");
 static_assert(sizeof(Mt5OrderSnapshot) == 472, "Mt5OrderSnapshot ABI size changed");
 static_assert(sizeof(Mt5PositionSnapshot) == 440, "Mt5PositionSnapshot ABI size changed");
 static_assert(sizeof(Mt5DealSnapshot) == 440, "Mt5DealSnapshot ABI size changed");
@@ -481,7 +496,10 @@ _Static_assert(sizeof(Mt5OrderCheckResult) == 192,
                "Mt5OrderCheckResult ABI size changed");
 _Static_assert(sizeof(Mt5OrdersRequest) == 32, "Mt5OrdersRequest ABI size changed");
 _Static_assert(sizeof(Mt5PositionsRequest) == 40, "Mt5PositionsRequest ABI size changed");
-_Static_assert(sizeof(Mt5HistoryRequest) == 48, "Mt5HistoryRequest ABI size changed");
+_Static_assert(sizeof(Mt5HistoryOrdersRequest) == 48,
+               "Mt5HistoryOrdersRequest ABI size changed");
+_Static_assert(sizeof(Mt5HistoryDealsRequest) == 56,
+               "Mt5HistoryDealsRequest ABI size changed");
 _Static_assert(sizeof(Mt5OrderSnapshot) == 472, "Mt5OrderSnapshot ABI size changed");
 _Static_assert(sizeof(Mt5PositionSnapshot) == 440, "Mt5PositionSnapshot ABI size changed");
 _Static_assert(sizeof(Mt5DealSnapshot) == 440, "Mt5DealSnapshot ABI size changed");

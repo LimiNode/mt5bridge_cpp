@@ -163,6 +163,12 @@ The program performs concrete observations:
   copy bounded typed snapshots and print their counts. Empty collections are
   valid; missing required graph fields fail closed.
 
+Active queries use the same mutually-exclusive `symbol`/`group`/`ticket`
+selectors as the documented MT5 overloads. History uses separate
+`Mt5HistoryOrdersRequest` and `Mt5HistoryDealsRequest` types: the server is
+queried by bounded time range and optional group, while order/deal/position
+identity filters are applied locally to the returned evidence.
+
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 
 With a logged-in terminal, run the bounded native market-data smoke check from

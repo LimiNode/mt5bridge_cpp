@@ -114,10 +114,18 @@ class Mt5PositionsRequest(Structure):
     ]
 
 
-class Mt5HistoryRequest(Structure):
+class Mt5HistoryOrdersRequest(Structure):
     _fields_ = [
         ("from_msc", c_int64), ("to_msc", c_int64), ("group_utf8", c_char_p),
-        ("ticket", c_uint64), ("position_id", c_uint64), ("reserved", c_uint32)
+        ("order_ticket", c_uint64), ("position_id", c_uint64), ("reserved", c_uint32)
+    ]
+
+
+class Mt5HistoryDealsRequest(Structure):
+    _fields_ = [
+        ("from_msc", c_int64), ("to_msc", c_int64), ("group_utf8", c_char_p),
+        ("deal_ticket", c_uint64), ("order_ticket", c_uint64),
+        ("position_id", c_uint64), ("reserved", c_uint32)
     ]
 
 
@@ -257,21 +265,46 @@ def fake_module(*, symbol_none: bool = False, order_none: bool = False) -> types
             "comment": "invalid filling mode",
         }
 
-    def orders_get(*args: object, **kwargs: object) -> object:
-        module.collection_requests.append(("orders_get", args, dict(kwargs)))
+    def orders_get(*, symbol: str | None = None, group: str | None = None,
+                   ticket: int | None = None) -> object:
+        module.collection_requests.append(("orders_get", (), {
+            key: value for key, value in {
+                "symbol": symbol, "group": group, "ticket": ticket
+            }.items() if value is not None
+        }))
         return [_trade_order()]
 
-    def positions_get(*args: object, **kwargs: object) -> object:
-        module.collection_requests.append(("positions_get", args, dict(kwargs)))
-        return [_trade_position()]
+    def positions_get(*, symbol: str | None = None, group: str | None = None,
+                      ticket: int | None = None) -> object:
+        module.collection_requests.append(("positions_get", (), {
+            key: value for key, value in {
+                "symbol": symbol, "group": group, "ticket": ticket
+            }.items() if value is not None
+        }))
+        second = _trade_position()
+        second["identifier"] = 999
+        return [_trade_position(), second]
 
-    def history_orders_get(*args: object, **kwargs: object) -> object:
-        module.collection_requests.append(("history_orders_get", args, dict(kwargs)))
-        return [_trade_order(102)]
+    def history_orders_get(date_from: object, date_to: object, *,
+                           group: str | None = None) -> object:
+        args = (date_from, date_to)
+        module.collection_requests.append(("history_orders_get", args,
+                                           {"group": group} if group is not None else {}))
+        first = _trade_order(102)
+        first["position_id"] = 401
+        second = _trade_order(103)
+        second["position_id"] = 999
+        return [first, second]
 
-    def history_deals_get(*args: object, **kwargs: object) -> object:
-        module.collection_requests.append(("history_deals_get", args, dict(kwargs)))
-        return [_trade_deal()]
+    def history_deals_get(date_from: object, date_to: object, *,
+                          group: str | None = None) -> object:
+        args = (date_from, date_to)
+        module.collection_requests.append(("history_deals_get", args,
+                                           {"group": group} if group is not None else {}))
+        second = _trade_deal()
+        second["ticket"] = 502
+        second["position_id"] = 999
+        return [_trade_deal(), second]
 
     module.initialize = initialize
     module.shutdown = shutdown
@@ -294,7 +327,8 @@ class TradeObservationTests(unittest.TestCase):
         if (
             ctypes.sizeof(Mt5AccountInfo) != 192
             or ctypes.sizeof(Mt5SymbolCapabilities) != 168
-            or ctypes.sizeof(Mt5HistoryRequest) != 48
+            or ctypes.sizeof(Mt5HistoryOrdersRequest) != 48
+            or ctypes.sizeof(Mt5HistoryDealsRequest) != 56
             or ctypes.sizeof(Mt5OrderSnapshot) != 472
             or ctypes.sizeof(Mt5PositionSnapshot) != 440
             or ctypes.sizeof(Mt5DealSnapshot) != 440
@@ -340,7 +374,7 @@ class TradeObservationTests(unittest.TestCase):
         cls.dll.mt5bridge_position_buffer_size.restype = c_size_t
         cls.dll.mt5bridge_position_buffer_free.argtypes = [c_void_p]
         cls.dll.mt5bridge_position_buffer_free.restype = None
-        cls.dll.mt5bridge_query_history_orders.argtypes = [POINTER(Mt5HistoryRequest), POINTER(c_void_p)]
+        cls.dll.mt5bridge_query_history_orders.argtypes = [POINTER(Mt5HistoryOrdersRequest), POINTER(c_void_p)]
         cls.dll.mt5bridge_query_history_orders.restype = c_int
         cls.dll.mt5bridge_history_order_buffer_data.argtypes = [c_void_p]
         cls.dll.mt5bridge_history_order_buffer_data.restype = POINTER(Mt5OrderSnapshot)
@@ -348,7 +382,7 @@ class TradeObservationTests(unittest.TestCase):
         cls.dll.mt5bridge_history_order_buffer_size.restype = c_size_t
         cls.dll.mt5bridge_history_order_buffer_free.argtypes = [c_void_p]
         cls.dll.mt5bridge_history_order_buffer_free.restype = None
-        cls.dll.mt5bridge_query_history_deals.argtypes = [POINTER(Mt5HistoryRequest), POINTER(c_void_p)]
+        cls.dll.mt5bridge_query_history_deals.argtypes = [POINTER(Mt5HistoryDealsRequest), POINTER(c_void_p)]
         cls.dll.mt5bridge_query_history_deals.restype = c_int
         cls.dll.mt5bridge_deal_buffer_data.argtypes = [c_void_p]
         cls.dll.mt5bridge_deal_buffer_data.restype = POINTER(Mt5DealSnapshot)
@@ -611,7 +645,7 @@ class TradeObservationTests(unittest.TestCase):
     def test_typed_active_and_history_snapshots_preserve_graph_fields(self) -> None:
         symbol = c_char_p(b"EURUSD")
         group = c_char_p(b"*EUR*")
-        order_request = Mt5OrdersRequest(symbol, group, 101, 0)
+        order_request = Mt5OrdersRequest(symbol, c_char_p(), 0, 0)
         orders = self._read_buffer(
             self.dll.mt5bridge_query_orders,
             self.dll.mt5bridge_order_buffer_data,
@@ -626,9 +660,11 @@ class TradeObservationTests(unittest.TestCase):
         self.assertEqual(orders[0].external_id, b"broker-order-1")
         self.assertNotEqual(orders[0].known_fields, 0)
         self.assertEqual(self.fake.collection_requests[-1][0], "orders_get")
-        self.assertEqual(self.fake.collection_requests[-1][2], {"symbol": "EURUSD", "group": "*EUR*", "ticket": 101})
+        self.assertEqual(self.fake.collection_requests[-1][2], {"symbol": "EURUSD"})
 
-        position_request = Mt5PositionsRequest(symbol, group, 301, 401, 0)
+        # POSITION_IDENTIFIER is not a documented positions_get selector; it
+        # is intentionally applied after the bounded server snapshot.
+        position_request = Mt5PositionsRequest(c_char_p(), c_char_p(), 0, 401, 0)
         positions = self._read_buffer(
             self.dll.mt5bridge_query_positions,
             self.dll.mt5bridge_position_buffer_data,
@@ -637,11 +673,14 @@ class TradeObservationTests(unittest.TestCase):
             position_request,
             Mt5PositionSnapshot,
         )
+        self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0].identifier, 401)
         self.assertEqual(positions[0].time_update_msc, 1_700_000_001_000)
-        self.assertEqual(self.fake.collection_requests[-1][2]["position"], 401)
+        self.assertEqual(self.fake.collection_requests[-1][2], {})
 
-        history_request = Mt5HistoryRequest(1_700_000_000_000, 1_700_000_010_000, group, 102, 401, 0)
+        history_request = Mt5HistoryOrdersRequest(
+            1_700_000_000_000, 1_700_000_010_000, group, 102, 401, 0
+        )
         history_orders = self._read_buffer(
             self.dll.mt5bridge_query_history_orders,
             self.dll.mt5bridge_history_order_buffer_data,
@@ -651,23 +690,29 @@ class TradeObservationTests(unittest.TestCase):
             Mt5OrderSnapshot,
         )
         self.assertEqual(history_orders[0].ticket, 102)
+        self.assertEqual(len(history_orders), 1)
         history_call = self.fake.collection_requests[-1]
         self.assertEqual(history_call[0], "history_orders_get")
-        self.assertEqual(history_call[2], {"group": "*EUR*", "ticket": 102, "position": 401})
+        self.assertEqual(history_call[2], {"group": "*EUR*"})
         self.assertEqual(history_call[1][0].timestamp(), 1_700_000_000)
 
+        history_deal_request = Mt5HistoryDealsRequest(
+            1_700_000_000_000, 1_700_000_010_000, group, 501, 101, 401, 0
+        )
         history_deals = self._read_buffer(
             self.dll.mt5bridge_query_history_deals,
             self.dll.mt5bridge_deal_buffer_data,
             self.dll.mt5bridge_deal_buffer_size,
             self.dll.mt5bridge_deal_buffer_free,
-            history_request,
+            history_deal_request,
             Mt5DealSnapshot,
         )
         self.assertEqual(history_deals[0].order_ticket, 101)
         self.assertEqual(history_deals[0].position_id, 401)
         self.assertEqual(history_deals[0].time_msc, 1_700_000_002_000)
         self.assertEqual(history_deals[0].external_id, b"broker-deal-1")
+        self.assertEqual(len(history_deals), 1)
+        self.assertEqual(self.fake.collection_requests[-1][2], {"group": "*EUR*"})
 
     def test_snapshot_missing_required_graph_field_fails_closed(self) -> None:
         def incomplete_orders_get(*args: object, **kwargs: object) -> object:
@@ -680,6 +725,38 @@ class TradeObservationTests(unittest.TestCase):
         buffer = c_void_p()
         self.assertNotEqual(self.dll.mt5bridge_query_orders(byref(request), byref(buffer)), 0)
         self.assertIn("position_id is required", self.last_error())
+
+    def test_active_server_selectors_follow_mt5_overload_contract(self) -> None:
+        request = Mt5OrdersRequest(c_char_p(b"EURUSD"), c_char_p(b"*EUR*"), 0, 0)
+        buffer = c_void_p()
+        self.assertNotEqual(self.dll.mt5bridge_query_orders(byref(request), byref(buffer)), 0)
+        self.assertIn("orders_get accepts only one", self.last_error())
+
+        request = Mt5PositionsRequest(c_char_p(b"EURUSD"), c_char_p(), 301, 0, 0)
+        self.assertNotEqual(self.dll.mt5bridge_query_positions(byref(request), byref(buffer)), 0)
+        self.assertIn("positions_get accepts only one", self.last_error())
+
+    def test_native_millisecond_timestamp_preserves_precision(self) -> None:
+        def order_with_native_msc(*, symbol=None, group=None, ticket=None) -> object:
+            value = _trade_order()
+            value["time_setup_msc"] = 1_700_000_000_123
+            value["time_done_msc"] = 1_700_000_001_456
+            value["time_expiration_msc"] = 1_700_000_360_789
+            return [value]
+
+        self.fake.orders_get = order_with_native_msc
+        request = Mt5OrdersRequest()
+        orders = self._read_buffer(
+            self.dll.mt5bridge_query_orders,
+            self.dll.mt5bridge_order_buffer_data,
+            self.dll.mt5bridge_order_buffer_size,
+            self.dll.mt5bridge_order_buffer_free,
+            request,
+            Mt5OrderSnapshot,
+        )
+        self.assertEqual(orders[0].time_setup_msc, 1_700_000_000_123)
+        self.assertEqual(orders[0].time_done_msc, 1_700_000_001_456)
+        self.assertEqual(orders[0].time_expiration_msc, 1_700_000_360_789)
 
     def test_optional_external_id_remains_unknown(self) -> None:
         def order_without_external_id(*args: object, **kwargs: object) -> object:
@@ -702,7 +779,7 @@ class TradeObservationTests(unittest.TestCase):
 
     def test_none_collection_with_error_fails_closed(self) -> None:
         self.fake.orders_get = lambda **kwargs: None
-        self.fake.last_error = lambda: (2, "trade error")
+        self.fake.last_error = lambda: (1, "Success")
         request = Mt5OrdersRequest()
         buffer = c_void_p()
         self.assertNotEqual(self.dll.mt5bridge_query_orders(byref(request), byref(buffer)), 0)

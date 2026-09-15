@@ -68,17 +68,27 @@ class Mt5PositionsRequest(Structure):
     ]
 
 
-class Mt5HistoryRequest(Structure):
-    """Bounds a history order/deal observation query in UTC milliseconds."""
+class Mt5HistoryOrdersRequest(Structure):
+    """Bounds history orders in UTC milliseconds."""
 
     _fields_ = [
-        ("from_msc", c_int64),
-        ("to_msc", c_int64),
-        ("group_utf8", c_char_p),
-        ("ticket", c_uint64),
-        ("position_id", c_uint64),
-        ("reserved", c_uint32),
+        ("from_msc", c_int64), ("to_msc", c_int64), ("group_utf8", c_char_p),
+        ("order_ticket", c_uint64), ("position_id", c_uint64), ("reserved", c_uint32),
     ]
+
+
+class Mt5HistoryDealsRequest(Structure):
+    """Bounds history deals in UTC milliseconds."""
+
+    _fields_ = [
+        ("from_msc", c_int64), ("to_msc", c_int64), ("group_utf8", c_char_p),
+        ("deal_ticket", c_uint64), ("order_ticket", c_uint64),
+        ("position_id", c_uint64), ("reserved", c_uint32),
+    ]
+
+
+# Compatibility name for callers that only used the old order-history shape.
+Mt5HistoryRequest = Mt5HistoryOrdersRequest
 
 
 class Mt5OrderSnapshot(Structure):
@@ -168,7 +178,7 @@ _lib.mt5bridge_position_buffer_size.argtypes = [c_void_p]
 _lib.mt5bridge_position_buffer_size.restype = ctypes.c_size_t
 _lib.mt5bridge_position_buffer_free.argtypes = [c_void_p]
 _lib.mt5bridge_position_buffer_free.restype = None
-_lib.mt5bridge_query_history_orders.argtypes = [POINTER(Mt5HistoryRequest), POINTER(c_void_p)]
+_lib.mt5bridge_query_history_orders.argtypes = [POINTER(Mt5HistoryOrdersRequest), POINTER(c_void_p)]
 _lib.mt5bridge_query_history_orders.restype = c_int
 _lib.mt5bridge_history_order_buffer_data.argtypes = [c_void_p]
 _lib.mt5bridge_history_order_buffer_data.restype = POINTER(Mt5OrderSnapshot)
@@ -176,7 +186,7 @@ _lib.mt5bridge_history_order_buffer_size.argtypes = [c_void_p]
 _lib.mt5bridge_history_order_buffer_size.restype = ctypes.c_size_t
 _lib.mt5bridge_history_order_buffer_free.argtypes = [c_void_p]
 _lib.mt5bridge_history_order_buffer_free.restype = None
-_lib.mt5bridge_query_history_deals.argtypes = [POINTER(Mt5HistoryRequest), POINTER(c_void_p)]
+_lib.mt5bridge_query_history_deals.argtypes = [POINTER(Mt5HistoryDealsRequest), POINTER(c_void_p)]
 _lib.mt5bridge_query_history_deals.restype = c_int
 _lib.mt5bridge_deal_buffer_data.argtypes = [c_void_p]
 _lib.mt5bridge_deal_buffer_data.restype = POINTER(Mt5DealSnapshot)
@@ -271,10 +281,12 @@ def positions(
 
 
 def history_orders(from_msc: int, to_msc: int, group: str | None = None,
-                   ticket: int = 0, position_id: int = 0):
+                   order_ticket: int = 0, position_id: int = 0):
     """Return typed history-order snapshots for an inclusive UTC range."""
     group_bytes, group_ptr = _utf8(group)
-    request = Mt5HistoryRequest(from_msc, to_msc, group_ptr, ticket, position_id, 0)
+    request = Mt5HistoryOrdersRequest(
+        from_msc, to_msc, group_ptr, order_ticket, position_id, 0
+    )
     _ = group_bytes
     return _read_buffer(
         _lib.mt5bridge_query_history_orders,
@@ -287,10 +299,13 @@ def history_orders(from_msc: int, to_msc: int, group: str | None = None,
 
 
 def history_deals(from_msc: int, to_msc: int, group: str | None = None,
-                  ticket: int = 0, position_id: int = 0):
+                  deal_ticket: int = 0, order_ticket: int = 0,
+                  position_id: int = 0):
     """Return typed history-deal snapshots for an inclusive UTC range."""
     group_bytes, group_ptr = _utf8(group)
-    request = Mt5HistoryRequest(from_msc, to_msc, group_ptr, ticket, position_id, 0)
+    request = Mt5HistoryDealsRequest(
+        from_msc, to_msc, group_ptr, deal_ticket, order_ticket, position_id, 0
+    )
     _ = group_bytes
     return _read_buffer(
         _lib.mt5bridge_query_history_deals,

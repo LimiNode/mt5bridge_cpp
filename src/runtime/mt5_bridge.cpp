@@ -303,7 +303,6 @@ private:
 // Trade-observation collection helpers are defined later in the translation
 // unit, after the generic market-data helpers.
 PyRef make_datetime(int64_t milliseconds);
-int mt5_last_error_code(PyObject *mt5);
 
 /// \class GilScope
 /// \brief Acquires and releases the CPython global interpreter lock for one scope.
@@ -1093,10 +1092,9 @@ bool copy_deal_snapshot(PyObject *object, Mt5DealSnapshot *snapshot) {
 /// \param symbol Optional symbol filter.
 /// \param group Optional MT5 group mask.
 /// \param ticket Optional ticket filter.
-/// \param position_id Optional position identifier filter.
 /// \return True when all supplied values were inserted.
 bool set_trade_query_filters(PyObject *kwargs, const char *symbol, const char *group,
-                             uint64_t ticket, uint64_t position_id) {
+                             uint64_t ticket) {
     auto set_text = [kwargs](const char *name, const char *value) {
         if (!value || !*value)
             return true;
@@ -1110,7 +1108,7 @@ bool set_trade_query_filters(PyObject *kwargs, const char *symbol, const char *g
         return integer && PyDict_SetItemString(kwargs, name, integer.get()) == 0;
     };
     return set_text("symbol", symbol) && set_text("group", group) &&
-           set_uint("ticket", ticket) && set_uint("position", position_id);
+           set_uint("ticket", ticket);
 }
 
 /// \brief Calls one MetaTrader trade collection method with typed filters.
@@ -1125,7 +1123,7 @@ bool set_trade_query_filters(PyObject *kwargs, const char *symbol, const char *g
 /// \param history True when positional history dates are required.
 /// \return Owned Python collection result, or nullptr on failure.
 PyRef call_trade_collection(PyObject *mt5, const char *method, const char *symbol,
-                            const char *group, uint64_t ticket, uint64_t position_id,
+                            const char *group, uint64_t ticket,
                             int64_t from_msc, int64_t to_msc, bool history) {
     PyRef callable(PyObject_GetAttrString(mt5, method));
     PyRef args(PyTuple_New(history ? 2 : 0));
@@ -1139,7 +1137,7 @@ PyRef call_trade_collection(PyObject *mt5, const char *method, const char *symbo
             PyTuple_SetItem(args.get(), 1, to.release()) != 0)
             return PyRef();
     }
-    if (!set_trade_query_filters(kwargs.get(), symbol, group, ticket, position_id))
+    if (!set_trade_query_filters(kwargs.get(), symbol, group, ticket))
         return PyRef();
     return PyRef(PyObject_Call(callable.get(), args.get(), kwargs.get()));
 }
@@ -1148,22 +1146,17 @@ PyRef call_trade_collection(PyObject *mt5, const char *method, const char *symbo
 /// \tparam T Snapshot POD type.
 /// \tparam Converter Callable converting one record.
 /// \param object Borrowed Python collection result.
-/// \param mt5 Borrowed MetaTrader5 module used for None/error classification.
 /// \param[out] values Destination vector replaced with converted records.
 /// \param converter Record converter.
-/// \return True when the collection is valid, including an empty result.
+/// \return True when the collection is a sequence, including an empty result.
 template <typename T, typename Converter>
-bool copy_trade_collection(PyObject *object, PyObject *mt5, std::vector<T> *values,
-                           Converter converter) {
+bool copy_trade_collection(PyObject *object, std::vector<T> *values, Converter converter) {
     if (!object || !values) {
         set_error("MetaTrader trade collection returned no result");
         return false;
     }
     values->clear();
     if (object == Py_None) {
-        const int code = mt5_last_error_code(mt5);
-        if (code == 1)
-            return true;
         set_error("MetaTrader trade collection query failed");
         return false;
     }
@@ -1187,6 +1180,24 @@ bool copy_trade_collection(PyObject *object, PyObject *mt5, std::vector<T> *valu
             return false;
         }
         values->push_back(converted);
+    }
+    return true;
+}
+
+/// \brief Validates the documented mutually-exclusive MT5 active-query selectors.
+/// \param symbol Optional symbol selector.
+/// \param group Optional group selector.
+/// \param ticket Optional ticket selector.
+/// \param operation Human-readable operation name for diagnostics.
+/// \return True when zero or one native selector is present.
+bool valid_active_selector(const char *symbol, const char *group, uint64_t ticket,
+                           const char *operation) {
+    const unsigned count = (symbol && *symbol ? 1u : 0u) +
+                           (group && *group ? 1u : 0u) + (ticket != 0 ? 1u : 0u);
+    if (count > 1) {
+        set_error(operation);
+        g_last_error += " accepts only one of symbol, group, or ticket";
+        return false;
     }
     return true;
 }
@@ -2306,6 +2317,9 @@ MT5BRIDGE_API int mt5bridge_query_orders(const Mt5OrdersRequest *request,
         set_error("valid orders request and result are required");
         return -1;
     }
+    if (!valid_active_selector(request->symbol_utf8, request->group_utf8, request->ticket,
+                               "orders_get"))
+        return -1;
     RuntimeCallAdmission call;
     if (!call)
         return -1;
@@ -2316,7 +2330,7 @@ MT5BRIDGE_API int mt5bridge_query_orders(const Mt5OrdersRequest *request,
         return -1;
     }
     PyRef rows(call_trade_collection(mt5.get(), "orders_get", request->symbol_utf8,
-                                     request->group_utf8, request->ticket, 0, 0, 0, false));
+                                     request->group_utf8, request->ticket, 0, 0, false));
     if (!rows) {
         if (PyErr_Occurred())
             set_python_error();
@@ -2325,8 +2339,7 @@ MT5BRIDGE_API int mt5bridge_query_orders(const Mt5OrdersRequest *request,
         return -1;
     }
     auto buffer = std::make_unique<Mt5OrderBuffer>();
-    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
-                               copy_order_snapshot))
+    if (!copy_trade_collection(rows.get(), &buffer->values, copy_order_snapshot))
         return -1;
     *result = buffer.release();
     return 0;
@@ -2355,6 +2368,9 @@ MT5BRIDGE_API int mt5bridge_query_positions(const Mt5PositionsRequest *request,
         set_error("valid positions request and result are required");
         return -1;
     }
+    if (!valid_active_selector(request->symbol_utf8, request->group_utf8, request->ticket,
+                               "positions_get"))
+        return -1;
     RuntimeCallAdmission call;
     if (!call)
         return -1;
@@ -2365,8 +2381,7 @@ MT5BRIDGE_API int mt5bridge_query_positions(const Mt5PositionsRequest *request,
         return -1;
     }
     PyRef rows(call_trade_collection(mt5.get(), "positions_get", request->symbol_utf8,
-                                     request->group_utf8, request->ticket,
-                                     request->identifier, 0, 0, false));
+                                     request->group_utf8, request->ticket, 0, 0, false));
     if (!rows) {
         if (PyErr_Occurred())
             set_python_error();
@@ -2375,9 +2390,16 @@ MT5BRIDGE_API int mt5bridge_query_positions(const Mt5PositionsRequest *request,
         return -1;
     }
     auto buffer = std::make_unique<Mt5PositionBuffer>();
-    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
-                               copy_position_snapshot))
+    if (!copy_trade_collection(rows.get(), &buffer->values, copy_position_snapshot))
         return -1;
+    if (request->identifier != 0) {
+        buffer->values.erase(
+            std::remove_if(buffer->values.begin(), buffer->values.end(),
+                           [identifier = request->identifier](const Mt5PositionSnapshot &value) {
+                               return value.identifier != identifier;
+                           }),
+            buffer->values.end());
+    }
     *result = buffer.release();
     return 0;
 } catch (...) {
@@ -2396,7 +2418,7 @@ MT5BRIDGE_API size_t mt5bridge_position_buffer_size(const Mt5PositionBuffer *buf
 
 MT5BRIDGE_API void mt5bridge_position_buffer_free(Mt5PositionBuffer *buffer) { delete buffer; }
 
-MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryRequest *request,
+MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryOrdersRequest *request,
                                                  Mt5HistoryOrderBuffer **result) try {
     if (result)
         *result = nullptr;
@@ -2416,8 +2438,7 @@ MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryRequest *reques
         return -1;
     }
     PyRef rows(call_trade_collection(mt5.get(), "history_orders_get", nullptr,
-                                     request->group_utf8, request->ticket,
-                                     request->position_id, request->from_msc,
+                                     request->group_utf8, 0, request->from_msc,
                                      request->to_msc, true));
     if (!rows) {
         if (PyErr_Occurred())
@@ -2427,9 +2448,17 @@ MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryRequest *reques
         return -1;
     }
     auto buffer = std::make_unique<Mt5HistoryOrderBuffer>();
-    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
-                               copy_order_snapshot))
+    if (!copy_trade_collection(rows.get(), &buffer->values, copy_order_snapshot))
         return -1;
+    buffer->values.erase(
+        std::remove_if(buffer->values.begin(), buffer->values.end(),
+                       [request](const Mt5HistoryOrderSnapshot &value) {
+                           return (request->order_ticket != 0 &&
+                                   value.ticket != request->order_ticket) ||
+                                  (request->position_id != 0 &&
+                                   value.position_id != request->position_id);
+                       }),
+        buffer->values.end());
     *result = buffer.release();
     return 0;
 } catch (...) {
@@ -2451,7 +2480,7 @@ MT5BRIDGE_API void mt5bridge_history_order_buffer_free(Mt5HistoryOrderBuffer *bu
     delete buffer;
 }
 
-MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryRequest *request,
+MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryDealsRequest *request,
                                                 Mt5DealBuffer **result) try {
     if (result)
         *result = nullptr;
@@ -2471,8 +2500,7 @@ MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryRequest *request
         return -1;
     }
     PyRef rows(call_trade_collection(mt5.get(), "history_deals_get", nullptr,
-                                     request->group_utf8, request->ticket,
-                                     request->position_id, request->from_msc,
+                                     request->group_utf8, 0, request->from_msc,
                                      request->to_msc, true));
     if (!rows) {
         if (PyErr_Occurred())
@@ -2482,9 +2510,19 @@ MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryRequest *request
         return -1;
     }
     auto buffer = std::make_unique<Mt5DealBuffer>();
-    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
-                               copy_deal_snapshot))
+    if (!copy_trade_collection(rows.get(), &buffer->values, copy_deal_snapshot))
         return -1;
+    buffer->values.erase(
+        std::remove_if(buffer->values.begin(), buffer->values.end(),
+                       [request](const Mt5DealSnapshot &value) {
+                           return (request->deal_ticket != 0 &&
+                                   value.ticket != request->deal_ticket) ||
+                                  (request->order_ticket != 0 &&
+                                   value.order_ticket != request->order_ticket) ||
+                                  (request->position_id != 0 &&
+                                   value.position_id != request->position_id);
+                       }),
+        buffer->values.end());
     *result = buffer.release();
     return 0;
 } catch (...) {

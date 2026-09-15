@@ -68,12 +68,21 @@ The collection surface is also typed and read-only:
   and the ctypes adapter copy the records into caller-owned storage.
 
 Each collection buffer is released with its matching `*_buffer_free()` export;
-an empty collection is a successful observation. A `None` result is accepted
-only for MT5's documented empty/not-found status; other `None` results fail
-closed. Required graph fields missing from a namedtuple or mapping are an ABI
+an empty sequence is a successful observation. `None` is always a failed MT5
+query, even when `last_error()` happens to report success; it is never treated
+as an empty snapshot. Required graph fields missing from a namedtuple or mapping are an ABI
 error. Optional fields are represented by `known_fields`, so zero is never an
 absent-value sentinel. Seconds-only MT5 timestamps are converted to signed
 Unix milliseconds with range checks.
+
+The active `orders_get()` and `positions_get()` selectors follow the documented
+MT5 overloads: at most one of `symbol`, `group`, or `ticket` is sent to the
+server. `POSITION_IDENTIFIER` is a local post-filter because it is not a
+`positions_get()` selector. History requests always query a bounded
+`from/to` window with an optional server-side `group`; order/deal ticket and
+position filters are applied locally to the returned evidence. History deals
+distinguish `DEAL_TICKET`, `DEAL_ORDER`, and `DEAL_POSITION_ID` instead of
+overloading one ambiguous `ticket` field.
 
 The snapshots retain the evidence needed by reconciliation: orders keep
 `ticket`, `position_id`, `position_by_id`, state/reason, volumes, prices,

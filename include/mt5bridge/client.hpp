@@ -431,7 +431,7 @@ public:
     /// \param request Time range and optional group/ticket/position filters.
     /// \return Typed history-order evidence copied from the DLL.
     /// \throws std::runtime_error If the snapshot cannot be read.
-    std::vector<Mt5HistoryOrderSnapshot> history_orders(const Mt5HistoryRequest &request) {
+    std::vector<Mt5HistoryOrderSnapshot> history_orders(const Mt5HistoryOrdersRequest &request) {
         check_loaded();
         Mt5HistoryOrderBuffer *buffer = nullptr;
         if (query_history_orders_(&request, &buffer) != 0)
@@ -454,7 +454,7 @@ public:
     /// \param request Time range and optional group/ticket/position filters.
     /// \return Typed deal evidence copied from the DLL.
     /// \throws std::runtime_error If the snapshot cannot be read.
-    std::vector<Mt5DealSnapshot> history_deals(const Mt5HistoryRequest &request) {
+    std::vector<Mt5DealSnapshot> history_deals(const Mt5HistoryDealsRequest &request) {
         check_loaded();
         Mt5DealBuffer *buffer = nullptr;
         if (query_history_deals_(&request, &buffer) != 0)
@@ -676,11 +676,11 @@ private:
     using PositionBufferData = const Mt5PositionSnapshot *(*)(const Mt5PositionBuffer *);
     using PositionBufferSize = std::size_t (*)(const Mt5PositionBuffer *);
     using PositionBufferFree = void (*)(Mt5PositionBuffer *);
-    using QueryHistoryOrders = int (*)(const Mt5HistoryRequest *, Mt5HistoryOrderBuffer **);
+    using QueryHistoryOrders = int (*)(const Mt5HistoryOrdersRequest *, Mt5HistoryOrderBuffer **);
     using HistoryOrderBufferData = const Mt5HistoryOrderSnapshot *(*)(const Mt5HistoryOrderBuffer *);
     using HistoryOrderBufferSize = std::size_t (*)(const Mt5HistoryOrderBuffer *);
     using HistoryOrderBufferFree = void (*)(Mt5HistoryOrderBuffer *);
-    using QueryHistoryDeals = int (*)(const Mt5HistoryRequest *, Mt5DealBuffer **);
+    using QueryHistoryDeals = int (*)(const Mt5HistoryDealsRequest *, Mt5DealBuffer **);
     using DealBufferData = const Mt5DealSnapshot *(*)(const Mt5DealBuffer *);
     using DealBufferSize = std::size_t (*)(const Mt5DealBuffer *);
     using DealBufferFree = void (*)(Mt5DealBuffer *);

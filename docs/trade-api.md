@@ -124,17 +124,27 @@ evidence; they must never be inferred from one observation response.
 The C++ header [`reconciliation.hpp`](../include/mt5bridge/reconciliation.hpp)
 provides `mt5bridge::ObservationGraph` for the next stage. It accepts batches
 of the typed snapshots together with an immutable `(server, login)`
-`AccountKey`, upserts records by their primary MT5 tickets, and exposes
-deterministic links for `ORDER_POSITION_ID`, `DEAL_ORDER`,
-`DEAL_POSITION_ID`, and `POSITION_IDENTIFIER`.
+`AccountKey` and explicit `ObservationDomain` bits. `login == 0` is rejected.
+Active orders and positions are authoritative full snapshots when their domain
+is marked observed; an empty vector therefore clears that namespace, while an
+omitted domain leaves it unchanged. History orders and deals are positive
+ticket-keyed evidence. Non-empty filtered history evidence may omit coverage;
+an empty history result must include a valid window, and supplied windows are
+retained as merged inclusive coverage only for account-wide unfiltered reads.
+
+The graph exposes deterministic, provenance-preserving links for
+`ORDER_POSITION_ID`, `DEAL_ORDER`, `DEAL_POSITION_ID`, and
+`POSITION_IDENTIFIER`; active-order and history-order links are separate API
+methods.
 
 The graph is intentionally observation-only: it does not call MetaTrader,
 generate managed `TradeId`/`OperationId` values, persist a journal, or invoke
 `order_send`. An unbound graph adopts the first valid account; a different
 account is rejected atomically, so account-switch evidence can never be mixed
 into the existing graph. Invalid primary tickets fail closed. Every accepted
-batch advances a monotonic revision, and `clear_evidence()` retains the
-account scope while removing records.
+batch advances a monotonic revision, duplicate primary tickets are rejected,
+and `clear_evidence()` retains the account scope while removing records and
+coverage. The graph is single-owner state; callers must serialize access.
 
 ## Quickstart scenarios
 

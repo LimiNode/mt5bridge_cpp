@@ -175,9 +175,11 @@ locally (`time_done_msc` for history orders and `time_msc` for history deals).
 For observation-only reconciliation, include `<mt5bridge.hpp>` and feed these
 typed snapshots into `mt5bridge::ObservationGraph`. It scopes evidence by
 `(server, login)`, keeps active/history namespaces separate, and exposes
-deterministic order/deal/position links. The graph never calls MT5 or sends an
-order; durable journal and managed `TradeId`/`OperationId` association remain
-the next stage.
+deterministic provenance-preserving order/deal/position links. Mark complete
+active domains explicitly; an observed empty active snapshot clears that
+namespace, while history observations retain their coverage windows. The graph
+never calls MT5 or sends an order; durable journal and managed
+`TradeId`/`OperationId` association remain the next stage.
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

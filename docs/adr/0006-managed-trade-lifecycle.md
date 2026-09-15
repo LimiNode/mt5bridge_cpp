@@ -116,3 +116,20 @@ that outcome safe.
 Trading examples are dry-run/advisory by default. A future live example must
 require an explicit `--live` flag and an additional real-account acknowledgement
 before enabling side effects.
+
+Each feature slice should add one bounded executable acceptance example instead
+of growing a single all-in-one demo:
+
+| Example | Contract exercised |
+| --- | --- |
+| `trade_managed_basic` | asynchronous intent, observation reconciliation, and close by `TradeId` |
+| `trade_multi_symbol` | several symbols submitted through one serialized Python backend |
+| `trade_sliced_entry` | target volume, planner slices, and stopping new slices while retaining existing trades |
+| `trade_timed_exit` | close schedule anchored to the first confirmed fill and persisted absolute UTC deadline |
+| `trade_close_recovery` | rejection, timeout, partial close, restart, and no blind resend |
+| `trade_virtual_exit` | virtual SL/TP with an optional wider broker disaster stop |
+| `trade_expiry_style` | fixed-time/expiry-style lifecycle built on a close obligation |
+| `trade_risk_sizing` | fixed-risk, fractional Kelly, margin, and portfolio caps |
+
+Until the corresponding side-effecting stages exist, these examples remain
+fake-runtime or advisory-only and must not invoke `order_send`.

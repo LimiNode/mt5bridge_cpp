@@ -26,6 +26,13 @@ target_include_directories(mt5bridge_client INTERFACE
 add_library(mt5bridge::client ALIAS mt5bridge_client)
 set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 
+if(BUILD_TESTING)
+    add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
+    target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
+    add_test(NAME mt5bridge_reconciliation_graph
+             COMMAND mt5bridge_reconciliation_graph_test)
+endif()
+
 if(MT5BRIDGE_BUILD_RUNTIME)
     find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter Development)
     if(NOT Python3_VERSION_MAJOR EQUAL 3 OR

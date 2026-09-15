@@ -9,7 +9,7 @@ import threading
 import types
 import unittest
 from ctypes import POINTER, Structure, byref, c_char, c_char_p, c_double, c_int, c_int32
-from ctypes import c_int64, c_uint8, c_uint32, c_uint64, c_void_p
+from ctypes import c_int64, c_uint8, c_uint32, c_uint64, c_void_p, c_size_t
 
 
 TEXT_CAPACITY = 128
@@ -17,6 +17,7 @@ ACCOUNT_KNOWN_HEDGE_ALLOWED = 1 << 9
 SYMBOL_KNOWN_FILLING_MODE = 1 << 3
 SYMBOL_KNOWN_VOLUME_LIMITS = 1 << 11
 SYMBOL_KNOWN_TRADE_EXEMODE = 1 << 2
+ORDER_KNOWN_EXTERNAL_ID = 1 << 21
 
 
 class Mt5AccountInfo(Structure):
@@ -102,11 +103,100 @@ class Mt5OrderCheckResult(Structure):
     ]
 
 
+class Mt5OrdersRequest(Structure):
+    _fields_ = [("symbol_utf8", c_char_p), ("group_utf8", c_char_p), ("ticket", c_uint64), ("reserved", c_uint32)]
+
+
+class Mt5PositionsRequest(Structure):
+    _fields_ = [
+        ("symbol_utf8", c_char_p), ("group_utf8", c_char_p), ("ticket", c_uint64),
+        ("identifier", c_uint64), ("reserved", c_uint32)
+    ]
+
+
+class Mt5HistoryRequest(Structure):
+    _fields_ = [
+        ("from_msc", c_int64), ("to_msc", c_int64), ("group_utf8", c_char_p),
+        ("ticket", c_uint64), ("position_id", c_uint64), ("reserved", c_uint32)
+    ]
+
+
+class Mt5OrderSnapshot(Structure):
+    _fields_ = [
+        ("ticket", c_uint64), ("position_id", c_uint64), ("position_by_id", c_uint64),
+        ("magic", c_uint64), ("type", c_uint32), ("state", c_uint32),
+        ("reason", c_uint32), ("type_time", c_uint32), ("type_filling", c_uint32),
+        ("volume_initial", c_double), ("volume_current", c_double),
+        ("price_open", c_double), ("price_current", c_double), ("price_stoplimit", c_double),
+        ("sl", c_double), ("tp", c_double), ("time_setup_msc", c_int64),
+        ("time_done_msc", c_int64), ("time_expiration_msc", c_int64),
+        ("symbol", c_char * 64), ("comment", c_char * TEXT_CAPACITY),
+        ("external_id", c_char * TEXT_CAPACITY), ("known_fields", c_uint64),
+        ("reserved", c_uint32 * 2),
+    ]
+
+
+class Mt5PositionSnapshot(Structure):
+    _fields_ = [
+        ("ticket", c_uint64), ("identifier", c_uint64), ("magic", c_uint64),
+        ("type", c_uint32), ("reason", c_uint32), ("volume", c_double),
+        ("price_open", c_double), ("price_current", c_double), ("sl", c_double),
+        ("tp", c_double), ("profit", c_double), ("swap", c_double),
+        ("time_msc", c_int64), ("time_update_msc", c_int64), ("symbol", c_char * 64),
+        ("comment", c_char * TEXT_CAPACITY), ("external_id", c_char * TEXT_CAPACITY),
+        ("known_fields", c_uint64), ("reserved", c_uint32 * 2),
+    ]
+
+
+class Mt5DealSnapshot(Structure):
+    _fields_ = [
+        ("ticket", c_uint64), ("order_ticket", c_uint64), ("position_id", c_uint64),
+        ("magic", c_uint64), ("type", c_uint32), ("entry", c_uint32), ("reason", c_uint32),
+        ("volume", c_double), ("price", c_double), ("profit", c_double),
+        ("commission", c_double), ("swap", c_double), ("fee", c_double),
+        ("time_msc", c_int64), ("symbol", c_char * 64),
+        ("comment", c_char * TEXT_CAPACITY), ("external_id", c_char * TEXT_CAPACITY),
+        ("known_fields", c_uint64), ("reserved", c_uint32 * 2),
+    ]
+
+
+def _trade_order(ticket: int = 101) -> dict:
+    return {
+        "ticket": ticket, "position_id": 201, "position_by_id": 0, "magic": 42,
+        "type": 0, "state": 1, "reason": 2, "type_time": 0, "type_filling": 1,
+        "volume_initial": 0.5, "volume_current": 0.25, "price_open": 1.1,
+        "price_current": 1.2, "price_stoplimit": 0.0, "sl": 1.0, "tp": 1.4,
+        "time_setup": 1700000000, "time_done": 1700000001, "time_expiration": 1700003600,
+        "symbol": "EURUSD", "comment": "observation", "external_id": "broker-order-1",
+    }
+
+
+def _trade_position() -> dict:
+    return {
+        "ticket": 301, "identifier": 401, "magic": 42, "type": 0, "reason": 2,
+        "volume": 0.25, "price_open": 1.1, "price_current": 1.2, "sl": 1.0,
+        "tp": 1.4, "profit": 25.0, "swap": -0.5, "time": 1700000000,
+        "time_update": 1700000001, "symbol": "EURUSD", "comment": "position",
+        "external_id": "broker-position-1",
+    }
+
+
+def _trade_deal() -> dict:
+    return {
+        "ticket": 501, "order": 101, "position_id": 401, "magic": 42,
+        "type": 0, "entry": 0, "reason": 2, "volume": 0.25, "price": 1.1,
+        "profit": 0.0, "commission": -0.2, "swap": 0.0, "fee": 0.0,
+        "time": 1700000002, "symbol": "EURUSD", "comment": "deal",
+        "external_id": "broker-deal-1",
+    }
+
+
 def fake_module(*, symbol_none: bool = False, order_none: bool = False) -> types.ModuleType:
     """Build a minimal MetaTrader5 module for the external-interpreter path."""
     module = types.ModuleType("MetaTrader5")
     module.SYMBOL_ORDER_CLOSEBY = 64
     module.order_requests: list[dict] = []
+    module.collection_requests: list[tuple[str, tuple, dict]] = []
 
     def initialize() -> bool:
         return True
@@ -167,12 +257,32 @@ def fake_module(*, symbol_none: bool = False, order_none: bool = False) -> types
             "comment": "invalid filling mode",
         }
 
+    def orders_get(*args: object, **kwargs: object) -> object:
+        module.collection_requests.append(("orders_get", args, dict(kwargs)))
+        return [_trade_order()]
+
+    def positions_get(*args: object, **kwargs: object) -> object:
+        module.collection_requests.append(("positions_get", args, dict(kwargs)))
+        return [_trade_position()]
+
+    def history_orders_get(*args: object, **kwargs: object) -> object:
+        module.collection_requests.append(("history_orders_get", args, dict(kwargs)))
+        return [_trade_order(102)]
+
+    def history_deals_get(*args: object, **kwargs: object) -> object:
+        module.collection_requests.append(("history_deals_get", args, dict(kwargs)))
+        return [_trade_deal()]
+
     module.initialize = initialize
     module.shutdown = shutdown
     module.last_error = lambda: (1, "Success")
     module.account_info = account_info
     module.symbol_info = symbol_info
     module.order_check = order_check
+    module.orders_get = orders_get
+    module.positions_get = positions_get
+    module.history_orders_get = history_orders_get
+    module.history_deals_get = history_deals_get
     return module
 
 
@@ -181,7 +291,14 @@ class TradeObservationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        if ctypes.sizeof(Mt5AccountInfo) != 192 or ctypes.sizeof(Mt5SymbolCapabilities) != 168:
+        if (
+            ctypes.sizeof(Mt5AccountInfo) != 192
+            or ctypes.sizeof(Mt5SymbolCapabilities) != 168
+            or ctypes.sizeof(Mt5HistoryRequest) != 48
+            or ctypes.sizeof(Mt5OrderSnapshot) != 472
+            or ctypes.sizeof(Mt5PositionSnapshot) != 440
+            or ctypes.sizeof(Mt5DealSnapshot) != 440
+        ):
             raise unittest.SkipTest("ctypes trade ABI layout does not match the public header")
         path = os.environ.get("MT5BRIDGE_DLL")
         if not path:
@@ -207,9 +324,41 @@ class TradeObservationTests(unittest.TestCase):
             POINTER(Mt5OrderCheckRequest), POINTER(Mt5OrderCheckResult)
         ]
         cls.dll.mt5bridge_order_check.restype = c_int
+        cls.dll.mt5bridge_query_orders.argtypes = [POINTER(Mt5OrdersRequest), POINTER(c_void_p)]
+        cls.dll.mt5bridge_query_orders.restype = c_int
+        cls.dll.mt5bridge_order_buffer_data.argtypes = [c_void_p]
+        cls.dll.mt5bridge_order_buffer_data.restype = POINTER(Mt5OrderSnapshot)
+        cls.dll.mt5bridge_order_buffer_size.argtypes = [c_void_p]
+        cls.dll.mt5bridge_order_buffer_size.restype = c_size_t
+        cls.dll.mt5bridge_order_buffer_free.argtypes = [c_void_p]
+        cls.dll.mt5bridge_order_buffer_free.restype = None
+        cls.dll.mt5bridge_query_positions.argtypes = [POINTER(Mt5PositionsRequest), POINTER(c_void_p)]
+        cls.dll.mt5bridge_query_positions.restype = c_int
+        cls.dll.mt5bridge_position_buffer_data.argtypes = [c_void_p]
+        cls.dll.mt5bridge_position_buffer_data.restype = POINTER(Mt5PositionSnapshot)
+        cls.dll.mt5bridge_position_buffer_size.argtypes = [c_void_p]
+        cls.dll.mt5bridge_position_buffer_size.restype = c_size_t
+        cls.dll.mt5bridge_position_buffer_free.argtypes = [c_void_p]
+        cls.dll.mt5bridge_position_buffer_free.restype = None
+        cls.dll.mt5bridge_query_history_orders.argtypes = [POINTER(Mt5HistoryRequest), POINTER(c_void_p)]
+        cls.dll.mt5bridge_query_history_orders.restype = c_int
+        cls.dll.mt5bridge_history_order_buffer_data.argtypes = [c_void_p]
+        cls.dll.mt5bridge_history_order_buffer_data.restype = POINTER(Mt5OrderSnapshot)
+        cls.dll.mt5bridge_history_order_buffer_size.argtypes = [c_void_p]
+        cls.dll.mt5bridge_history_order_buffer_size.restype = c_size_t
+        cls.dll.mt5bridge_history_order_buffer_free.argtypes = [c_void_p]
+        cls.dll.mt5bridge_history_order_buffer_free.restype = None
+        cls.dll.mt5bridge_query_history_deals.argtypes = [POINTER(Mt5HistoryRequest), POINTER(c_void_p)]
+        cls.dll.mt5bridge_query_history_deals.restype = c_int
+        cls.dll.mt5bridge_deal_buffer_data.argtypes = [c_void_p]
+        cls.dll.mt5bridge_deal_buffer_data.restype = POINTER(Mt5DealSnapshot)
+        cls.dll.mt5bridge_deal_buffer_size.argtypes = [c_void_p]
+        cls.dll.mt5bridge_deal_buffer_size.restype = c_size_t
+        cls.dll.mt5bridge_deal_buffer_free.argtypes = [c_void_p]
+        cls.dll.mt5bridge_deal_buffer_free.restype = None
         cls.dll.mt5bridge_unsubscribe_all.argtypes = []
         cls.dll.mt5bridge_unsubscribe_all.restype = c_int
-        if cls.dll.mt5bridge_abi_version() != 8 or cls.dll.mt5bridge_trade_api_version() != 1:
+        if cls.dll.mt5bridge_abi_version() != 8 or cls.dll.mt5bridge_trade_api_version() != 2:
             raise unittest.SkipTest("test DLL does not expose ABI 8 trade observation")
 
     def setUp(self) -> None:
@@ -443,6 +592,134 @@ class TradeObservationTests(unittest.TestCase):
         # setUp/tearDown owns one lifecycle per test; restore it after the
         # explicit barrier check so tearDown remains idempotent.
         self.assertEqual(self.dll.mt5bridge_initialize(None), 0, self.last_error())
+
+    def _read_buffer(self, query, data, size, release, request, snapshot_type):
+        buffer = c_void_p()
+        self.assertEqual(query(byref(request), byref(buffer)), 0, self.last_error())
+        try:
+            count = size(buffer)
+            pointer = data(buffer)
+            values = []
+            for index in range(count):
+                value = snapshot_type()
+                ctypes.memmove(byref(value), ctypes.addressof(pointer[index]), ctypes.sizeof(value))
+                values.append(value)
+            return values
+        finally:
+            release(buffer)
+
+    def test_typed_active_and_history_snapshots_preserve_graph_fields(self) -> None:
+        symbol = c_char_p(b"EURUSD")
+        group = c_char_p(b"*EUR*")
+        order_request = Mt5OrdersRequest(symbol, group, 101, 0)
+        orders = self._read_buffer(
+            self.dll.mt5bridge_query_orders,
+            self.dll.mt5bridge_order_buffer_data,
+            self.dll.mt5bridge_order_buffer_size,
+            self.dll.mt5bridge_order_buffer_free,
+            order_request,
+            Mt5OrderSnapshot,
+        )
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0].ticket, 101)
+        self.assertEqual(orders[0].time_setup_msc, 1_700_000_000_000)
+        self.assertEqual(orders[0].external_id, b"broker-order-1")
+        self.assertNotEqual(orders[0].known_fields, 0)
+        self.assertEqual(self.fake.collection_requests[-1][0], "orders_get")
+        self.assertEqual(self.fake.collection_requests[-1][2], {"symbol": "EURUSD", "group": "*EUR*", "ticket": 101})
+
+        position_request = Mt5PositionsRequest(symbol, group, 301, 401, 0)
+        positions = self._read_buffer(
+            self.dll.mt5bridge_query_positions,
+            self.dll.mt5bridge_position_buffer_data,
+            self.dll.mt5bridge_position_buffer_size,
+            self.dll.mt5bridge_position_buffer_free,
+            position_request,
+            Mt5PositionSnapshot,
+        )
+        self.assertEqual(positions[0].identifier, 401)
+        self.assertEqual(positions[0].time_update_msc, 1_700_000_001_000)
+        self.assertEqual(self.fake.collection_requests[-1][2]["position"], 401)
+
+        history_request = Mt5HistoryRequest(1_700_000_000_000, 1_700_000_010_000, group, 102, 401, 0)
+        history_orders = self._read_buffer(
+            self.dll.mt5bridge_query_history_orders,
+            self.dll.mt5bridge_history_order_buffer_data,
+            self.dll.mt5bridge_history_order_buffer_size,
+            self.dll.mt5bridge_history_order_buffer_free,
+            history_request,
+            Mt5OrderSnapshot,
+        )
+        self.assertEqual(history_orders[0].ticket, 102)
+        history_call = self.fake.collection_requests[-1]
+        self.assertEqual(history_call[0], "history_orders_get")
+        self.assertEqual(history_call[2], {"group": "*EUR*", "ticket": 102, "position": 401})
+        self.assertEqual(history_call[1][0].timestamp(), 1_700_000_000)
+
+        history_deals = self._read_buffer(
+            self.dll.mt5bridge_query_history_deals,
+            self.dll.mt5bridge_deal_buffer_data,
+            self.dll.mt5bridge_deal_buffer_size,
+            self.dll.mt5bridge_deal_buffer_free,
+            history_request,
+            Mt5DealSnapshot,
+        )
+        self.assertEqual(history_deals[0].order_ticket, 101)
+        self.assertEqual(history_deals[0].position_id, 401)
+        self.assertEqual(history_deals[0].time_msc, 1_700_000_002_000)
+        self.assertEqual(history_deals[0].external_id, b"broker-deal-1")
+
+    def test_snapshot_missing_required_graph_field_fails_closed(self) -> None:
+        def incomplete_orders_get(*args: object, **kwargs: object) -> object:
+            value = _trade_order()
+            value.pop("position_id")
+            return [value]
+
+        self.fake.orders_get = incomplete_orders_get
+        request = Mt5OrdersRequest()
+        buffer = c_void_p()
+        self.assertNotEqual(self.dll.mt5bridge_query_orders(byref(request), byref(buffer)), 0)
+        self.assertIn("position_id is required", self.last_error())
+
+    def test_optional_external_id_remains_unknown(self) -> None:
+        def order_without_external_id(*args: object, **kwargs: object) -> object:
+            value = _trade_order()
+            value.pop("external_id")
+            return [value]
+
+        self.fake.orders_get = order_without_external_id
+        request = Mt5OrdersRequest()
+        orders = self._read_buffer(
+            self.dll.mt5bridge_query_orders,
+            self.dll.mt5bridge_order_buffer_data,
+            self.dll.mt5bridge_order_buffer_size,
+            self.dll.mt5bridge_order_buffer_free,
+            request,
+            Mt5OrderSnapshot,
+        )
+        self.assertEqual(orders[0].external_id, b"")
+        self.assertEqual(orders[0].known_fields & ORDER_KNOWN_EXTERNAL_ID, 0)
+
+    def test_none_collection_with_error_fails_closed(self) -> None:
+        self.fake.orders_get = lambda **kwargs: None
+        self.fake.last_error = lambda: (2, "trade error")
+        request = Mt5OrdersRequest()
+        buffer = c_void_p()
+        self.assertNotEqual(self.dll.mt5bridge_query_orders(byref(request), byref(buffer)), 0)
+        self.assertIn("collection query failed", self.last_error())
+
+    def test_empty_snapshot_is_successful(self) -> None:
+        self.fake.positions_get = lambda **kwargs: []
+        request = Mt5PositionsRequest()
+        values = self._read_buffer(
+            self.dll.mt5bridge_query_positions,
+            self.dll.mt5bridge_position_buffer_data,
+            self.dll.mt5bridge_position_buffer_size,
+            self.dll.mt5bridge_position_buffer_free,
+            request,
+            Mt5PositionSnapshot,
+        )
+        self.assertEqual(values, [])
 
     def test_invalid_reserved_field_fails_closed(self) -> None:
         request = Mt5SymbolRequest(b"EURUSD", 1)

@@ -38,6 +38,22 @@ struct Mt5RateBuffer {
     Mt5FetchDiagnostics diagnostics{}; ///< Recovery diagnostics for the completed query.
 };
 
+/// \struct Mt5OrderBuffer
+/// \brief Owns an active-order snapshot inside the DLL.
+struct Mt5OrderBuffer { std::vector<Mt5OrderSnapshot> values; };
+
+/// \struct Mt5PositionBuffer
+/// \brief Owns an active-position snapshot inside the DLL.
+struct Mt5PositionBuffer { std::vector<Mt5PositionSnapshot> values; };
+
+/// \struct Mt5HistoryOrderBuffer
+/// \brief Owns a history-order snapshot inside the DLL.
+struct Mt5HistoryOrderBuffer { std::vector<Mt5HistoryOrderSnapshot> values; };
+
+/// \struct Mt5DealBuffer
+/// \brief Owns a history-deal snapshot inside the DLL.
+struct Mt5DealBuffer { std::vector<Mt5DealSnapshot> values; };
+
 namespace {
 
 std::mutex g_mutex;
@@ -284,6 +300,11 @@ private:
     PyObject *object_;
 };
 
+// Trade-observation collection helpers are defined later in the translation
+// unit, after the generic market-data helpers.
+PyRef make_datetime(int64_t milliseconds);
+int mt5_last_error_code(PyObject *mt5);
+
 /// \class GilScope
 /// \brief Acquires and releases the CPython global interpreter lock for one scope.
 class GilScope {
@@ -458,6 +479,39 @@ bool trade_int64(PyObject *object, const char *name, int64_t *value, bool requir
         return false;
     }
     *value = static_cast<int64_t>(converted);
+    return true;
+}
+
+/// \brief Reads an optional or required non-negative 64-bit integer field.
+/// \param object Borrowed Python trade record.
+/// \param name Field name.
+/// \param[out] value Destination value.
+/// \param required Whether absence or an invalid value is an error.
+/// \return True when the field was copied or was optional and absent.
+bool trade_uint64(PyObject *object, const char *name, uint64_t *value, bool required) {
+    PyRef field(trade_field(object, name));
+    if (!field) {
+        PyErr_Clear();
+        if (required) {
+            set_error(name);
+            g_last_error += " is required";
+        }
+        return !required;
+    }
+    if (field.get() == Py_None || !PyLong_Check(field.get())) {
+        if (required) {
+            set_error(name);
+            g_last_error += field.get() == Py_None ? " is required" : " must be an integer";
+        }
+        PyErr_Clear();
+        return !required;
+    }
+    const unsigned long long converted = PyLong_AsUnsignedLongLong(field.get());
+    if (PyErr_Occurred()) {
+        set_python_error();
+        return false;
+    }
+    *value = static_cast<uint64_t>(converted);
     return true;
 }
 
@@ -841,6 +895,299 @@ bool copy_order_check_result(PyObject *object, Mt5OrderCheckResult *result) {
         return false;
     }
     *result = converted;
+    return true;
+}
+
+/// \brief Converts a Python seconds or millisecond timestamp to Unix milliseconds.
+/// \param object Borrowed trade record.
+/// \param msc_name Preferred millisecond field.
+/// \param seconds_name Fallback seconds field.
+/// \param[out] value Destination timestamp.
+/// \param required Whether the timestamp must be present.
+/// \return True when the timestamp was copied or was optional and absent.
+bool trade_time_msc(PyObject *object, const char *msc_name, const char *seconds_name,
+                    int64_t *value, bool required) {
+    if (trade_has_field(object, msc_name))
+        return trade_int64(object, msc_name, value, required);
+    int64_t seconds = 0;
+    if (!trade_int64(object, seconds_name, &seconds, required))
+        return false;
+    if (!trade_has_field(object, seconds_name))
+        return true;
+    if (seconds > std::numeric_limits<int64_t>::max() / 1000 ||
+        seconds < std::numeric_limits<int64_t>::min() / 1000) {
+        set_error(seconds_name);
+        g_last_error += " timestamp is out of range";
+        return false;
+    }
+    *value = seconds * 1000;
+    return true;
+}
+
+/// \brief Copies the common MT5 order/history-order record shape.
+/// \param object Borrowed namedtuple or mapping returned by MetaTrader5.
+/// \param[out] snapshot Destination order snapshot.
+/// \return True when required graph fields are valid.
+bool copy_order_snapshot(PyObject *object, Mt5OrderSnapshot *snapshot) {
+    if (!object || object == Py_None || !snapshot) {
+        set_error("MetaTrader5 order snapshot is required");
+        return false;
+    }
+    Mt5OrderSnapshot converted{};
+    if (!trade_uint64(object, "ticket", &converted.ticket, true) ||
+        !trade_uint64(object, "position_id", &converted.position_id, true) ||
+        !trade_uint64(object, "position_by_id", &converted.position_by_id, true) ||
+        !trade_uint64(object, "magic", &converted.magic, true) ||
+        !trade_uint32(object, "type", &converted.type, true) ||
+        !trade_uint32(object, "state", &converted.state, true) ||
+        !trade_uint32(object, "reason", &converted.reason, true) ||
+        !trade_uint32(object, "type_time", &converted.type_time, true) ||
+        !trade_uint32(object, "type_filling", &converted.type_filling, true) ||
+        !trade_double(object, "volume_initial", &converted.volume_initial, true) ||
+        !trade_double(object, "volume_current", &converted.volume_current, true) ||
+        !trade_double(object, "price_open", &converted.price_open, true) ||
+        !trade_double(object, "price_current", &converted.price_current, true) ||
+        !trade_double(object, "price_stoplimit", &converted.price_stoplimit, true) ||
+        !trade_double(object, "sl", &converted.sl, true) ||
+        !trade_double(object, "tp", &converted.tp, true) ||
+        !trade_time_msc(object, "time_setup_msc", "time_setup", &converted.time_setup_msc, true) ||
+        !trade_time_msc(object, "time_done_msc", "time_done", &converted.time_done_msc, true) ||
+        !trade_time_msc(object, "time_expiration_msc", "time_expiration",
+                        &converted.time_expiration_msc, true) ||
+        !trade_text(object, "symbol", converted.symbol, sizeof(converted.symbol), true) ||
+        !trade_text(object, "comment", converted.comment, sizeof(converted.comment), true) ||
+        !trade_text(object, "external_id", converted.external_id,
+                    sizeof(converted.external_id), false)) {
+        return false;
+    }
+    if (trade_has_field(object, "ticket")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TICKET;
+    if (trade_has_field(object, "position_id")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
+    if (trade_has_field(object, "position_by_id")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_POSITION_BY_ID;
+    if (trade_has_field(object, "magic")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_MAGIC;
+    if (trade_has_field(object, "type")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TYPE;
+    if (trade_has_field(object, "state")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_STATE;
+    if (trade_has_field(object, "reason")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_REASON;
+    if (trade_has_field(object, "type_time")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TYPE_TIME;
+    if (trade_has_field(object, "type_filling")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TYPE_FILLING;
+    if (trade_has_field(object, "volume_initial")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_VOLUME_INITIAL;
+    if (trade_has_field(object, "volume_current")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_VOLUME_CURRENT;
+    if (trade_has_field(object, "price_open")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_PRICE_OPEN;
+    if (trade_has_field(object, "price_current")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_PRICE_CURRENT;
+    if (trade_has_field(object, "price_stoplimit")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_PRICE_STOPLIMIT;
+    if (trade_has_field(object, "sl")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_SL;
+    if (trade_has_field(object, "tp")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TP;
+    if (trade_has_field(object, "time_setup") || trade_has_field(object, "time_setup_msc")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TIME_SETUP;
+    if (trade_has_field(object, "time_done") || trade_has_field(object, "time_done_msc")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
+    if (trade_has_field(object, "time_expiration") || trade_has_field(object, "time_expiration_msc")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_TIME_EXPIRATION;
+    if (trade_has_field(object, "symbol")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_SYMBOL;
+    if (trade_has_field(object, "comment")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_COMMENT;
+    if (trade_has_field(object, "external_id")) converted.known_fields |= MT5BRIDGE_ORDER_KNOWN_EXTERNAL_ID;
+    *snapshot = converted;
+    return true;
+}
+
+/// \brief Copies an MT5 position record into its stable POD snapshot.
+/// \param object Borrowed namedtuple or mapping returned by MetaTrader5.
+/// \param[out] snapshot Destination position snapshot.
+/// \return True when required graph fields are valid.
+bool copy_position_snapshot(PyObject *object, Mt5PositionSnapshot *snapshot) {
+    if (!object || object == Py_None || !snapshot) {
+        set_error("MetaTrader5 position snapshot is required");
+        return false;
+    }
+    Mt5PositionSnapshot converted{};
+    if (!trade_uint64(object, "ticket", &converted.ticket, true) ||
+        !trade_uint64(object, "identifier", &converted.identifier, true) ||
+        !trade_uint64(object, "magic", &converted.magic, true) ||
+        !trade_uint32(object, "type", &converted.type, true) ||
+        !trade_uint32(object, "reason", &converted.reason, true) ||
+        !trade_double(object, "volume", &converted.volume, true) ||
+        !trade_double(object, "price_open", &converted.price_open, true) ||
+        !trade_double(object, "price_current", &converted.price_current, true) ||
+        !trade_double(object, "sl", &converted.sl, true) ||
+        !trade_double(object, "tp", &converted.tp, true) ||
+        !trade_double(object, "profit", &converted.profit, true) ||
+        !trade_double(object, "swap", &converted.swap, true) ||
+        !trade_time_msc(object, "time_msc", "time", &converted.time_msc, true) ||
+        !trade_time_msc(object, "time_update_msc", "time_update", &converted.time_update_msc, true) ||
+        !trade_text(object, "symbol", converted.symbol, sizeof(converted.symbol), true) ||
+        !trade_text(object, "comment", converted.comment, sizeof(converted.comment), true) ||
+        !trade_text(object, "external_id", converted.external_id,
+                    sizeof(converted.external_id), false)) {
+        return false;
+    }
+    if (trade_has_field(object, "ticket")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_TICKET;
+    if (trade_has_field(object, "identifier")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_IDENTIFIER;
+    if (trade_has_field(object, "magic")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_MAGIC;
+    if (trade_has_field(object, "type")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_TYPE;
+    if (trade_has_field(object, "reason")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_REASON;
+    if (trade_has_field(object, "volume")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_VOLUME;
+    if (trade_has_field(object, "price_open")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_PRICE_OPEN;
+    if (trade_has_field(object, "price_current")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_PRICE_CURRENT;
+    if (trade_has_field(object, "sl")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_SL;
+    if (trade_has_field(object, "tp")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_TP;
+    if (trade_has_field(object, "profit")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_PROFIT;
+    if (trade_has_field(object, "swap")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_SWAP;
+    if (trade_has_field(object, "time") || trade_has_field(object, "time_msc")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_TIME;
+    if (trade_has_field(object, "time_update") || trade_has_field(object, "time_update_msc")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_TIME_UPDATE;
+    if (trade_has_field(object, "symbol")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_SYMBOL;
+    if (trade_has_field(object, "comment")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_COMMENT;
+    if (trade_has_field(object, "external_id")) converted.known_fields |= MT5BRIDGE_POSITION_KNOWN_EXTERNAL_ID;
+    *snapshot = converted;
+    return true;
+}
+
+/// \brief Copies an MT5 deal record into its stable POD snapshot.
+/// \param object Borrowed namedtuple or mapping returned by MetaTrader5.
+/// \param[out] snapshot Destination deal snapshot.
+/// \return True when required graph fields are valid.
+bool copy_deal_snapshot(PyObject *object, Mt5DealSnapshot *snapshot) {
+    if (!object || object == Py_None || !snapshot) {
+        set_error("MetaTrader5 deal snapshot is required");
+        return false;
+    }
+    Mt5DealSnapshot converted{};
+    if (!trade_uint64(object, "ticket", &converted.ticket, true) ||
+        !trade_uint64(object, "order", &converted.order_ticket, true) ||
+        !trade_uint64(object, "position_id", &converted.position_id, true) ||
+        !trade_uint64(object, "magic", &converted.magic, true) ||
+        !trade_uint32(object, "type", &converted.type, true) ||
+        !trade_uint32(object, "entry", &converted.entry, true) ||
+        !trade_uint32(object, "reason", &converted.reason, true) ||
+        !trade_double(object, "volume", &converted.volume, true) ||
+        !trade_double(object, "price", &converted.price, true) ||
+        !trade_double(object, "profit", &converted.profit, true) ||
+        !trade_double(object, "commission", &converted.commission, true) ||
+        !trade_double(object, "swap", &converted.swap, true) ||
+        !trade_double(object, "fee", &converted.fee, true) ||
+        !trade_time_msc(object, "time_msc", "time", &converted.time_msc, true) ||
+        !trade_text(object, "symbol", converted.symbol, sizeof(converted.symbol), true) ||
+        !trade_text(object, "comment", converted.comment, sizeof(converted.comment), true) ||
+        !trade_text(object, "external_id", converted.external_id,
+                    sizeof(converted.external_id), false)) {
+        return false;
+    }
+    if (trade_has_field(object, "ticket")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_TICKET;
+    if (trade_has_field(object, "order")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET;
+    if (trade_has_field(object, "position_id")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_POSITION_ID;
+    if (trade_has_field(object, "magic")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_MAGIC;
+    if (trade_has_field(object, "type")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_TYPE;
+    if (trade_has_field(object, "entry")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_ENTRY;
+    if (trade_has_field(object, "reason")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_REASON;
+    if (trade_has_field(object, "volume")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_VOLUME;
+    if (trade_has_field(object, "price")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_PRICE;
+    if (trade_has_field(object, "profit")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_PROFIT;
+    if (trade_has_field(object, "commission")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_COMMISSION;
+    if (trade_has_field(object, "swap")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_SWAP;
+    if (trade_has_field(object, "fee")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_FEE;
+    if (trade_has_field(object, "time") || trade_has_field(object, "time_msc")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_TIME;
+    if (trade_has_field(object, "symbol")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_SYMBOL;
+    if (trade_has_field(object, "comment")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_COMMENT;
+    if (trade_has_field(object, "external_id")) converted.known_fields |= MT5BRIDGE_DEAL_KNOWN_EXTERNAL_ID;
+    *snapshot = converted;
+    return true;
+}
+
+/// \brief Builds keyword arguments shared by MT5 trade collection queries.
+/// \param kwargs Destination Python dictionary.
+/// \param symbol Optional symbol filter.
+/// \param group Optional MT5 group mask.
+/// \param ticket Optional ticket filter.
+/// \param position_id Optional position identifier filter.
+/// \return True when all supplied values were inserted.
+bool set_trade_query_filters(PyObject *kwargs, const char *symbol, const char *group,
+                             uint64_t ticket, uint64_t position_id) {
+    auto set_text = [kwargs](const char *name, const char *value) {
+        if (!value || !*value)
+            return true;
+        PyRef text(PyUnicode_FromString(value));
+        return text && PyDict_SetItemString(kwargs, name, text.get()) == 0;
+    };
+    auto set_uint = [kwargs](const char *name, uint64_t value) {
+        if (value == 0)
+            return true;
+        PyRef integer(PyLong_FromUnsignedLongLong(value));
+        return integer && PyDict_SetItemString(kwargs, name, integer.get()) == 0;
+    };
+    return set_text("symbol", symbol) && set_text("group", group) &&
+           set_uint("ticket", ticket) && set_uint("position", position_id);
+}
+
+/// \brief Calls one MetaTrader trade collection method with typed filters.
+/// \param mt5 Borrowed MetaTrader5 module.
+/// \param method Collection method name.
+/// \param symbol Optional active-query symbol filter.
+/// \param group Optional MT5 group mask.
+/// \param ticket Optional ticket filter.
+/// \param position_id Optional position identifier filter.
+/// \param from_msc History start, or zero for active queries.
+/// \param to_msc History end, or zero for active queries.
+/// \param history True when positional history dates are required.
+/// \return Owned Python collection result, or nullptr on failure.
+PyRef call_trade_collection(PyObject *mt5, const char *method, const char *symbol,
+                            const char *group, uint64_t ticket, uint64_t position_id,
+                            int64_t from_msc, int64_t to_msc, bool history) {
+    PyRef callable(PyObject_GetAttrString(mt5, method));
+    PyRef args(PyTuple_New(history ? 2 : 0));
+    PyRef kwargs(PyDict_New());
+    if (!callable || !args || !kwargs)
+        return PyRef();
+    if (history) {
+        PyRef from(make_datetime(from_msc));
+        PyRef to(make_datetime(to_msc));
+        if (!from || !to || PyTuple_SetItem(args.get(), 0, from.release()) != 0 ||
+            PyTuple_SetItem(args.get(), 1, to.release()) != 0)
+            return PyRef();
+    }
+    if (!set_trade_query_filters(kwargs.get(), symbol, group, ticket, position_id))
+        return PyRef();
+    return PyRef(PyObject_Call(callable.get(), args.get(), kwargs.get()));
+}
+
+/// \brief Copies one Python trade collection into a typed vector.
+/// \tparam T Snapshot POD type.
+/// \tparam Converter Callable converting one record.
+/// \param object Borrowed Python collection result.
+/// \param mt5 Borrowed MetaTrader5 module used for None/error classification.
+/// \param[out] values Destination vector replaced with converted records.
+/// \param converter Record converter.
+/// \return True when the collection is valid, including an empty result.
+template <typename T, typename Converter>
+bool copy_trade_collection(PyObject *object, PyObject *mt5, std::vector<T> *values,
+                           Converter converter) {
+    if (!object || !values) {
+        set_error("MetaTrader trade collection returned no result");
+        return false;
+    }
+    values->clear();
+    if (object == Py_None) {
+        const int code = mt5_last_error_code(mt5);
+        if (code == 1)
+            return true;
+        set_error("MetaTrader trade collection query failed");
+        return false;
+    }
+    if (!PySequence_Check(object)) {
+        set_error("MetaTrader trade collection must be a sequence");
+        return false;
+    }
+    const Py_ssize_t count = PySequence_Size(object);
+    if (count < 0) {
+        set_python_error();
+        return false;
+    }
+    values->reserve(static_cast<std::size_t>(count));
+    for (Py_ssize_t index = 0; index < count; ++index) {
+        PyRef item(PySequence_GetItem(object, index));
+        T converted{};
+        if (!item || !converter(item.get(), &converted)) {
+            if (item && PyErr_Occurred())
+                set_python_error();
+            values->clear();
+            return false;
+        }
+        values->push_back(converted);
+    }
     return true;
 }
 
@@ -1949,6 +2296,211 @@ MT5BRIDGE_API int mt5bridge_order_check(const Mt5OrderCheckRequest *request,
     set_current_exception_error();
     return -1;
 }
+
+MT5BRIDGE_API int mt5bridge_query_orders(const Mt5OrdersRequest *request,
+                                         Mt5OrderBuffer **result) try {
+    if (result)
+        *result = nullptr;
+    clear_error();
+    if (!request || !result || request->reserved != 0) {
+        set_error("valid orders request and result are required");
+        return -1;
+    }
+    RuntimeCallAdmission call;
+    if (!call)
+        return -1;
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef rows(call_trade_collection(mt5.get(), "orders_get", request->symbol_utf8,
+                                     request->group_utf8, request->ticket, 0, 0, 0, false));
+    if (!rows) {
+        if (PyErr_Occurred())
+            set_python_error();
+        else if (g_last_error.empty())
+            set_error("MetaTrader orders_get failed");
+        return -1;
+    }
+    auto buffer = std::make_unique<Mt5OrderBuffer>();
+    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
+                               copy_order_snapshot))
+        return -1;
+    *result = buffer.release();
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_API const Mt5OrderSnapshot *mt5bridge_order_buffer_data(
+    const Mt5OrderBuffer *buffer) {
+    return buffer && !buffer->values.empty() ? buffer->values.data() : nullptr;
+}
+
+MT5BRIDGE_API size_t mt5bridge_order_buffer_size(const Mt5OrderBuffer *buffer) {
+    return buffer ? buffer->values.size() : 0;
+}
+
+MT5BRIDGE_API void mt5bridge_order_buffer_free(Mt5OrderBuffer *buffer) { delete buffer; }
+
+MT5BRIDGE_API int mt5bridge_query_positions(const Mt5PositionsRequest *request,
+                                            Mt5PositionBuffer **result) try {
+    if (result)
+        *result = nullptr;
+    clear_error();
+    if (!request || !result || request->reserved != 0) {
+        set_error("valid positions request and result are required");
+        return -1;
+    }
+    RuntimeCallAdmission call;
+    if (!call)
+        return -1;
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef rows(call_trade_collection(mt5.get(), "positions_get", request->symbol_utf8,
+                                     request->group_utf8, request->ticket,
+                                     request->identifier, 0, 0, false));
+    if (!rows) {
+        if (PyErr_Occurred())
+            set_python_error();
+        else if (g_last_error.empty())
+            set_error("MetaTrader positions_get failed");
+        return -1;
+    }
+    auto buffer = std::make_unique<Mt5PositionBuffer>();
+    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
+                               copy_position_snapshot))
+        return -1;
+    *result = buffer.release();
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_API const Mt5PositionSnapshot *mt5bridge_position_buffer_data(
+    const Mt5PositionBuffer *buffer) {
+    return buffer && !buffer->values.empty() ? buffer->values.data() : nullptr;
+}
+
+MT5BRIDGE_API size_t mt5bridge_position_buffer_size(const Mt5PositionBuffer *buffer) {
+    return buffer ? buffer->values.size() : 0;
+}
+
+MT5BRIDGE_API void mt5bridge_position_buffer_free(Mt5PositionBuffer *buffer) { delete buffer; }
+
+MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryRequest *request,
+                                                 Mt5HistoryOrderBuffer **result) try {
+    if (result)
+        *result = nullptr;
+    clear_error();
+    if (!request || !result || request->reserved != 0 || request->from_msc < 0 ||
+        request->to_msc < request->from_msc) {
+        set_error("valid history orders request and result are required");
+        return -1;
+    }
+    RuntimeCallAdmission call;
+    if (!call)
+        return -1;
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef rows(call_trade_collection(mt5.get(), "history_orders_get", nullptr,
+                                     request->group_utf8, request->ticket,
+                                     request->position_id, request->from_msc,
+                                     request->to_msc, true));
+    if (!rows) {
+        if (PyErr_Occurred())
+            set_python_error();
+        else if (g_last_error.empty())
+            set_error("MetaTrader history_orders_get failed");
+        return -1;
+    }
+    auto buffer = std::make_unique<Mt5HistoryOrderBuffer>();
+    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
+                               copy_order_snapshot))
+        return -1;
+    *result = buffer.release();
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_API const Mt5HistoryOrderSnapshot *mt5bridge_history_order_buffer_data(
+    const Mt5HistoryOrderBuffer *buffer) {
+    return buffer && !buffer->values.empty() ? buffer->values.data() : nullptr;
+}
+
+MT5BRIDGE_API size_t mt5bridge_history_order_buffer_size(
+    const Mt5HistoryOrderBuffer *buffer) {
+    return buffer ? buffer->values.size() : 0;
+}
+
+MT5BRIDGE_API void mt5bridge_history_order_buffer_free(Mt5HistoryOrderBuffer *buffer) {
+    delete buffer;
+}
+
+MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryRequest *request,
+                                                Mt5DealBuffer **result) try {
+    if (result)
+        *result = nullptr;
+    clear_error();
+    if (!request || !result || request->reserved != 0 || request->from_msc < 0 ||
+        request->to_msc < request->from_msc) {
+        set_error("valid history deals request and result are required");
+        return -1;
+    }
+    RuntimeCallAdmission call;
+    if (!call)
+        return -1;
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        set_python_error();
+        return -1;
+    }
+    PyRef rows(call_trade_collection(mt5.get(), "history_deals_get", nullptr,
+                                     request->group_utf8, request->ticket,
+                                     request->position_id, request->from_msc,
+                                     request->to_msc, true));
+    if (!rows) {
+        if (PyErr_Occurred())
+            set_python_error();
+        else if (g_last_error.empty())
+            set_error("MetaTrader history_deals_get failed");
+        return -1;
+    }
+    auto buffer = std::make_unique<Mt5DealBuffer>();
+    if (!copy_trade_collection(rows.get(), mt5.get(), &buffer->values,
+                               copy_deal_snapshot))
+        return -1;
+    *result = buffer.release();
+    return 0;
+} catch (...) {
+    set_current_exception_error();
+    return -1;
+}
+
+MT5BRIDGE_API const Mt5DealSnapshot *mt5bridge_deal_buffer_data(const Mt5DealBuffer *buffer) {
+    return buffer && !buffer->values.empty() ? buffer->values.data() : nullptr;
+}
+
+MT5BRIDGE_API size_t mt5bridge_deal_buffer_size(const Mt5DealBuffer *buffer) {
+    return buffer ? buffer->values.size() : 0;
+}
+
+MT5BRIDGE_API void mt5bridge_deal_buffer_free(Mt5DealBuffer *buffer) { delete buffer; }
 
 MT5BRIDGE_API int mt5bridge_initialize(const wchar_t *python_home) try {
     std::lock_guard<std::mutex> lock(g_mutex);

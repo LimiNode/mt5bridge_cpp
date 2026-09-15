@@ -155,6 +155,25 @@ public:
         account_info_ = resolve<AccountInfo>("mt5bridge_account_info");
         symbol_capabilities_ = resolve<SymbolCapabilities>("mt5bridge_symbol_capabilities");
         order_check_ = resolve<OrderCheck>("mt5bridge_order_check");
+        query_orders_ = resolve<QueryOrders>("mt5bridge_query_orders");
+        order_buffer_data_ = resolve<OrderBufferData>("mt5bridge_order_buffer_data");
+        order_buffer_size_ = resolve<OrderBufferSize>("mt5bridge_order_buffer_size");
+        order_buffer_free_ = resolve<OrderBufferFree>("mt5bridge_order_buffer_free");
+        query_positions_ = resolve<QueryPositions>("mt5bridge_query_positions");
+        position_buffer_data_ = resolve<PositionBufferData>("mt5bridge_position_buffer_data");
+        position_buffer_size_ = resolve<PositionBufferSize>("mt5bridge_position_buffer_size");
+        position_buffer_free_ = resolve<PositionBufferFree>("mt5bridge_position_buffer_free");
+        query_history_orders_ = resolve<QueryHistoryOrders>("mt5bridge_query_history_orders");
+        history_order_buffer_data_ =
+            resolve<HistoryOrderBufferData>("mt5bridge_history_order_buffer_data");
+        history_order_buffer_size_ =
+            resolve<HistoryOrderBufferSize>("mt5bridge_history_order_buffer_size");
+        history_order_buffer_free_ =
+            resolve<HistoryOrderBufferFree>("mt5bridge_history_order_buffer_free");
+        query_history_deals_ = resolve<QueryHistoryDeals>("mt5bridge_query_history_deals");
+        deal_buffer_data_ = resolve<DealBufferData>("mt5bridge_deal_buffer_data");
+        deal_buffer_size_ = resolve<DealBufferSize>("mt5bridge_deal_buffer_size");
+        deal_buffer_free_ = resolve<DealBufferFree>("mt5bridge_deal_buffer_free");
         if (!abi_version_ || !trade_api_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
@@ -162,6 +181,11 @@ public:
             !copy_ticks_chunks_ || !subscribe_ticks_ || !unsubscribe_ || !unsubscribe_all_ ||
             !process_events_ || !subscription_diagnostics_ || !subscription_source_diagnostics_ ||
             !account_info_ || !symbol_capabilities_ || !order_check_ ||
+            !query_orders_ || !order_buffer_data_ || !order_buffer_size_ || !order_buffer_free_ ||
+            !query_positions_ || !position_buffer_data_ || !position_buffer_size_ ||
+            !position_buffer_free_ || !query_history_orders_ || !history_order_buffer_data_ ||
+            !history_order_buffer_size_ || !history_order_buffer_free_ || !query_history_deals_ ||
+            !deal_buffer_data_ || !deal_buffer_size_ || !deal_buffer_free_ ||
             abi_version_() != MT5BRIDGE_ABI_VERSION ||
             trade_api_version_() != MT5BRIDGE_TRADE_API_VERSION) {
             unload();
@@ -220,6 +244,22 @@ public:
         account_info_ = nullptr;
         symbol_capabilities_ = nullptr;
         order_check_ = nullptr;
+        query_orders_ = nullptr;
+        order_buffer_data_ = nullptr;
+        order_buffer_size_ = nullptr;
+        order_buffer_free_ = nullptr;
+        query_positions_ = nullptr;
+        position_buffer_data_ = nullptr;
+        position_buffer_size_ = nullptr;
+        position_buffer_free_ = nullptr;
+        query_history_orders_ = nullptr;
+        history_order_buffer_data_ = nullptr;
+        history_order_buffer_size_ = nullptr;
+        history_order_buffer_free_ = nullptr;
+        query_history_deals_ = nullptr;
+        deal_buffer_data_ = nullptr;
+        deal_buffer_size_ = nullptr;
+        deal_buffer_free_ = nullptr;
         initialized_ = false;
     }
 
@@ -339,6 +379,98 @@ public:
         if (order_check_(&request, &result) != 0)
             throw std::runtime_error(error_message());
         return result;
+    }
+
+    /// \brief Retrieves active orders into application-owned storage.
+    /// \param request Optional symbol/group/ticket filters.
+    /// \return Typed order evidence copied from the DLL.
+    /// \throws std::runtime_error If the snapshot cannot be read.
+    std::vector<Mt5OrderSnapshot> orders(const Mt5OrdersRequest &request = {}) {
+        check_loaded();
+        Mt5OrderBuffer *buffer = nullptr;
+        if (query_orders_(&request, &buffer) != 0)
+            throw std::runtime_error(error_message());
+        try {
+            const auto *data = order_buffer_data_(buffer);
+            const auto count = order_buffer_size_(buffer);
+            std::vector<Mt5OrderSnapshot> result;
+            if (count)
+                result.assign(data, data + count);
+            order_buffer_free_(buffer);
+            return result;
+        } catch (...) {
+            order_buffer_free_(buffer);
+            throw;
+        }
+    }
+
+    /// \brief Retrieves active positions into application-owned storage.
+    /// \param request Optional symbol/group/ticket/identifier filters.
+    /// \return Typed position evidence copied from the DLL.
+    /// \throws std::runtime_error If the snapshot cannot be read.
+    std::vector<Mt5PositionSnapshot> positions(const Mt5PositionsRequest &request = {}) {
+        check_loaded();
+        Mt5PositionBuffer *buffer = nullptr;
+        if (query_positions_(&request, &buffer) != 0)
+            throw std::runtime_error(error_message());
+        try {
+            const auto *data = position_buffer_data_(buffer);
+            const auto count = position_buffer_size_(buffer);
+            std::vector<Mt5PositionSnapshot> result;
+            if (count)
+                result.assign(data, data + count);
+            position_buffer_free_(buffer);
+            return result;
+        } catch (...) {
+            position_buffer_free_(buffer);
+            throw;
+        }
+    }
+
+    /// \brief Retrieves history orders for an inclusive UTC millisecond range.
+    /// \param request Time range and optional group/ticket/position filters.
+    /// \return Typed history-order evidence copied from the DLL.
+    /// \throws std::runtime_error If the snapshot cannot be read.
+    std::vector<Mt5HistoryOrderSnapshot> history_orders(const Mt5HistoryRequest &request) {
+        check_loaded();
+        Mt5HistoryOrderBuffer *buffer = nullptr;
+        if (query_history_orders_(&request, &buffer) != 0)
+            throw std::runtime_error(error_message());
+        try {
+            const auto *data = history_order_buffer_data_(buffer);
+            const auto count = history_order_buffer_size_(buffer);
+            std::vector<Mt5HistoryOrderSnapshot> result;
+            if (count)
+                result.assign(data, data + count);
+            history_order_buffer_free_(buffer);
+            return result;
+        } catch (...) {
+            history_order_buffer_free_(buffer);
+            throw;
+        }
+    }
+
+    /// \brief Retrieves history deals for an inclusive UTC millisecond range.
+    /// \param request Time range and optional group/ticket/position filters.
+    /// \return Typed deal evidence copied from the DLL.
+    /// \throws std::runtime_error If the snapshot cannot be read.
+    std::vector<Mt5DealSnapshot> history_deals(const Mt5HistoryRequest &request) {
+        check_loaded();
+        Mt5DealBuffer *buffer = nullptr;
+        if (query_history_deals_(&request, &buffer) != 0)
+            throw std::runtime_error(error_message());
+        try {
+            const auto *data = deal_buffer_data_(buffer);
+            const auto count = deal_buffer_size_(buffer);
+            std::vector<Mt5DealSnapshot> result;
+            if (count)
+                result.assign(data, data + count);
+            deal_buffer_free_(buffer);
+            return result;
+        } catch (...) {
+            deal_buffer_free_(buffer);
+            throw;
+        }
     }
 
     /// \brief Copies diagnostics from the most recent market-data call on this thread.
@@ -536,6 +668,22 @@ private:
     using AccountInfo = int (*)(Mt5AccountInfo *);
     using SymbolCapabilities = int (*)(const Mt5SymbolRequest *, Mt5SymbolCapabilities *);
     using OrderCheck = int (*)(const Mt5OrderCheckRequest *, Mt5OrderCheckResult *);
+    using QueryOrders = int (*)(const Mt5OrdersRequest *, Mt5OrderBuffer **);
+    using OrderBufferData = const Mt5OrderSnapshot *(*)(const Mt5OrderBuffer *);
+    using OrderBufferSize = std::size_t (*)(const Mt5OrderBuffer *);
+    using OrderBufferFree = void (*)(Mt5OrderBuffer *);
+    using QueryPositions = int (*)(const Mt5PositionsRequest *, Mt5PositionBuffer **);
+    using PositionBufferData = const Mt5PositionSnapshot *(*)(const Mt5PositionBuffer *);
+    using PositionBufferSize = std::size_t (*)(const Mt5PositionBuffer *);
+    using PositionBufferFree = void (*)(Mt5PositionBuffer *);
+    using QueryHistoryOrders = int (*)(const Mt5HistoryRequest *, Mt5HistoryOrderBuffer **);
+    using HistoryOrderBufferData = const Mt5HistoryOrderSnapshot *(*)(const Mt5HistoryOrderBuffer *);
+    using HistoryOrderBufferSize = std::size_t (*)(const Mt5HistoryOrderBuffer *);
+    using HistoryOrderBufferFree = void (*)(Mt5HistoryOrderBuffer *);
+    using QueryHistoryDeals = int (*)(const Mt5HistoryRequest *, Mt5DealBuffer **);
+    using DealBufferData = const Mt5DealSnapshot *(*)(const Mt5DealBuffer *);
+    using DealBufferSize = std::size_t (*)(const Mt5DealBuffer *);
+    using DealBufferFree = void (*)(Mt5DealBuffer *);
 
     /// \brief Resolves a full DLL path and loads it with a restricted dependency search.
     /// \param path Caller-provided DLL path.
@@ -611,6 +759,22 @@ private:
         account_info_ = other.account_info_;
         symbol_capabilities_ = other.symbol_capabilities_;
         order_check_ = other.order_check_;
+        query_orders_ = other.query_orders_;
+        order_buffer_data_ = other.order_buffer_data_;
+        order_buffer_size_ = other.order_buffer_size_;
+        order_buffer_free_ = other.order_buffer_free_;
+        query_positions_ = other.query_positions_;
+        position_buffer_data_ = other.position_buffer_data_;
+        position_buffer_size_ = other.position_buffer_size_;
+        position_buffer_free_ = other.position_buffer_free_;
+        query_history_orders_ = other.query_history_orders_;
+        history_order_buffer_data_ = other.history_order_buffer_data_;
+        history_order_buffer_size_ = other.history_order_buffer_size_;
+        history_order_buffer_free_ = other.history_order_buffer_free_;
+        query_history_deals_ = other.query_history_deals_;
+        deal_buffer_data_ = other.deal_buffer_data_;
+        deal_buffer_size_ = other.deal_buffer_size_;
+        deal_buffer_free_ = other.deal_buffer_free_;
         subscription_state_ = std::move(other.subscription_state_);
         initialized_ = other.initialized_;
         owner_thread_ = other.owner_thread_;
@@ -647,6 +811,22 @@ private:
         other.account_info_ = nullptr;
         other.symbol_capabilities_ = nullptr;
         other.order_check_ = nullptr;
+        other.query_orders_ = nullptr;
+        other.order_buffer_data_ = nullptr;
+        other.order_buffer_size_ = nullptr;
+        other.order_buffer_free_ = nullptr;
+        other.query_positions_ = nullptr;
+        other.position_buffer_data_ = nullptr;
+        other.position_buffer_size_ = nullptr;
+        other.position_buffer_free_ = nullptr;
+        other.query_history_orders_ = nullptr;
+        other.history_order_buffer_data_ = nullptr;
+        other.history_order_buffer_size_ = nullptr;
+        other.history_order_buffer_free_ = nullptr;
+        other.query_history_deals_ = nullptr;
+        other.deal_buffer_data_ = nullptr;
+        other.deal_buffer_size_ = nullptr;
+        other.deal_buffer_free_ = nullptr;
         other.initialized_ = false;
         other.owner_thread_ = std::thread::id{};
     }
@@ -680,6 +860,22 @@ private:
     AccountInfo account_info_ = nullptr;
     SymbolCapabilities symbol_capabilities_ = nullptr;
     OrderCheck order_check_ = nullptr;
+    QueryOrders query_orders_ = nullptr;
+    OrderBufferData order_buffer_data_ = nullptr;
+    OrderBufferSize order_buffer_size_ = nullptr;
+    OrderBufferFree order_buffer_free_ = nullptr;
+    QueryPositions query_positions_ = nullptr;
+    PositionBufferData position_buffer_data_ = nullptr;
+    PositionBufferSize position_buffer_size_ = nullptr;
+    PositionBufferFree position_buffer_free_ = nullptr;
+    QueryHistoryOrders query_history_orders_ = nullptr;
+    HistoryOrderBufferData history_order_buffer_data_ = nullptr;
+    HistoryOrderBufferSize history_order_buffer_size_ = nullptr;
+    HistoryOrderBufferFree history_order_buffer_free_ = nullptr;
+    QueryHistoryDeals query_history_deals_ = nullptr;
+    DealBufferData deal_buffer_data_ = nullptr;
+    DealBufferSize deal_buffer_size_ = nullptr;
+    DealBufferFree deal_buffer_free_ = nullptr;
     std::shared_ptr<SubscriptionState> subscription_state_;
     bool initialized_ = false;
     std::thread::id owner_thread_;

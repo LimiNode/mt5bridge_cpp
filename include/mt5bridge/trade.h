@@ -10,7 +10,7 @@
 
 /// \def MT5BRIDGE_TRADE_API_VERSION
 /// \brief Identifies the additive typed trade-observation surface.
-#define MT5BRIDGE_TRADE_API_VERSION 1u
+#define MT5BRIDGE_TRADE_API_VERSION 2u
 
 /// \def MT5BRIDGE_TEXT_CAPACITY
 /// \brief Maximum UTF-8 bytes stored in fixed-size observation text fields.
@@ -201,6 +201,215 @@ typedef struct Mt5OrderCheckResult {
     uint32_t reserved[2];     ///< Reserved; must be zero.
 } Mt5OrderCheckResult;
 
+/// \struct Mt5OrdersRequest
+/// \brief Filters an active-order snapshot.
+typedef struct Mt5OrdersRequest {
+    const char *symbol_utf8; ///< Optional UTF-8 symbol filter.
+    const char *group_utf8;  ///< Optional MT5 group mask.
+    uint64_t ticket;         ///< Optional order ticket; zero means all.
+    uint32_t reserved;       ///< Reserved; must be zero.
+} Mt5OrdersRequest;
+
+/// \struct Mt5PositionsRequest
+/// \brief Filters an active-position snapshot.
+typedef struct Mt5PositionsRequest {
+    const char *symbol_utf8; ///< Optional UTF-8 symbol filter.
+    const char *group_utf8;  ///< Optional MT5 group mask.
+    uint64_t ticket;         ///< Optional position ticket; zero means all.
+    uint64_t identifier;     ///< Optional POSITION_IDENTIFIER; zero means all.
+    uint32_t reserved;       ///< Reserved; must be zero.
+} Mt5PositionsRequest;
+
+/// \struct Mt5HistoryRequest
+/// \brief Filters history orders or deals by time and optional identity.
+typedef struct Mt5HistoryRequest {
+    int64_t from_msc;        ///< Inclusive UTC range start in milliseconds.
+    int64_t to_msc;          ///< Inclusive UTC range end in milliseconds.
+    const char *group_utf8;  ///< Optional MT5 group mask.
+    uint64_t ticket;         ///< Optional order/deal ticket; zero means all.
+    uint64_t position_id;    ///< Optional POSITION_IDENTIFIER; zero means all.
+    uint32_t reserved;       ///< Reserved; must be zero.
+} Mt5HistoryRequest;
+
+/// \name Snapshot known-field masks
+/// \brief Bits distinguish an absent MT5 field from a valid zero value.
+/// \{
+#define MT5BRIDGE_ORDER_KNOWN_TICKET (UINT64_C(1) << 0)
+#define MT5BRIDGE_ORDER_KNOWN_POSITION_ID (UINT64_C(1) << 1)
+#define MT5BRIDGE_ORDER_KNOWN_POSITION_BY_ID (UINT64_C(1) << 2)
+#define MT5BRIDGE_ORDER_KNOWN_MAGIC (UINT64_C(1) << 3)
+#define MT5BRIDGE_ORDER_KNOWN_TYPE (UINT64_C(1) << 4)
+#define MT5BRIDGE_ORDER_KNOWN_STATE (UINT64_C(1) << 5)
+#define MT5BRIDGE_ORDER_KNOWN_REASON (UINT64_C(1) << 6)
+#define MT5BRIDGE_ORDER_KNOWN_TYPE_TIME (UINT64_C(1) << 7)
+#define MT5BRIDGE_ORDER_KNOWN_TYPE_FILLING (UINT64_C(1) << 8)
+#define MT5BRIDGE_ORDER_KNOWN_VOLUME_INITIAL (UINT64_C(1) << 9)
+#define MT5BRIDGE_ORDER_KNOWN_VOLUME_CURRENT (UINT64_C(1) << 10)
+#define MT5BRIDGE_ORDER_KNOWN_PRICE_OPEN (UINT64_C(1) << 11)
+#define MT5BRIDGE_ORDER_KNOWN_PRICE_CURRENT (UINT64_C(1) << 12)
+#define MT5BRIDGE_ORDER_KNOWN_PRICE_STOPLIMIT (UINT64_C(1) << 13)
+#define MT5BRIDGE_ORDER_KNOWN_SL (UINT64_C(1) << 14)
+#define MT5BRIDGE_ORDER_KNOWN_TP (UINT64_C(1) << 15)
+#define MT5BRIDGE_ORDER_KNOWN_TIME_SETUP (UINT64_C(1) << 16)
+#define MT5BRIDGE_ORDER_KNOWN_TIME_DONE (UINT64_C(1) << 17)
+#define MT5BRIDGE_ORDER_KNOWN_TIME_EXPIRATION (UINT64_C(1) << 18)
+#define MT5BRIDGE_ORDER_KNOWN_SYMBOL (UINT64_C(1) << 19)
+#define MT5BRIDGE_ORDER_KNOWN_COMMENT (UINT64_C(1) << 20)
+#define MT5BRIDGE_ORDER_KNOWN_EXTERNAL_ID (UINT64_C(1) << 21)
+#define MT5BRIDGE_POSITION_KNOWN_TICKET (UINT64_C(1) << 0)
+#define MT5BRIDGE_POSITION_KNOWN_IDENTIFIER (UINT64_C(1) << 1)
+#define MT5BRIDGE_POSITION_KNOWN_MAGIC (UINT64_C(1) << 2)
+#define MT5BRIDGE_POSITION_KNOWN_TYPE (UINT64_C(1) << 3)
+#define MT5BRIDGE_POSITION_KNOWN_REASON (UINT64_C(1) << 4)
+#define MT5BRIDGE_POSITION_KNOWN_VOLUME (UINT64_C(1) << 5)
+#define MT5BRIDGE_POSITION_KNOWN_PRICE_OPEN (UINT64_C(1) << 6)
+#define MT5BRIDGE_POSITION_KNOWN_PRICE_CURRENT (UINT64_C(1) << 7)
+#define MT5BRIDGE_POSITION_KNOWN_SL (UINT64_C(1) << 8)
+#define MT5BRIDGE_POSITION_KNOWN_TP (UINT64_C(1) << 9)
+#define MT5BRIDGE_POSITION_KNOWN_PROFIT (UINT64_C(1) << 10)
+#define MT5BRIDGE_POSITION_KNOWN_SWAP (UINT64_C(1) << 11)
+#define MT5BRIDGE_POSITION_KNOWN_TIME (UINT64_C(1) << 12)
+#define MT5BRIDGE_POSITION_KNOWN_TIME_UPDATE (UINT64_C(1) << 13)
+#define MT5BRIDGE_POSITION_KNOWN_SYMBOL (UINT64_C(1) << 14)
+#define MT5BRIDGE_POSITION_KNOWN_COMMENT (UINT64_C(1) << 15)
+#define MT5BRIDGE_POSITION_KNOWN_EXTERNAL_ID (UINT64_C(1) << 16)
+#define MT5BRIDGE_DEAL_KNOWN_TICKET (UINT64_C(1) << 0)
+#define MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET (UINT64_C(1) << 1)
+#define MT5BRIDGE_DEAL_KNOWN_POSITION_ID (UINT64_C(1) << 2)
+#define MT5BRIDGE_DEAL_KNOWN_MAGIC (UINT64_C(1) << 3)
+#define MT5BRIDGE_DEAL_KNOWN_TYPE (UINT64_C(1) << 4)
+#define MT5BRIDGE_DEAL_KNOWN_ENTRY (UINT64_C(1) << 5)
+#define MT5BRIDGE_DEAL_KNOWN_REASON (UINT64_C(1) << 6)
+#define MT5BRIDGE_DEAL_KNOWN_VOLUME (UINT64_C(1) << 7)
+#define MT5BRIDGE_DEAL_KNOWN_PRICE (UINT64_C(1) << 8)
+#define MT5BRIDGE_DEAL_KNOWN_PROFIT (UINT64_C(1) << 9)
+#define MT5BRIDGE_DEAL_KNOWN_COMMISSION (UINT64_C(1) << 10)
+#define MT5BRIDGE_DEAL_KNOWN_SWAP (UINT64_C(1) << 11)
+#define MT5BRIDGE_DEAL_KNOWN_FEE (UINT64_C(1) << 12)
+#define MT5BRIDGE_DEAL_KNOWN_TIME (UINT64_C(1) << 13)
+#define MT5BRIDGE_DEAL_KNOWN_SYMBOL (UINT64_C(1) << 14)
+#define MT5BRIDGE_DEAL_KNOWN_COMMENT (UINT64_C(1) << 15)
+#define MT5BRIDGE_DEAL_KNOWN_EXTERNAL_ID (UINT64_C(1) << 16)
+/// \}
+
+/// \struct Mt5OrderSnapshot
+/// \brief Lossless typed evidence copied from an MT5 order record.
+typedef struct Mt5OrderSnapshot {
+    uint64_t ticket;             ///< ORDER_TICKET.
+    uint64_t position_id;        ///< ORDER_POSITION_ID.
+    uint64_t position_by_id;     ///< ORDER_POSITION_BY_ID.
+    uint64_t magic;              ///< ORDER_MAGIC.
+    uint32_t type;               ///< ORDER_TYPE_*.
+    uint32_t state;              ///< ORDER_STATE_*.
+    uint32_t reason;             ///< ORDER_REASON_*.
+    uint32_t type_time;          ///< ORDER_TYPE_TIME_*.
+    uint32_t type_filling;       ///< ORDER_TYPE_FILLING_*.
+    double volume_initial;       ///< ORDER_VOLUME_INITIAL.
+    double volume_current;       ///< ORDER_VOLUME_CURRENT.
+    double price_open;           ///< ORDER_PRICE_OPEN.
+    double price_current;        ///< ORDER_PRICE_CURRENT.
+    double price_stoplimit;      ///< ORDER_PRICE_STOPLIMIT.
+    double sl;                   ///< ORDER_SL.
+    double tp;                   ///< ORDER_TP.
+    int64_t time_setup_msc;      ///< ORDER_TIME_SETUP converted to milliseconds.
+    int64_t time_done_msc;       ///< ORDER_TIME_DONE converted to milliseconds.
+    int64_t time_expiration_msc; ///< ORDER_TIME_EXPIRATION converted to milliseconds.
+    char symbol[64];             ///< UTF-8 symbol.
+    char comment[MT5BRIDGE_TEXT_CAPACITY]; ///< UTF-8 comment.
+    char external_id[MT5BRIDGE_TEXT_CAPACITY]; ///< Broker/exchange external id.
+    uint64_t known_fields;       ///< Bits identifying fields present in MT5.
+    uint32_t reserved[2];        ///< Reserved; must be zero.
+} Mt5OrderSnapshot;
+
+/// \typedef Mt5HistoryOrderSnapshot
+/// \brief History-order evidence with the same shape as an order snapshot.
+typedef Mt5OrderSnapshot Mt5HistoryOrderSnapshot;
+
+/// \struct Mt5PositionSnapshot
+/// \brief Lossless typed evidence copied from an MT5 position record.
+typedef struct Mt5PositionSnapshot {
+    uint64_t ticket;             ///< POSITION_TICKET.
+    uint64_t identifier;         ///< POSITION_IDENTIFIER.
+    uint64_t magic;              ///< POSITION_MAGIC.
+    uint32_t type;               ///< POSITION_TYPE_*.
+    uint32_t reason;             ///< POSITION_REASON_*.
+    double volume;               ///< POSITION_VOLUME.
+    double price_open;           ///< POSITION_PRICE_OPEN.
+    double price_current;        ///< POSITION_PRICE_CURRENT.
+    double sl;                   ///< POSITION_SL.
+    double tp;                   ///< POSITION_TP.
+    double profit;               ///< POSITION_PROFIT.
+    double swap;                 ///< POSITION_SWAP.
+    int64_t time_msc;            ///< POSITION_TIME converted to milliseconds.
+    int64_t time_update_msc;     ///< POSITION_TIME_UPDATE converted to milliseconds.
+    char symbol[64];             ///< UTF-8 symbol.
+    char comment[MT5BRIDGE_TEXT_CAPACITY]; ///< UTF-8 comment.
+    char external_id[MT5BRIDGE_TEXT_CAPACITY]; ///< Broker/exchange external id.
+    uint64_t known_fields;       ///< Bits identifying fields present in MT5.
+    uint32_t reserved[2];        ///< Reserved; must be zero.
+} Mt5PositionSnapshot;
+
+/// \struct Mt5DealSnapshot
+/// \brief Lossless typed evidence copied from an MT5 deal record.
+typedef struct Mt5DealSnapshot {
+    uint64_t ticket;             ///< DEAL_TICKET.
+    uint64_t order_ticket;       ///< DEAL_ORDER.
+    uint64_t position_id;        ///< DEAL_POSITION_ID.
+    uint64_t magic;              ///< DEAL_MAGIC.
+    uint32_t type;               ///< DEAL_TYPE_*.
+    uint32_t entry;              ///< DEAL_ENTRY_*.
+    uint32_t reason;             ///< DEAL_REASON_*.
+    double volume;               ///< DEAL_VOLUME.
+    double price;                ///< DEAL_PRICE.
+    double profit;               ///< DEAL_PROFIT.
+    double commission;           ///< DEAL_COMMISSION.
+    double swap;                 ///< DEAL_SWAP.
+    double fee;                  ///< DEAL_FEE.
+    int64_t time_msc;            ///< DEAL_TIME converted to milliseconds.
+    char symbol[64];             ///< UTF-8 symbol.
+    char comment[MT5BRIDGE_TEXT_CAPACITY]; ///< UTF-8 comment.
+    char external_id[MT5BRIDGE_TEXT_CAPACITY]; ///< Broker/exchange external id.
+    uint64_t known_fields;       ///< Bits identifying fields present in MT5.
+    uint32_t reserved[2];        ///< Reserved; must be zero.
+} Mt5DealSnapshot;
+
+typedef struct Mt5OrderBuffer Mt5OrderBuffer;
+typedef struct Mt5PositionBuffer Mt5PositionBuffer;
+typedef struct Mt5HistoryOrderBuffer Mt5HistoryOrderBuffer;
+typedef struct Mt5DealBuffer Mt5DealBuffer;
+
+/// \brief Returns an active-order snapshot.
+MT5BRIDGE_EXPORT int mt5bridge_query_orders(const Mt5OrdersRequest *request,
+                                            Mt5OrderBuffer **result);
+MT5BRIDGE_EXPORT const Mt5OrderSnapshot *mt5bridge_order_buffer_data(
+    const Mt5OrderBuffer *buffer);
+MT5BRIDGE_EXPORT size_t mt5bridge_order_buffer_size(const Mt5OrderBuffer *buffer);
+MT5BRIDGE_EXPORT void mt5bridge_order_buffer_free(Mt5OrderBuffer *buffer);
+
+/// \brief Returns an active-position snapshot.
+MT5BRIDGE_EXPORT int mt5bridge_query_positions(const Mt5PositionsRequest *request,
+                                               Mt5PositionBuffer **result);
+MT5BRIDGE_EXPORT const Mt5PositionSnapshot *mt5bridge_position_buffer_data(
+    const Mt5PositionBuffer *buffer);
+MT5BRIDGE_EXPORT size_t mt5bridge_position_buffer_size(const Mt5PositionBuffer *buffer);
+MT5BRIDGE_EXPORT void mt5bridge_position_buffer_free(Mt5PositionBuffer *buffer);
+
+/// \brief Returns a bounded history-order snapshot.
+MT5BRIDGE_EXPORT int mt5bridge_query_history_orders(const Mt5HistoryRequest *request,
+                                                    Mt5HistoryOrderBuffer **result);
+MT5BRIDGE_EXPORT const Mt5HistoryOrderSnapshot *mt5bridge_history_order_buffer_data(
+    const Mt5HistoryOrderBuffer *buffer);
+MT5BRIDGE_EXPORT size_t mt5bridge_history_order_buffer_size(
+    const Mt5HistoryOrderBuffer *buffer);
+MT5BRIDGE_EXPORT void mt5bridge_history_order_buffer_free(Mt5HistoryOrderBuffer *buffer);
+
+/// \brief Returns a bounded history-deal snapshot.
+MT5BRIDGE_EXPORT int mt5bridge_query_history_deals(const Mt5HistoryRequest *request,
+                                                   Mt5DealBuffer **result);
+MT5BRIDGE_EXPORT const Mt5DealSnapshot *mt5bridge_deal_buffer_data(const Mt5DealBuffer *buffer);
+MT5BRIDGE_EXPORT size_t mt5bridge_deal_buffer_size(const Mt5DealBuffer *buffer);
+MT5BRIDGE_EXPORT void mt5bridge_deal_buffer_free(Mt5DealBuffer *buffer);
+
 /// \brief Returns the version of the additive typed trade-observation API.
 /// \return MT5BRIDGE_TRADE_API_VERSION for this runtime.
 MT5BRIDGE_EXPORT uint32_t mt5bridge_trade_api_version(void);
@@ -234,6 +443,12 @@ static_assert(sizeof(Mt5OrderCheckRequest) == 128,
               "Mt5OrderCheckRequest ABI size changed");
 static_assert(sizeof(Mt5OrderCheckResult) == 192,
               "Mt5OrderCheckResult ABI size changed");
+static_assert(sizeof(Mt5OrdersRequest) == 32, "Mt5OrdersRequest ABI size changed");
+static_assert(sizeof(Mt5PositionsRequest) == 40, "Mt5PositionsRequest ABI size changed");
+static_assert(sizeof(Mt5HistoryRequest) == 48, "Mt5HistoryRequest ABI size changed");
+static_assert(sizeof(Mt5OrderSnapshot) == 472, "Mt5OrderSnapshot ABI size changed");
+static_assert(sizeof(Mt5PositionSnapshot) == 440, "Mt5PositionSnapshot ABI size changed");
+static_assert(sizeof(Mt5DealSnapshot) == 440, "Mt5DealSnapshot ABI size changed");
 static_assert(offsetof(Mt5AccountInfo, login) == 144, "Mt5AccountInfo login offset changed");
 static_assert(offsetof(Mt5AccountInfo, known_fields) == 184,
               "Mt5AccountInfo known_fields offset changed");
@@ -247,6 +462,14 @@ static_assert(offsetof(Mt5OrderCheckRequest, action) == 96,
               "Mt5OrderCheckRequest action offset changed");
 static_assert(offsetof(Mt5OrderCheckResult, balance) == 8,
               "Mt5OrderCheckResult balance offset changed");
+static_assert(offsetof(Mt5OrderSnapshot, position_id) == 8,
+              "Mt5OrderSnapshot position_id offset changed");
+static_assert(offsetof(Mt5OrderSnapshot, time_setup_msc) == 112,
+              "Mt5OrderSnapshot time_setup_msc offset changed");
+static_assert(offsetof(Mt5PositionSnapshot, identifier) == 8,
+              "Mt5PositionSnapshot identifier offset changed");
+static_assert(offsetof(Mt5DealSnapshot, position_id) == 16,
+              "Mt5DealSnapshot position_id offset changed");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(Mt5AccountInfo) == 192, "Mt5AccountInfo ABI size changed");
 _Static_assert(sizeof(Mt5SymbolRequest) == 16, "Mt5SymbolRequest ABI size changed");
@@ -256,6 +479,12 @@ _Static_assert(sizeof(Mt5OrderCheckRequest) == 128,
                "Mt5OrderCheckRequest ABI size changed");
 _Static_assert(sizeof(Mt5OrderCheckResult) == 192,
                "Mt5OrderCheckResult ABI size changed");
+_Static_assert(sizeof(Mt5OrdersRequest) == 32, "Mt5OrdersRequest ABI size changed");
+_Static_assert(sizeof(Mt5PositionsRequest) == 40, "Mt5PositionsRequest ABI size changed");
+_Static_assert(sizeof(Mt5HistoryRequest) == 48, "Mt5HistoryRequest ABI size changed");
+_Static_assert(sizeof(Mt5OrderSnapshot) == 472, "Mt5OrderSnapshot ABI size changed");
+_Static_assert(sizeof(Mt5PositionSnapshot) == 440, "Mt5PositionSnapshot ABI size changed");
+_Static_assert(sizeof(Mt5DealSnapshot) == 440, "Mt5DealSnapshot ABI size changed");
 _Static_assert(offsetof(Mt5AccountInfo, login) == 144, "Mt5AccountInfo login offset changed");
 _Static_assert(offsetof(Mt5AccountInfo, known_fields) == 184,
                "Mt5AccountInfo known_fields offset changed");

@@ -117,12 +117,15 @@ Trade submission is deliberately single-shot; the planned bounded,
 ticket/identifier-graph reconciliation flow is documented in
 [`docs/trade-api.md`](docs/trade-api.md) and
 [`docs/adr/0004-trade-reconciliation.md`](docs/adr/0004-trade-reconciliation.md).
+Managed lifecycle identities, close obligations, schedules, execution plans,
+and the safety boundary around future side effects are documented in
+[`docs/adr/0006-managed-trade-lifecycle.md`](docs/adr/0006-managed-trade-lifecycle.md).
 
 ## Typed trade observation quickstart
 
-The first Stage 1 slice is read-only: it observes the account, asks MT5 for
-symbol execution capabilities, and runs an advisory `order_check`. It never
-calls `order_send`.
+The Stage 1 observation surface is read-only: it observes account and symbol
+capabilities, runs an advisory `order_check`, and copies active/history order,
+position, and deal snapshots. It never calls `order_send`.
 
 1. Build the `trade_observation_example` target with the runtime enabled:
 
@@ -142,7 +145,7 @@ calls `order_send`.
    .\trade_observation_example.exe EURUSD
    ```
 
-The program performs three concrete observations:
+The program performs concrete observations:
 
 - `Client::account_info()` prints the immutable server/login identity and
   permission fields. Check `known_fields` before using an optional capability;
@@ -156,6 +159,9 @@ The program performs three concrete observations:
   available; otherwise it deliberately requests zero volume to demonstrate a
   safe rejection such as `Invalid volume`. Neither path has a trading side
   effect.
+- `Client::orders()`, `positions()`, `history_orders()`, and `history_deals()`
+  copy bounded typed snapshots and print their counts. Empty collections are
+  valid; missing required graph fields fail closed.
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 
@@ -177,9 +183,9 @@ embedded runtime cannot discover it automatically.
 
 - The current public contract is ABI 8. Tick POD records preserve separate
   integer `volume` and floating-point `volume_real` fields.
-- The first typed trade-observation slice exposes account snapshots, symbol
-  capabilities, and advisory `order_check` through `trade.h`; it does not
-  expose an unmanaged `order_send`.
+- The typed trade-observation surface exposes account/symbol snapshots,
+  advisory `order_check`, and active/history order, position, and deal POD
+  records through `trade.h`; it does not expose an unmanaged `order_send`.
 - The legacy JSON `open_market_buy` convenience method is disabled in ABI 8;
   durable order dispatch will arrive only with the Stage 2 journal.
 - Realtime consumers use `mt5bridge_subscribe_ticks()` and host-driven

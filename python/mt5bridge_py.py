@@ -87,10 +87,6 @@ class Mt5HistoryDealsRequest(Structure):
     ]
 
 
-# Compatibility name for callers that only used the old order-history shape.
-Mt5HistoryRequest = Mt5HistoryOrdersRequest
-
-
 class Mt5OrderSnapshot(Structure):
     """Typed order/history-order evidence returned by the DLL."""
 

@@ -1370,6 +1370,42 @@ PyRef make_datetime(int64_t milliseconds) {
                             : nullptr);
 }
 
+/// \struct HistoryQueryRange
+/// \brief Second-aligned superset used for MT5 history selection.
+struct HistoryQueryRange {
+    int64_t from_msc = 0; ///< Floor-aligned query start in milliseconds.
+    int64_t to_msc = 0;   ///< Ceil-aligned query end in milliseconds.
+};
+
+/// \brief Expands a millisecond history window to the server's second granularity.
+/// \param from_msc Inclusive requested range start in Unix milliseconds.
+/// \param to_msc Inclusive requested range end in Unix milliseconds.
+/// \param[out] range Second-aligned superset range for the MT5 Python API.
+/// \return True when the expanded range is representable as int64 milliseconds.
+/// \note The caller must apply the exact millisecond filter after conversion.
+bool make_history_query_range(int64_t from_msc, int64_t to_msc,
+                              HistoryQueryRange *range) {
+    if (!range || from_msc < 0 || to_msc < from_msc) {
+        set_error("invalid history time range");
+        return false;
+    }
+    constexpr int64_t kMillisecondsPerSecond = 1000;
+    const int64_t from_remainder = from_msc % kMillisecondsPerSecond;
+    const int64_t to_remainder = to_msc % kMillisecondsPerSecond;
+    int64_t query_to = to_msc;
+    if (to_remainder != 0) {
+        const int64_t delta = kMillisecondsPerSecond - to_remainder;
+        if (to_msc > std::numeric_limits<int64_t>::max() - delta) {
+            set_error("history time range exceeds supported timestamp range");
+            return false;
+        }
+        query_to += delta;
+    }
+    range->from_msc = from_msc - from_remainder;
+    range->to_msc = query_to;
+    return true;
+}
+
 /// \brief Resolves zero tick flags to MetaTrader's COPY_TICKS_ALL value.
 /// \param mt5 Borrowed MetaTrader5 module.
 /// \param requested Caller-provided flags.
@@ -2428,6 +2464,9 @@ MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryOrdersRequest *
         set_error("valid history orders request and result are required");
         return -1;
     }
+    HistoryQueryRange query_range;
+    if (!make_history_query_range(request->from_msc, request->to_msc, &query_range))
+        return -1;
     RuntimeCallAdmission call;
     if (!call)
         return -1;
@@ -2438,8 +2477,8 @@ MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryOrdersRequest *
         return -1;
     }
     PyRef rows(call_trade_collection(mt5.get(), "history_orders_get", nullptr,
-                                     request->group_utf8, 0, request->from_msc,
-                                     request->to_msc, true));
+                                     request->group_utf8, 0, query_range.from_msc,
+                                     query_range.to_msc, true));
     if (!rows) {
         if (PyErr_Occurred())
             set_python_error();
@@ -2450,10 +2489,14 @@ MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryOrdersRequest *
     auto buffer = std::make_unique<Mt5HistoryOrderBuffer>();
     if (!copy_trade_collection(rows.get(), &buffer->values, copy_order_snapshot))
         return -1;
+    // MT5 selects history by whole-second completion time; restore the exact
+    // inclusive millisecond contract before applying identity predicates.
     buffer->values.erase(
         std::remove_if(buffer->values.begin(), buffer->values.end(),
                        [request](const Mt5HistoryOrderSnapshot &value) {
-                           return (request->order_ticket != 0 &&
+                           return value.time_done_msc < request->from_msc ||
+                                  value.time_done_msc > request->to_msc ||
+                                  (request->order_ticket != 0 &&
                                    value.ticket != request->order_ticket) ||
                                   (request->position_id != 0 &&
                                    value.position_id != request->position_id);
@@ -2490,6 +2533,9 @@ MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryDealsRequest *re
         set_error("valid history deals request and result are required");
         return -1;
     }
+    HistoryQueryRange query_range;
+    if (!make_history_query_range(request->from_msc, request->to_msc, &query_range))
+        return -1;
     RuntimeCallAdmission call;
     if (!call)
         return -1;
@@ -2500,8 +2546,8 @@ MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryDealsRequest *re
         return -1;
     }
     PyRef rows(call_trade_collection(mt5.get(), "history_deals_get", nullptr,
-                                     request->group_utf8, 0, request->from_msc,
-                                     request->to_msc, true));
+                                     request->group_utf8, 0, query_range.from_msc,
+                                     query_range.to_msc, true));
     if (!rows) {
         if (PyErr_Occurred())
             set_python_error();
@@ -2512,10 +2558,14 @@ MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryDealsRequest *re
     auto buffer = std::make_unique<Mt5DealBuffer>();
     if (!copy_trade_collection(rows.get(), &buffer->values, copy_deal_snapshot))
         return -1;
+    // MT5 selects history by whole-second timestamps; restore the exact
+    // inclusive millisecond contract before applying identity predicates.
     buffer->values.erase(
         std::remove_if(buffer->values.begin(), buffer->values.end(),
                        [request](const Mt5DealSnapshot &value) {
-                           return (request->deal_ticket != 0 &&
+                           return value.time_msc < request->from_msc ||
+                                  value.time_msc > request->to_msc ||
+                                  (request->deal_ticket != 0 &&
                                    value.ticket != request->deal_ticket) ||
                                   (request->order_ticket != 0 &&
                                    value.order_ticket != request->order_ticket) ||

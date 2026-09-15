@@ -87,6 +87,15 @@ evidence. History deals distinguish `DEAL_TICKET`, `DEAL_ORDER`, and
 the [`history_deals_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5historydealsget_py)
 overloads.
 
+The public history window is inclusive and millisecond-precise. Because the
+MetaTrader history selectors are defined in whole seconds, the bridge expands
+the Python query to a second-aligned superset (`floor(from_msc)` through
+`ceil(to_msc)`) and then applies the exact millisecond filter after converting
+the records to POD snapshots. History orders are filtered by `time_done_msc`
+(their completion/execution time), not by `time_setup_msc`; history deals are
+filtered by `time_msc`. This prevents records from an adjacent millisecond
+window from becoming reconciliation evidence.
+
 The snapshots retain the evidence needed by reconciliation: orders keep
 `ticket`, `position_id`, `position_by_id`, state/reason, volumes, prices,
 setup/done/expiration timestamps, symbol/comment, and external ID; positions

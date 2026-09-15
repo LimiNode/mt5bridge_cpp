@@ -167,7 +167,10 @@ Active queries use the same mutually-exclusive `symbol`/`group`/`ticket`
 selectors as the documented MT5 overloads. History uses separate
 `Mt5HistoryOrdersRequest` and `Mt5HistoryDealsRequest` types: the server is
 queried by bounded time range and optional group, while order/deal/position
-identity filters are applied locally to the returned evidence.
+identity filters are applied locally to the returned evidence. The public
+history window is inclusive at millisecond precision: the bridge widens the
+Python query to a whole-second superset, then filters converted snapshots
+locally (`time_done_msc` for history orders and `time_msc` for history deals).
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

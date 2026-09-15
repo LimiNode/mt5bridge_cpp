@@ -758,6 +758,91 @@ class TradeObservationTests(unittest.TestCase):
         self.assertEqual(orders[0].time_done_msc, 1_700_000_001_456)
         self.assertEqual(orders[0].time_expiration_msc, 1_700_000_360_789)
 
+    def test_history_deals_use_second_superset_and_exact_millisecond_filter(self) -> None:
+        """History selection widens to seconds, then filters the requested window locally."""
+        def fractional_history_deals(date_from: object, date_to: object, *,
+                                      group: str | None = None) -> object:
+            self.fake.collection_requests.append(
+                ("history_deals_get", (date_from, date_to),
+                 {"group": group} if group is not None else {})
+            )
+            values = []
+            for ticket, timestamp in (
+                (601, 1_700_000_000_100),
+                (602, 1_700_000_000_550),
+                (603, 1_700_000_000_900),
+            ):
+                value = _trade_deal()
+                value["ticket"] = ticket
+                value["time_msc"] = timestamp
+                values.append(value)
+            return values
+
+        self.fake.history_deals_get = fractional_history_deals
+        request = Mt5HistoryDealsRequest(
+            1_700_000_000_500, 1_700_000_000_700, c_char_p(), 0, 0, 0, 0
+        )
+        deals = self._read_buffer(
+            self.dll.mt5bridge_query_history_deals,
+            self.dll.mt5bridge_deal_buffer_data,
+            self.dll.mt5bridge_deal_buffer_size,
+            self.dll.mt5bridge_deal_buffer_free,
+            request,
+            Mt5DealSnapshot,
+        )
+        self.assertEqual([deal.ticket for deal in deals], [602])
+        history_call = self.fake.collection_requests[-1]
+        self.assertEqual(history_call[1][0].timestamp(), 1_700_000_000)
+        self.assertEqual(history_call[1][1].timestamp(), 1_700_000_001)
+
+    def test_history_orders_filter_by_done_time_not_setup_time(self) -> None:
+        """The history order window follows MT5 completion time semantics."""
+        def fractional_history_orders(date_from: object, date_to: object, *,
+                                       group: str | None = None) -> object:
+            self.fake.collection_requests.append(
+                ("history_orders_get", (date_from, date_to),
+                 {"group": group} if group is not None else {})
+            )
+            completed_in_window = _trade_order(701)
+            completed_in_window["time_setup_msc"] = 1_700_000_000_100
+            completed_in_window["time_done_msc"] = 1_700_000_000_550
+            completed_outside = _trade_order(702)
+            completed_outside["time_setup_msc"] = 1_700_000_000_100
+            completed_outside["time_done_msc"] = 1_700_000_000_900
+            return [completed_in_window, completed_outside]
+
+        self.fake.history_orders_get = fractional_history_orders
+        request = Mt5HistoryOrdersRequest(
+            1_700_000_000_500, 1_700_000_000_700, c_char_p(), 0, 0, 0
+        )
+        orders = self._read_buffer(
+            self.dll.mt5bridge_query_history_orders,
+            self.dll.mt5bridge_history_order_buffer_data,
+            self.dll.mt5bridge_history_order_buffer_size,
+            self.dll.mt5bridge_history_order_buffer_free,
+            request,
+            Mt5OrderSnapshot,
+        )
+        self.assertEqual([order.ticket for order in orders], [701])
+        self.assertEqual(orders[0].time_setup_msc, 1_700_000_000_100)
+        self.assertEqual(orders[0].time_done_msc, 1_700_000_000_550)
+        history_call = self.fake.collection_requests[-1]
+        self.assertEqual(history_call[1][0].timestamp(), 1_700_000_000)
+        self.assertEqual(history_call[1][1].timestamp(), 1_700_000_001)
+
+    def test_history_superset_rounding_overflow_fails_closed(self) -> None:
+        """Ceiling a fractional end beyond int64 is rejected before MT5 is called."""
+        maximum = (1 << 63) - 1
+        request = Mt5HistoryDealsRequest(
+            maximum - 1_000, maximum - 1, c_char_p(), 0, 0, 0, 0
+        )
+        buffer = c_void_p()
+        self.assertNotEqual(
+            self.dll.mt5bridge_query_history_deals(byref(request), byref(buffer)), 0
+        )
+        self.assertIn("exceeds supported timestamp range", self.last_error())
+        self.assertEqual(self.fake.collection_requests, [])
+
     def test_optional_external_id_remains_unknown(self) -> None:
         def order_without_external_id(*args: object, **kwargs: object) -> object:
             value = _trade_order()

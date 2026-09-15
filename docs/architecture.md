@@ -37,8 +37,13 @@ version-independent.
 - ABI 8 is checked by both `mt5bridge::Client` and the ctypes adapter before
   use. POD sizes and field offsets are compile-time assertions in `data.h` and
   `trade.h`; the additive trade observation surface has its own API version.
-- Calls that touch Python are serialized. Diagnostics are thread-local and are
-  valid until the next call on the same thread.
+- Calls that touch Python are serialized. Runtime-call admission checks the
+  lifecycle state under `g_mutex`, then releases that state mutex before taking
+  the interpreter mutex and calling Python. An in-flight admission counter
+  keeps the interpreter alive until the call completes; shutdown closes
+  admission and waits for that counter to reach zero before finalization.
+  Diagnostics are thread-local and are valid until the next call on the same
+  thread.
 - Native callbacks run without the Python GIL or runtime mutex held. Exported
   operations catch C++ exceptions before returning through the C ABI.
 - The C++ client resolves the requested DLL to an absolute path and uses
@@ -101,6 +106,8 @@ Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
 Trade identity, raw access, and reconciliation stages are specified in
 [trade-api.md](trade-api.md) and [ADR-0004](adr/0004-trade-reconciliation.md).
+The runtime-call admission and shutdown barrier are specified in
+[ADR-0005](adr/0005-runtime-call-admission.md).
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL

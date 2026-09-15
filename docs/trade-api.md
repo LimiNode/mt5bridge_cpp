@@ -75,14 +75,17 @@ error. Optional fields are represented by `known_fields`, so zero is never an
 absent-value sentinel. Seconds-only MT5 timestamps are converted to signed
 Unix milliseconds with range checks.
 
-The active `orders_get()` and `positions_get()` selectors follow the documented
-MT5 overloads: at most one of `symbol`, `group`, or `ticket` is sent to the
-server. `POSITION_IDENTIFIER` is a local post-filter because it is not a
-`positions_get()` selector. History requests always query a bounded
-`from/to` window with an optional server-side `group`; order/deal ticket and
-position filters are applied locally to the returned evidence. History deals
-distinguish `DEAL_TICKET`, `DEAL_ORDER`, and `DEAL_POSITION_ID` instead of
-overloading one ambiguous `ticket` field.
+The active [`orders_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersget_py)
+and [`positions_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5positionsget_py)
+selectors follow the documented MT5 overloads: at most one of `symbol`,
+`group`, or `ticket` is sent to the server. `POSITION_IDENTIFIER` is a local
+post-filter because it is not a `positions_get()` selector. History requests
+always query a bounded `from/to` window with an optional server-side `group`;
+order/deal ticket and position filters are applied locally to the returned
+evidence. History deals distinguish `DEAL_TICKET`, `DEAL_ORDER`, and
+`DEAL_POSITION_ID` instead of overloading one ambiguous `ticket` field; see
+the [`history_deals_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5historydealsget_py)
+overloads.
 
 The snapshots retain the evidence needed by reconciliation: orders keep
 `ticket`, `position_id`, `position_by_id`, state/reason, volumes, prices,

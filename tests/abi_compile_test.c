@@ -22,5 +22,5 @@ int main(void) {
     (void)capabilities;
     (void)order_check;
     (void)result;
-    return MT5BRIDGE_ABI_VERSION == 8 && MT5BRIDGE_TRADE_API_VERSION == 1 ? 0 : 1;
+    return MT5BRIDGE_ABI_VERSION == 8 && MT5BRIDGE_TRADE_API_VERSION == 2 ? 0 : 1;
 }

@@ -72,10 +72,10 @@ int run(const std::string &symbol, const wchar_t *dll_path) {
     // but does not submit an order; Stage 2 will add durable order dispatch.
     double check_price = 0.0;
     double check_volume = 0.0;
+    const auto now_msc = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
     try {
-        const auto now_msc = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
         const auto ticks = bridge.copy_ticks_range(symbol, now_msc - 10 * 60 * 1000, now_msc);
         if (!ticks.empty() &&
             (capabilities.known_fields & MT5BRIDGE_SYMBOL_KNOWN_VOLUME_LIMITS) != 0) {
@@ -103,6 +103,27 @@ int run(const std::string &symbol, const wchar_t *dll_path) {
     const auto check = bridge.order_check(request);
     std::cout << "order_check: retcode=" << check.retcode
               << " comment=" << check.comment << '\n';
+
+    // Snapshot calls are observation-only and preserve the identifiers needed
+    // by the future reconciliation graph. Empty collections are valid.
+    try {
+        const auto active_orders = bridge.orders(Mt5OrdersRequest{symbol.c_str(), nullptr, 0, 0});
+        const auto active_positions =
+            bridge.positions(Mt5PositionsRequest{symbol.c_str(), nullptr, 0, 0, 0});
+        const auto history_from = now_msc - 60 * 60 * 1000;
+        const Mt5HistoryOrdersRequest history_orders_request{
+            history_from, now_msc, nullptr, 0, 0, 0};
+        const Mt5HistoryDealsRequest history_deals_request{
+            history_from, now_msc, nullptr, 0, 0, 0, 0};
+        const auto history_orders = bridge.history_orders(history_orders_request);
+        const auto history_deals = bridge.history_deals(history_deals_request);
+        std::cout << "snapshots: orders=" << active_orders.size()
+                  << " positions=" << active_positions.size()
+                  << " history_orders=" << history_orders.size()
+                  << " history_deals=" << history_deals.size() << '\n';
+    } catch (const std::exception &error) {
+        std::cerr << "trade snapshots unavailable: " << error.what() << '\n';
+    }
 
     bridge.shutdown();
     return 0;

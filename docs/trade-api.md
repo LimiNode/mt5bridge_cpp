@@ -4,19 +4,23 @@ This document defines the trade layer planned above the existing MT5 Python
 bridge. It records what can be proven from the terminal and what must remain
 explicitly uncertain.
 
-## Four implementation stages
+## Implementation stages
 
 1. **Raw typed observation:** `order_check`, active orders, positions, history
    orders, history deals, and symbol/account capabilities. This stage has no
-   public side-effecting send method; an internal send primitive is used only
-   after the journal barrier is delivered in stage 2.
-2. **Durable dispatch and reconciliation:** persist the operation journal,
+   public side-effecting send method.
+2. **Observation graph and reconciliation:** key immutable MT5 evidence by
+   account and ticket/identifier, then reconcile bounded snapshots without
+   sending side effects.
+3. **Durable dispatch and reconciliation:** persist the operation journal,
    execute one `order_send` behind the durable dispatch barrier, and use
    ticket-keyed snapshots and bounded overlap reads to build a graph of
    independently observed entities.
-3. **TradeManager:** stable logical IDs, asynchronous worker delivery, and
+4. **TradeManager:** stable logical IDs, asynchronous worker delivery, and
    callbacks/state events.
-4. **Optional native backend:** an MQL5 EA/service provides
+5. **Managed policies:** timed close obligations, execution planning, hybrid
+   exits, and risk guards are layered above the reconciled manager.
+6. **Optional native backend:** an MQL5 EA/service provides
    `OrderSendAsync`/`OnTradeTransaction` records through IPC when the Python
    backend's synchronous call is insufficient.
 
@@ -54,14 +58,66 @@ in [`include/mt5bridge/trade.h`](../include/mt5bridge/trade.h):
   `retcode_external` is deliberately reserved for the future `order_send`
   result.
 
+The collection surface is also typed and read-only:
+
+- `mt5bridge_query_orders()` and `mt5bridge_query_positions()` return bounded
+  active snapshots.
+- `mt5bridge_query_history_orders()` and `mt5bridge_query_history_deals()`
+  return snapshots for an inclusive UTC millisecond window.
+- `Client::orders()`, `positions()`, `history_orders()`, and `history_deals()`
+  and the ctypes adapter copy the records into caller-owned storage.
+
+Each collection buffer is released with its matching `*_buffer_free()` export;
+an empty sequence is a successful observation. `None` is always a failed MT5
+query, even when `last_error()` happens to report success; it is never treated
+as an empty snapshot. Required graph fields missing from a namedtuple or mapping are an ABI
+error. Optional fields are represented by `known_fields`, so zero is never an
+absent-value sentinel. Seconds-only MT5 timestamps are converted to signed
+Unix milliseconds with range checks.
+
+The active [`orders_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersget_py)
+and [`positions_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5positionsget_py)
+selectors follow the documented MT5 overloads: at most one of `symbol`,
+`group`, or `ticket` is sent to the server. `POSITION_IDENTIFIER` is a local
+post-filter because it is not a `positions_get()` selector. History requests
+always query a bounded `from/to` window with an optional server-side `group`;
+order/deal ticket and position filters are applied locally to the returned
+evidence. History deals distinguish `DEAL_TICKET`, `DEAL_ORDER`, and
+`DEAL_POSITION_ID` instead of overloading one ambiguous `ticket` field; see
+the [`history_deals_get()`](https://www.mql5.com/en/docs/python_metatrader5/mt5historydealsget_py)
+overloads.
+
+The public history window is inclusive and millisecond-precise. Because the
+MetaTrader history selectors are defined in whole seconds, the bridge expands
+the Python query to a second-aligned superset (`floor(from_msc)` through
+`ceil(to_msc)`) and then applies the exact millisecond filter after converting
+the records to POD snapshots. History orders are filtered by `time_done_msc`
+(their completion/execution time), not by `time_setup_msc`; history deals are
+filtered by `time_msc`. This prevents records from an adjacent millisecond
+window from becoming reconciliation evidence.
+
+The snapshots retain the evidence needed by reconciliation: orders keep
+`ticket`, `position_id`, `position_by_id`, state/reason, volumes, prices,
+setup/done/expiration timestamps, symbol/comment, and external ID; positions
+keep ticket/`POSITION_IDENTIFIER`, type/reason, volume, prices, profit/swap,
+update timestamps, symbol/comment, and external ID; deals keep ticket,
+`DEAL_ORDER`, `DEAL_POSITION_ID`, entry/type/reason, volume/price,
+profit/commission/swap/fee, time, symbol/comment, and external ID. Consumers
+must key history by identifiers rather than array order or the last response
+element.
+
 The C++ facade exposes these operations as `Client::account_info()`,
 `Client::symbol_capabilities()`, and `Client::order_check()`. Namedtuple and
-mapping results are converted under the runtime mutex and GIL into POD values;
-no Python object crosses the ABI. Active orders, positions, history orders, and
-history deals remain subsequent Stage 1 slices so each observation contract can
-be tested independently. A public side-effecting `order_send` remains
-intentionally absent until the durable journal and reconciliation barrier in
-Stage 2 are implemented.
+mapping results are converted under runtime admission and the GIL into POD
+values; no Python object crosses the ABI. Each snapshot preserves
+all graph-relevant MT5 evidence instead of collapsing a response to one
+“latest” ticket. A public side-effecting `order_send` remains intentionally
+absent until the durable journal and reconciliation barrier are implemented.
+
+The managed lifecycle boundaries are recorded in
+[ADR-0006](adr/0006-managed-trade-lifecycle.md). `TradeGroupId`, `TradeId`,
+`OperationId`, and `CloseObligation` are domain identities above raw MT5
+evidence; they must never be inferred from one observation response.
 
 ## Quickstart scenarios
 
@@ -97,7 +153,26 @@ expose or invoke `order_send`; durable dispatch is a separate stage.
 
 ## Identity model
 
-The bridge owns two IDs:
+The managed runtime owns three logical levels:
+
+```text
+TradeGroupId / ExecutionPlanId
+  ├── TradeId
+  │   ├── OperationId OPEN
+  │   ├── OperationId CLOSE ...
+  │   └── CloseObligation
+  └── TradeId ...
+```
+
+- `TradeGroupId` identifies one signal or desired exposure plan.
+- `TradeId` identifies one independently managed logical allocation. On a
+  netting account it may be a virtual allocation rather than a separate
+  terminal position.
+- `OperationId` identifies one concrete side-effect attempt and is never reused
+  for a blind retry.
+- `CloseObligation` is the durable desired end state, not another attempt.
+
+The bridge's raw identity evidence remains separate:
 
 - `TradeId` — one logical lifecycle, possibly including open, partial fills,
   modifications, and close.
@@ -122,6 +197,29 @@ same field as `POSITION_TICKET`. Neither is the bridge's `TradeId`.
 backend can additionally correlate the request transaction with it. The bridge
 stores it with an explicit `TerminalSessionId`; it must never be correlated
 across terminal sessions or restarts.
+
+### Close obligations and managed policies
+
+A close obligation is satisfied only after reconciliation proves that the
+target exposure is gone. A timeout or connection error creates an ambiguous
+attempt and forbids a blind resend; a later attempt may target only the
+currently reconciled remainder with a new `OperationId`. `DONE_PARTIAL`,
+`POSITION_CLOSED`, and `INVALID_CLOSE_VOLUME` therefore require a fresh
+snapshot before the next decision.
+
+Timed trades persist their schedule in the journal:
+
+```text
+CloseSchedule::none()
+CloseSchedule::after(duration)  # anchored to the first confirmed fill
+CloseSchedule::at(absolute_utc)
+```
+
+After restart, an expired schedule resumes or creates its `CloseObligation`.
+Sliced entry/exit belongs to a separate `ExecutionPlan`/`ExecutionPlanner`,
+which may stop creating new `TradeId` values while continuing to manage those
+already created. Virtual strategy exits should be paired with a wider broker
+disaster stop when the risk policy requires protection from process loss.
 
 ## State and certainty
 

@@ -37,13 +37,15 @@ version-independent.
 - ABI 8 is checked by both `mt5bridge::Client` and the ctypes adapter before
   use. POD sizes and field offsets are compile-time assertions in `data.h` and
   `trade.h`; the additive trade observation surface has its own API version.
-- Calls that touch Python are serialized. Runtime-call admission checks the
-  lifecycle state under `g_mutex`, then releases that state mutex before taking
-  the interpreter mutex and calling Python. An in-flight admission counter
-  keeps the interpreter alive until the call completes; shutdown closes
-  admission and waits for that counter to reach zero before finalization.
-  Diagnostics are thread-local and are valid until the next call on the same
-  thread.
+- Steady-state calls that touch Python are serialized. Runtime-call admission
+  checks the lifecycle state under `g_mutex`, then releases that state mutex
+  before taking the interpreter mutex and calling Python. An in-flight
+  admission counter keeps the interpreter alive until the call completes;
+  shutdown closes admission and waits for that counter to reach zero before
+  finalization. `initialize()` and `shutdown()` are explicit lifecycle
+  exceptions because they transition interpreter ownership while holding the
+  lifecycle and interpreter mutexes. Diagnostics are thread-local and are
+  valid until the next call on the same thread.
 - Native callbacks run without the Python GIL or runtime mutex held. Exported
   operations catch C++ exceptions before returning through the C ABI.
 - The C++ client resolves the requested DLL to an absolute path and uses
@@ -108,6 +110,8 @@ Trade identity, raw access, and reconciliation stages are specified in
 [trade-api.md](trade-api.md) and [ADR-0004](adr/0004-trade-reconciliation.md).
 The runtime-call admission and shutdown barrier are specified in
 [ADR-0005](adr/0005-runtime-call-admission.md).
+The managed trade identity, close-obligation, scheduling, and exit-policy
+boundaries are specified in [ADR-0006](adr/0006-managed-trade-lifecycle.md).
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -141,22 +145,32 @@ worker process.
 ## Migration path
 
 1. Keep the current embedded-Python backend as the release path.
-2. Add typed raw observation methods and tests. The first Stage 1 slice now
-   covers account snapshots, symbol capabilities, and advisory `order_check`
-   through `trade.h`; active orders, positions, and history snapshots remain
-   subsequent bounded slices. Capability snapshots carry explicit known-field
-   masks, and no unmanaged public `order_send` is exposed.
-3. Add the durable dispatch journal and reconciliation graph described in
+2. Complete the typed raw observation surface in bounded slices: active orders,
+   positions, history orders, and history deals. The ABI exposes these
+   collection snapshots through matching C++ and ctypes facades. Keep every
+   MT5 ticket,
+   position identifier, order/deal link, reason, entry, volume, price, and
+   external id needed by the future graph. No unmanaged public `order_send` is
+   exposed.
+3. Add the internal trade graph and reconciliation worker. It must model
+   `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation` without
+   sending side effects.
+4. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
-   `order_send` and never resend after that barrier.
-4. Add the high-level TradeManager only after raw observations, journal
-   recovery, and identity rules are covered by fake-runtime tests. Side-effecting
-   methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
-5. If startup/reliability requires process isolation, introduce a transport
+   `order_send` and never resend after that barrier. Admission and the durable
+   dispatch boundary must be designed together.
+5. Add the high-level asynchronous `TradeManager` only after raw observations,
+   journal recovery, and identity rules are covered by fake-runtime tests.
+   Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
+6. Add timed close obligations, then a separate execution planner for sliced
+   entry/exit. Slicing must not be hidden inside a single-trade manager.
+7. Add hybrid virtual/broker exit policies and a risk engine only after the
+   lifecycle and reconciliation invariants are executable.
+8. If startup/reliability requires process isolation, introduce a transport
    implementation behind the same C ABI; do not duplicate business methods.
-6. Add a native or alternate MT5 backend only behind a backend interface after
+9. Add a native or alternate MT5 backend only behind a backend interface after
    measuring lifecycle, error, and compatibility behavior.
-7. After realtime ABI stabilization, ship an external runtime ZIP, split the
+10. After realtime ABI stabilization, ship an external runtime ZIP, split the
    bootstrap/core DLLs, and then produce the self-extracting artifact described
    by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
 

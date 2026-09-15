@@ -19,7 +19,7 @@ be explicit before durable dispatch is introduced.
 
 ## Decision
 
-All Python/MT5 operations enter through `RuntimeCallAdmission`:
+All steady-state Python/MT5 operations enter through `RuntimeCallAdmission`:
 
 1. Lock `g_mutex` and require `RuntimeState::running`.
 2. Increment the in-flight call count while still holding `g_mutex`.
@@ -40,14 +40,18 @@ admitted call completes, so its destructor can decrement the count. New calls
 are rejected after the state transition; already admitted calls finish before
 finalization.
 
-Initialization remains a lifecycle transition serialized by `g_mutex` and
-`g_python_mutex`; it cannot race shutdown because the state mutex is held from
-the initial interpreter setup through the transition to `running`.
+`initialize()` and `shutdown()` are explicit lifecycle exceptions. They are
+serialized by `g_mutex` and `g_python_mutex`; initialization cannot race
+shutdown because the state mutex is held from the initial interpreter setup
+through the transition to `running`, while shutdown first closes admission and
+waits for admitted steady-state calls.
 
 ## Invariants
 
-- No Python/MT5 call holds `g_mutex` while waiting on terminal IPC or executing
-  Python code.
+- No admitted steady-state Python/MT5 call holds `g_mutex` while waiting on
+  terminal IPC or executing Python code.
+- Lifecycle transitions may hold `g_mutex` with `g_python_mutex` while changing
+  interpreter ownership; they are not admitted steady-state calls.
 - At most one thread executes Python/MT5 code at a time.
 - Finalization starts only after the in-flight admission count reaches zero.
 - Calls arriving after `shutting_down` receive a deterministic lifecycle

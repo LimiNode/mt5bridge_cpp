@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -43,9 +44,14 @@ struct AccountKey {
 
 /// \brief Builds an account key from a typed account observation.
 /// \param info Account snapshot returned by the bridge.
-/// \return Account key with a bounded copy of the server field.
+/// \return Account key with a bounded copy of the server field, or an invalid
+/// key when the server/login known-field bits are absent.
 inline AccountKey make_account_key(const Mt5AccountInfo &info) {
     AccountKey key;
+    constexpr std::uint64_t required_fields = MT5BRIDGE_ACCOUNT_KNOWN_SERVER |
+                                              MT5BRIDGE_ACCOUNT_KNOWN_LOGIN;
+    if ((info.known_fields & required_fields) != required_fields)
+        return key;
     std::size_t length = 0;
     while (length < sizeof(info.server) && info.server[length] != '\0')
         ++length;
@@ -90,6 +96,17 @@ struct ObservationWindow {
     /// \brief Tests whether the range is representable and ordered.
     /// \return True for a non-negative inclusive range.
     bool valid() const { return from_msc >= 0 && to_msc >= from_msc; }
+};
+
+/// \struct ObservationCoverage
+/// \brief Associates one history window with the revision that observed it.
+struct ObservationCoverage {
+    ObservationWindow window; ///< Inclusive history range.
+    std::uint64_t revision = 0; ///< Accepted graph revision carrying this range.
+
+    /// \brief Tests whether both the range and its provenance are usable.
+    /// \return True when the window is valid and has a non-zero revision.
+    bool valid() const { return revision != 0 && window.valid(); }
 };
 
 /// \enum ObservationApplyStatus
@@ -157,10 +174,30 @@ public:
     /// \return Monotonically increasing revision number.
     std::uint64_t revision() const { return revision_; }
 
+    /// \brief Returns the latest revision that observed one domain.
+    /// \param domain Exactly one supported observation domain.
+    /// \return Domain revision, or zero when never observed or the mask is not singular.
+    std::uint64_t domain_revision(ObservationDomain domain) const {
+        switch (domain) {
+        case ObservationDomain::active_orders:
+            return active_orders_revision_;
+        case ObservationDomain::positions:
+            return positions_revision_;
+        case ObservationDomain::history_orders:
+            return history_orders_revision_;
+        case ObservationDomain::history_deals:
+            return history_deals_revision_;
+        default:
+            return 0;
+        }
+    }
+
     /// \brief Applies one account-scoped snapshot atomically.
     /// \param batch Snapshot vectors, coverage metadata, and account identity.
     /// \return Admission status and the current graph revision.
     /// \note If staging allocates successfully, all graph changes commit together.
+    ///       Domain revisions and history coverage receive the same commit revision
+    ///       as the accepted batch.
     ObservationApplyResult apply(const ObservationBatch &batch) {
         if (!batch.account.valid())
             return {ObservationApplyStatus::invalid_account, revision_};
@@ -177,39 +214,48 @@ public:
             observes(batch.observed_domains, ObservationDomain::history_orders);
         const bool observe_history_deals =
             observes(batch.observed_domains, ObservationDomain::history_deals);
+        const std::uint64_t next_revision = revision_ + 1;
 
         AccountKey next_account;
         if (!bound_)
             next_account = batch.account;
 
         std::map<std::uint64_t, Mt5OrderSnapshot> next_active_orders;
-        if (replace_active_orders && !make_unique_map(batch.active_orders, &next_active_orders))
+        if (replace_active_orders &&
+            !make_unique_map(batch.active_orders, &next_active_orders, kOrderGraphFields))
             return {ObservationApplyStatus::invalid_evidence, revision_};
 
         std::map<std::uint64_t, Mt5PositionSnapshot> next_positions;
-        if (replace_positions && !make_unique_map(batch.positions, &next_positions))
+        if (replace_positions &&
+            !make_unique_map(batch.positions, &next_positions, kPositionGraphFields))
             return {ObservationApplyStatus::invalid_evidence, revision_};
 
         std::map<std::uint64_t, Mt5HistoryOrderSnapshot> next_history_orders;
-        std::vector<ObservationWindow> next_history_order_coverage;
+        std::vector<ObservationCoverage> next_history_order_coverage;
         if (observe_history_orders) {
             next_history_orders = history_orders_;
             next_history_order_coverage = history_order_coverage_;
-            if (!merge_unique_map(batch.history_orders, &next_history_orders))
+            const auto required_fields = kOrderGraphFields |
+                (batch.history_orders_window ? MT5BRIDGE_ORDER_KNOWN_TIME_DONE : 0);
+            if (!merge_unique_map(batch.history_orders, &next_history_orders, required_fields))
                 return {ObservationApplyStatus::invalid_evidence, revision_};
             if (batch.history_orders_window)
-                add_coverage(&next_history_order_coverage, *batch.history_orders_window);
+                add_coverage(&next_history_order_coverage,
+                             {*batch.history_orders_window, next_revision});
         }
 
         std::map<std::uint64_t, Mt5DealSnapshot> next_history_deals;
-        std::vector<ObservationWindow> next_history_deal_coverage;
+        std::vector<ObservationCoverage> next_history_deal_coverage;
         if (observe_history_deals) {
             next_history_deals = history_deals_;
             next_history_deal_coverage = history_deal_coverage_;
-            if (!merge_unique_map(batch.history_deals, &next_history_deals))
+            const auto required_fields = kDealGraphFields |
+                (batch.history_deals_window ? MT5BRIDGE_DEAL_KNOWN_TIME : 0);
+            if (!merge_unique_map(batch.history_deals, &next_history_deals, required_fields))
                 return {ObservationApplyStatus::invalid_evidence, revision_};
             if (batch.history_deals_window)
-                add_coverage(&next_history_deal_coverage, *batch.history_deals_window);
+                add_coverage(&next_history_deal_coverage,
+                             {*batch.history_deals_window, next_revision});
         }
 
         if (!bound_) {
@@ -228,13 +274,22 @@ public:
             history_deals_.swap(next_history_deals);
             history_deal_coverage_.swap(next_history_deal_coverage);
         }
+        if (replace_active_orders)
+            active_orders_revision_ = next_revision;
+        if (replace_positions)
+            positions_revision_ = next_revision;
+        if (observe_history_orders)
+            history_orders_revision_ = next_revision;
+        if (observe_history_deals)
+            history_deals_revision_ = next_revision;
         bound_ = true;
-        ++revision_;
+        revision_ = next_revision;
         return {ObservationApplyStatus::accepted, revision_};
     }
 
     /// \brief Removes all evidence while retaining the account scope.
     /// \return New graph revision.
+    /// \note Clearing invalidates all domain freshness revisions and history coverage.
     std::uint64_t clear_evidence() {
         active_orders_.clear();
         positions_.clear();
@@ -242,6 +297,10 @@ public:
         history_deals_.clear();
         history_order_coverage_.clear();
         history_deal_coverage_.clear();
+        active_orders_revision_ = 0;
+        positions_revision_ = 0;
+        history_orders_revision_ = 0;
+        history_deals_revision_ = 0;
         ++revision_;
         return revision_;
     }
@@ -266,16 +325,34 @@ public:
         return values(history_deals_);
     }
 
-    /// \brief Returns merged history-order coverage windows.
-    /// \return Copy of inclusive ranges queried for history orders.
-    std::vector<ObservationWindow> history_orders_coverage() const {
+    /// \brief Returns revision-tagged history-order coverage windows.
+    /// \return Copy of inclusive ranges and the revisions that observed them.
+    std::vector<ObservationCoverage> history_orders_coverage() const {
         return history_order_coverage_;
     }
 
-    /// \brief Returns merged history-deal coverage windows.
-    /// \return Copy of inclusive ranges queried for history deals.
-    std::vector<ObservationWindow> history_deals_coverage() const {
+    /// \brief Returns revision-tagged history-deal coverage windows.
+    /// \return Copy of inclusive ranges and the revisions that observed them.
+    std::vector<ObservationCoverage> history_deals_coverage() const {
         return history_deal_coverage_;
+    }
+
+    /// \brief Tests whether history orders cover a range after a baseline revision.
+    /// \param window Inclusive history range to prove.
+    /// \param since_revision Only observations newer than this revision count.
+    /// \return True when the complete range is covered by post-baseline evidence.
+    bool history_orders_covered(ObservationWindow window,
+                                std::uint64_t since_revision) const {
+        return coverage_covers(history_order_coverage_, window, since_revision);
+    }
+
+    /// \brief Tests whether history deals cover a range after a baseline revision.
+    /// \param window Inclusive history range to prove.
+    /// \param since_revision Only observations newer than this revision count.
+    /// \return True when the complete range is covered by post-baseline evidence.
+    bool history_deals_covered(ObservationWindow window,
+                               std::uint64_t since_revision) const {
+        return coverage_covers(history_deal_coverage_, window, since_revision);
     }
 
     /// \brief Finds active orders linked to a position identifier.
@@ -335,6 +412,17 @@ private:
         static_cast<std::uint32_t>(ObservationDomain::history_orders) |
         static_cast<std::uint32_t>(ObservationDomain::history_deals);
 
+    /// \brief Known fields required to retain and link order evidence.
+    static constexpr std::uint64_t kOrderGraphFields =
+        MT5BRIDGE_ORDER_KNOWN_TICKET | MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
+    /// \brief Known fields required to retain and link position evidence.
+    static constexpr std::uint64_t kPositionGraphFields =
+        MT5BRIDGE_POSITION_KNOWN_TICKET | MT5BRIDGE_POSITION_KNOWN_IDENTIFIER;
+    /// \brief Known fields required to retain and link deal evidence.
+    static constexpr std::uint64_t kDealGraphFields =
+        MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+        MT5BRIDGE_DEAL_KNOWN_POSITION_ID;
+
     template <typename T>
     static std::vector<T> values(const std::map<std::uint64_t, T> &source) {
         std::vector<T> result;
@@ -359,10 +447,12 @@ private:
 
     template <typename T>
     static bool make_unique_map(const std::vector<T> &source,
-                                std::map<std::uint64_t, T> *target) {
+                                std::map<std::uint64_t, T> *target,
+                                std::uint64_t required_fields) {
         target->clear();
         for (const auto &value : source) {
-            if (value.ticket == 0 || !target->emplace(value.ticket, value).second)
+            if (value.ticket == 0 || (value.known_fields & required_fields) != required_fields ||
+                !target->emplace(value.ticket, value).second)
                 return false;
         }
         return true;
@@ -370,9 +460,10 @@ private:
 
     template <typename T>
     static bool merge_unique_map(const std::vector<T> &source,
-                                 std::map<std::uint64_t, T> *target) {
+                                 std::map<std::uint64_t, T> *target,
+                                 std::uint64_t required_fields) {
         std::map<std::uint64_t, T> incoming;
-        if (!make_unique_map(source, &incoming))
+        if (!make_unique_map(source, &incoming, required_fields))
             return false;
         for (const auto &entry : incoming)
             (*target)[entry.first] = entry.second;
@@ -423,25 +514,68 @@ private:
         return records_in_window(batch);
     }
 
-    static void add_coverage(std::vector<ObservationWindow> *coverage,
-                             ObservationWindow window) {
-        coverage->push_back(window);
+    static bool touches(const ObservationWindow &left, const ObservationWindow &right) {
+        if (right.from_msc <= left.to_msc)
+            return true;
+        return left.to_msc != std::numeric_limits<std::int64_t>::max() &&
+               right.from_msc == left.to_msc + 1;
+    }
+
+    static void add_coverage(std::vector<ObservationCoverage> *coverage,
+                             ObservationCoverage value) {
+        coverage->push_back(value);
         std::sort(coverage->begin(), coverage->end(),
+                  [](const ObservationCoverage &left, const ObservationCoverage &right) {
+                      if (left.revision != right.revision)
+                          return left.revision < right.revision;
+                      if (left.window.from_msc != right.window.from_msc)
+                          return left.window.from_msc < right.window.from_msc;
+                      return left.window.to_msc < right.window.to_msc;
+                  });
+        std::vector<ObservationCoverage> merged;
+        merged.reserve(coverage->size());
+        for (const auto &current : *coverage) {
+            if (merged.empty() || current.revision != merged.back().revision ||
+                !touches(merged.back().window, current.window)) {
+                merged.push_back(current);
+            } else if (current.window.to_msc > merged.back().window.to_msc) {
+                merged.back().window.to_msc = current.window.to_msc;
+            }
+        }
+        coverage->swap(merged);
+    }
+
+    static bool coverage_covers(const std::vector<ObservationCoverage> &coverage,
+                                ObservationWindow requested,
+                                std::uint64_t since_revision) {
+        if (!requested.valid())
+            return false;
+        std::vector<ObservationWindow> candidates;
+        for (const auto &entry : coverage) {
+            if (entry.revision <= since_revision || !entry.window.valid() ||
+                entry.window.to_msc < requested.from_msc ||
+                entry.window.from_msc > requested.to_msc)
+                continue;
+            candidates.push_back(entry.window);
+        }
+        std::sort(candidates.begin(), candidates.end(),
                   [](const ObservationWindow &left, const ObservationWindow &right) {
                       if (left.from_msc != right.from_msc)
                           return left.from_msc < right.from_msc;
                       return left.to_msc < right.to_msc;
                   });
-        std::vector<ObservationWindow> merged;
-        merged.reserve(coverage->size());
-        for (const auto &current : *coverage) {
-            if (merged.empty() || current.from_msc > merged.back().to_msc) {
-                merged.push_back(current);
-            } else if (current.to_msc > merged.back().to_msc) {
-                merged.back().to_msc = current.to_msc;
-            }
+        std::int64_t cursor = requested.from_msc;
+        for (const auto &candidate : candidates) {
+            if (candidate.to_msc < cursor)
+                continue;
+            if (candidate.from_msc > cursor)
+                return false;
+            if (candidate.to_msc >= requested.to_msc ||
+                candidate.to_msc == std::numeric_limits<std::int64_t>::max())
+                return true;
+            cursor = candidate.to_msc + 1;
         }
-        coverage->swap(merged);
+        return false;
     }
 
     template <typename Predicate>
@@ -461,8 +595,12 @@ private:
     std::map<std::uint64_t, Mt5PositionSnapshot> positions_;
     std::map<std::uint64_t, Mt5HistoryOrderSnapshot> history_orders_;
     std::map<std::uint64_t, Mt5DealSnapshot> history_deals_;
-    std::vector<ObservationWindow> history_order_coverage_;
-    std::vector<ObservationWindow> history_deal_coverage_;
+    std::uint64_t active_orders_revision_ = 0;
+    std::uint64_t positions_revision_ = 0;
+    std::uint64_t history_orders_revision_ = 0;
+    std::uint64_t history_deals_revision_ = 0;
+    std::vector<ObservationCoverage> history_order_coverage_;
+    std::vector<ObservationCoverage> history_deal_coverage_;
 };
 
 } // namespace mt5bridge

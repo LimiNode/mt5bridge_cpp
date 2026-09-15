@@ -11,6 +11,14 @@
 
 namespace {
 
+constexpr std::uint64_t kOrderGraphFields =
+    MT5BRIDGE_ORDER_KNOWN_TICKET | MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
+constexpr std::uint64_t kPositionGraphFields =
+    MT5BRIDGE_POSITION_KNOWN_TICKET | MT5BRIDGE_POSITION_KNOWN_IDENTIFIER;
+constexpr std::uint64_t kDealGraphFields =
+    MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+    MT5BRIDGE_DEAL_KNOWN_POSITION_ID;
+
 /// \brief Fails the test with an actionable message.
 /// \param condition Expected condition.
 /// \param message Failure description.
@@ -33,11 +41,14 @@ mt5bridge::AccountKey account(const char *server, std::uint64_t login) {
 /// \param time_done_msc Completion time used by history coverage checks.
 /// \return Minimal typed order evidence.
 Mt5OrderSnapshot order(std::uint64_t ticket, std::uint64_t position_id,
-                       std::int64_t time_done_msc = 1500) {
+                       std::int64_t time_done_msc = 1500,
+                       std::uint64_t known_fields =
+                           kOrderGraphFields | MT5BRIDGE_ORDER_KNOWN_TIME_DONE) {
     Mt5OrderSnapshot value{};
     value.ticket = ticket;
     value.position_id = position_id;
     value.time_done_msc = time_done_msc;
+    value.known_fields = known_fields;
     return value;
 }
 
@@ -45,10 +56,12 @@ Mt5OrderSnapshot order(std::uint64_t ticket, std::uint64_t position_id,
 /// \param ticket MT5 position ticket.
 /// \param identifier MT5 position identifier.
 /// \return Minimal typed position evidence.
-Mt5PositionSnapshot position(std::uint64_t ticket, std::uint64_t identifier) {
+Mt5PositionSnapshot position(std::uint64_t ticket, std::uint64_t identifier,
+                             std::uint64_t known_fields = kPositionGraphFields) {
     Mt5PositionSnapshot value{};
     value.ticket = ticket;
     value.identifier = identifier;
+    value.known_fields = known_fields;
     return value;
 }
 
@@ -59,12 +72,15 @@ Mt5PositionSnapshot position(std::uint64_t ticket, std::uint64_t identifier) {
 /// \param time_msc Deal time used by history coverage checks.
 /// \return Minimal typed deal evidence.
 Mt5DealSnapshot deal(std::uint64_t ticket, std::uint64_t order_ticket,
-                     std::uint64_t position_id, std::int64_t time_msc = 1500) {
+                     std::uint64_t position_id, std::int64_t time_msc = 1500,
+                     std::uint64_t known_fields =
+                         kDealGraphFields | MT5BRIDGE_DEAL_KNOWN_TIME) {
     Mt5DealSnapshot value{};
     value.ticket = ticket;
     value.order_ticket = order_ticket;
     value.position_id = position_id;
     value.time_msc = time_msc;
+    value.known_fields = known_fields;
     return value;
 }
 
@@ -78,9 +94,15 @@ int main() {
         const char server[] = "Demo-Trade";
         std::copy(std::begin(server), std::end(server), info.server);
         info.login = 42;
+        info.known_fields = MT5BRIDGE_ACCOUNT_KNOWN_SERVER |
+                            MT5BRIDGE_ACCOUNT_KNOWN_LOGIN;
         const auto key = mt5bridge::make_account_key(info);
         require(key.valid() && key.server == "Demo-Trade" && key.login == 42,
                 "account key conversion lost identity");
+        auto incomplete_info = info;
+        incomplete_info.known_fields &= ~MT5BRIDGE_ACCOUNT_KNOWN_LOGIN;
+        require(!mt5bridge::make_account_key(incomplete_info).valid(),
+                "account key ignored missing known_fields bits");
 
         const auto active_domain = mt5bridge::ObservationDomain::active_orders;
         const auto position_domain = mt5bridge::ObservationDomain::positions;
@@ -126,9 +148,15 @@ int main() {
         require(graph.positions_for_identifier(700).size() == 1,
                 "position identifier lookup is incorrect");
         require(graph.history_orders_coverage().size() == 1 &&
-                    graph.history_orders_coverage()[0].from_msc == 1000 &&
-                    graph.history_orders_coverage()[0].to_msc == 2000,
+                    graph.history_orders_coverage()[0].window.from_msc == 1000 &&
+                    graph.history_orders_coverage()[0].window.to_msc == 2000 &&
+                    graph.history_orders_coverage()[0].revision == 1,
                 "history-order coverage was not recorded");
+        require(graph.domain_revision(active_domain) == 1 &&
+                    graph.domain_revision(position_domain) == 1 &&
+                    graph.domain_revision(history_order_domain) == 1 &&
+                    graph.domain_revision(history_deal_domain) == 1,
+                "initial domain revisions are incorrect");
 
         // An observed active domain is authoritative: an empty result clears
         // it, while the omitted positions domain remains unchanged.
@@ -137,7 +165,9 @@ int main() {
         active_refresh.observed_domains = active_domain;
         const auto second = graph.apply(active_refresh);
         require(second.accepted() && second.revision == 2 && graph.active_orders().empty() &&
-                    graph.positions().size() == 1,
+                    graph.positions().size() == 1 &&
+                    graph.domain_revision(active_domain) == 2 &&
+                    graph.domain_revision(position_domain) == 1,
                 "authoritative active refresh did not replace the namespace");
 
         mt5bridge::ObservationBatch position_refresh;
@@ -145,11 +175,13 @@ int main() {
         position_refresh.observed_domains = position_domain;
         const auto third = graph.apply(position_refresh);
         require(third.accepted() && third.revision == 3 && graph.positions().empty() &&
-                    graph.history_deals().size() == 2,
+                    graph.history_deals().size() == 2 &&
+                    graph.domain_revision(position_domain) == 3 &&
+                    graph.domain_revision(history_deal_domain) == 1,
                 "authoritative position refresh changed the wrong namespace");
 
         // History is positive evidence: an overlapping window upserts records
-        // and merges coverage without clearing earlier records.
+        // and retains revision provenance without clearing earlier records.
         mt5bridge::ObservationBatch history_update;
         history_update.account = key;
         history_update.observed_domains = history_deal_domain;
@@ -157,10 +189,19 @@ int main() {
         history_update.history_deals = {deal(30, 10, 700, 1800)};
         const auto fourth = graph.apply(history_update);
         require(fourth.accepted() && fourth.revision == 4 && graph.history_deals().size() == 2 &&
-                    graph.history_deals_coverage().size() == 1 &&
-                    graph.history_deals_coverage()[0].from_msc == 1000 &&
-                    graph.history_deals_coverage()[0].to_msc == 2500,
-                "history upsert or coverage merge is incorrect");
+                    graph.history_deals_coverage().size() == 2 &&
+                    graph.history_deals_coverage()[0].window.from_msc == 1000 &&
+                    graph.history_deals_coverage()[0].window.to_msc == 2000 &&
+                    graph.history_deals_coverage()[0].revision == 1 &&
+                    graph.history_deals_coverage()[1].window.from_msc == 1500 &&
+                    graph.history_deals_coverage()[1].window.to_msc == 2500 &&
+                    graph.history_deals_coverage()[1].revision == 4 &&
+                    graph.domain_revision(history_deal_domain) == 4,
+                "history upsert or coverage provenance is incorrect");
+        require(graph.history_deals_covered({1500, 2500}, 3) &&
+                    !graph.history_deals_covered({1000, 2500}, 3) &&
+                    !graph.history_deals_covered({1500, 2500}, 4),
+                "history coverage freshness proof is incorrect");
 
         mt5bridge::ObservationBatch positive_only;
         positive_only.account = key;
@@ -168,7 +209,8 @@ int main() {
         positive_only.history_deals = {deal(32, 20, 700, 0)};
         const auto fifth = graph.apply(positive_only);
         require(fifth.accepted() && fifth.revision == 5 && graph.history_deals().size() == 3 &&
-                    graph.history_deals_coverage().size() == 1,
+                    graph.history_deals_coverage().size() == 2 &&
+                    graph.domain_revision(history_deal_domain) == 5,
                 "positive history evidence without coverage was rejected incorrectly");
 
         mt5bridge::ObservationBatch foreign;
@@ -210,6 +252,49 @@ int main() {
                     duplicate_history_result.revision == 5 && graph.history_deals().size() == 3,
                 "duplicate history ticket was accepted");
 
+        mt5bridge::ObservationBatch missing_order_fields;
+        missing_order_fields.account = key;
+        missing_order_fields.observed_domains = active_domain;
+        missing_order_fields.active_orders = {
+            order(42, 700, 1500, MT5BRIDGE_ORDER_KNOWN_TICKET)};
+        const auto missing_order = graph.apply(missing_order_fields);
+        require(missing_order.status == mt5bridge::ObservationApplyStatus::invalid_evidence &&
+                    missing_order.revision == 5,
+                "order graph fields were not required");
+
+        mt5bridge::ObservationBatch missing_position_fields;
+        missing_position_fields.account = key;
+        missing_position_fields.observed_domains = position_domain;
+        missing_position_fields.positions = {
+            position(501, 701, MT5BRIDGE_POSITION_KNOWN_TICKET)};
+        const auto missing_position = graph.apply(missing_position_fields);
+        require(missing_position.status == mt5bridge::ObservationApplyStatus::invalid_evidence &&
+                    missing_position.revision == 5,
+                "position graph fields were not required");
+
+        mt5bridge::ObservationBatch missing_order_time;
+        missing_order_time.account = key;
+        missing_order_time.observed_domains = history_order_domain;
+        missing_order_time.history_orders_window = mt5bridge::ObservationWindow{1000, 2000};
+        missing_order_time.history_orders = {
+            order(44, 700, 1500, kOrderGraphFields)};
+        const auto missing_order_timestamp = graph.apply(missing_order_time);
+        require(missing_order_timestamp.status ==
+                        mt5bridge::ObservationApplyStatus::invalid_evidence &&
+                    missing_order_timestamp.revision == 5,
+                "history order time field was not required for coverage");
+
+        mt5bridge::ObservationBatch missing_deal_time;
+        missing_deal_time.account = key;
+        missing_deal_time.observed_domains = history_deal_domain;
+        missing_deal_time.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+        missing_deal_time.history_deals = {
+            deal(43, 10, 700, 1500, kDealGraphFields)};
+        const auto missing_deal = graph.apply(missing_deal_time);
+        require(missing_deal.status == mt5bridge::ObservationApplyStatus::invalid_evidence &&
+                    missing_deal.revision == 5,
+                "history deal time field was not required for coverage");
+
         mt5bridge::ObservationBatch missing_domain;
         missing_domain.account = key;
         missing_domain.active_orders = {order(50, 700)};
@@ -250,7 +335,11 @@ int main() {
                 "invalid constructor account leaked into graph scope");
 
         require(graph.clear_evidence() == 6 && graph.bound() && graph.history_deals().empty() &&
-                    graph.history_deals_coverage().empty(),
+                    graph.history_deals_coverage().empty() &&
+                    graph.domain_revision(active_domain) == 0 &&
+                    graph.domain_revision(position_domain) == 0 &&
+                    graph.domain_revision(history_deal_domain) == 0 &&
+                    !graph.history_deals_covered({1000, 2000}, 0),
                 "clear did not retain account scope or clear coverage");
         std::cout << "observation graph checks passed\n";
         return EXIT_SUCCESS;

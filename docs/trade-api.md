@@ -124,13 +124,24 @@ evidence; they must never be inferred from one observation response.
 The C++ header [`reconciliation.hpp`](../include/mt5bridge/reconciliation.hpp)
 provides `mt5bridge::ObservationGraph` for the next stage. It accepts batches
 of the typed snapshots together with an immutable `(server, login)`
-`AccountKey` and explicit `ObservationDomain` bits. `login == 0` is rejected.
+`AccountKey` and explicit `ObservationDomain` bits. `login == 0` is rejected,
+and `make_account_key()` requires the account server/login `known_fields` bits.
 Active orders and positions are authoritative full snapshots when their domain
 is marked observed; an empty vector therefore clears that namespace, while an
 omitted domain leaves it unchanged. History orders and deals are positive
 ticket-keyed evidence. Non-empty filtered history evidence may omit coverage;
 an empty history result must include a valid window, and supplied windows are
-retained as merged inclusive coverage only for account-wide unfiltered reads.
+retained as revision-tagged inclusive coverage only for account-wide unfiltered
+reads. Coverage entries from different revisions are never merged without
+preserving their provenance; `history_*_coverage()` returns
+`ObservationCoverage` entries rather than naked windows.
+
+Graph identity fields are also fail-closed: orders require known ticket and
+`ORDER_POSITION_ID`, positions require known ticket and
+`POSITION_IDENTIFIER`, and deals require known ticket, `DEAL_ORDER`, and
+`DEAL_POSITION_ID`. When a history coverage window is supplied, the native
+history time field must be marked known as well. Known zero values remain
+usable; an unset known bit is never replaced by a default zero.
 
 The graph exposes deterministic, provenance-preserving links for
 `ORDER_POSITION_ID`, `DEAL_ORDER`, `DEAL_POSITION_ID`, and
@@ -141,10 +152,15 @@ The graph is intentionally observation-only: it does not call MetaTrader,
 generate managed `TradeId`/`OperationId` values, persist a journal, or invoke
 `order_send`. An unbound graph adopts the first valid account; a different
 account is rejected atomically, so account-switch evidence can never be mixed
-into the existing graph. Invalid primary tickets fail closed. Every accepted
-batch advances a monotonic revision, duplicate primary tickets are rejected,
-and `clear_evidence()` retains the account scope while removing records and
-coverage. The graph is single-owner state; callers must serialize access.
+into the existing graph. Invalid primary tickets and missing graph-identity
+`known_fields` fail closed. Every accepted batch advances a monotonic global
+revision and updates only the observed domains' revisions. Use
+`domain_revision()` for active/position freshness, and use the revision-tagged
+`history_*_coverage()` or `history_*_covered(window, since_revision)` for
+baseline-aware history absence proofs. Positive history evidence without a
+coverage window does not prove absence. `clear_evidence()` retains the account
+scope while removing records, coverage, and freshness metadata. The graph is
+single-owner state; callers must serialize access.
 
 ## Quickstart scenarios
 

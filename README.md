@@ -177,9 +177,11 @@ typed snapshots into `mt5bridge::ObservationGraph`. It scopes evidence by
 `(server, login)`, keeps active/history namespaces separate, and exposes
 deterministic provenance-preserving order/deal/position links. Mark complete
 active domains explicitly; an observed empty active snapshot clears that
-namespace, while history observations retain their coverage windows. The graph
-never calls MT5 or sends an order; durable journal and managed
-`TradeId`/`OperationId` association remain the next stage.
+namespace, while history observations retain revision-tagged coverage windows.
+Use the domain revision and baseline-aware history coverage helpers before
+treating absence as evidence. The graph never calls MT5 or sends an order;
+durable journal and managed `TradeId`/`OperationId` association remain the next
+stage.
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

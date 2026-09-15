@@ -157,9 +157,12 @@ worker process.
    exposed.
 3. Build the observation-only account-scoped graph and reconciliation worker.
    The current `ObservationGraph` stores deterministic ticket-keyed evidence
-   and explicit order/deal/position links without side effects. A later
-   journal layer may associate `TradeGroupId`, `TradeId`, `OperationId`, and
-   `CloseObligation`; the graph must not infer them from raw snapshots.
+   and explicit order/deal/position links without side effects. Its global
+   revision is supplemented by per-domain freshness and revision-tagged
+   history coverage, so a later worker can prove post-baseline absence without
+   treating stale evidence as current. A later journal layer may associate
+   `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation`; the graph
+   must not infer them from raw snapshots.
 4. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable

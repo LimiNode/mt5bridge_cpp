@@ -12,4 +12,5 @@
 #include <mt5bridge/abi.h>
 #include <mt5bridge/data.h>
 #include <mt5bridge/trade.h>
+#include <mt5bridge/reconciliation.hpp>
 #include <mt5bridge/client.hpp>

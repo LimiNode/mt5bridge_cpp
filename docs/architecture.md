@@ -112,6 +112,9 @@ The runtime-call admission and shutdown barrier are specified in
 [ADR-0005](adr/0005-runtime-call-admission.md).
 The managed trade identity, close-obligation, scheduling, and exit-policy
 boundaries are specified in [ADR-0006](adr/0006-managed-trade-lifecycle.md).
+The read-only account-scoped evidence graph is specified in
+[ADR-0007](adr/0007-observation-graph.md) and exposed by
+`include/mt5bridge/reconciliation.hpp`.
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -152,9 +155,14 @@ worker process.
    position identifier, order/deal link, reason, entry, volume, price, and
    external id needed by the future graph. No unmanaged public `order_send` is
    exposed.
-3. Add the internal trade graph and reconciliation worker. It must model
-   `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation` without
-   sending side effects.
+3. Build the observation-only account-scoped graph and reconciliation worker.
+   The current `ObservationGraph` stores deterministic ticket-keyed evidence
+   and explicit order/deal/position links without side effects. Its global
+   revision is supplemented by per-domain freshness and revision-tagged
+   history coverage, so a later worker can prove post-baseline absence without
+   treating stale evidence as current. A later journal layer may associate
+   `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation`; the graph
+   must not infer them from raw snapshots.
 4. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable

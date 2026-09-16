@@ -231,28 +231,36 @@ public:
             return {ObservationApplyStatus::invalid_evidence, revision_};
 
         std::map<std::uint64_t, Mt5HistoryOrderSnapshot> next_history_orders;
+        std::map<std::uint64_t, std::uint64_t> next_history_order_evidence_revisions;
         std::vector<ObservationCoverage> next_history_order_coverage;
         if (observe_history_orders) {
             next_history_orders = history_orders_;
+            next_history_order_evidence_revisions = history_order_evidence_revisions_;
             next_history_order_coverage = history_order_coverage_;
             const auto required_fields = kOrderGraphFields |
                 (batch.history_orders_window ? MT5BRIDGE_ORDER_KNOWN_TIME_DONE : 0);
             if (!merge_unique_map(batch.history_orders, &next_history_orders, required_fields))
                 return {ObservationApplyStatus::invalid_evidence, revision_};
+            mark_evidence_revision(batch.history_orders, next_revision,
+                                   &next_history_order_evidence_revisions);
             if (batch.history_orders_window)
                 add_coverage(&next_history_order_coverage,
                              {*batch.history_orders_window, next_revision});
         }
 
         std::map<std::uint64_t, Mt5DealSnapshot> next_history_deals;
+        std::map<std::uint64_t, std::uint64_t> next_history_deal_evidence_revisions;
         std::vector<ObservationCoverage> next_history_deal_coverage;
         if (observe_history_deals) {
             next_history_deals = history_deals_;
+            next_history_deal_evidence_revisions = history_deal_evidence_revisions_;
             next_history_deal_coverage = history_deal_coverage_;
             const auto required_fields = kDealGraphFields |
                 (batch.history_deals_window ? MT5BRIDGE_DEAL_KNOWN_TIME : 0);
             if (!merge_unique_map(batch.history_deals, &next_history_deals, required_fields))
                 return {ObservationApplyStatus::invalid_evidence, revision_};
+            mark_evidence_revision(batch.history_deals, next_revision,
+                                   &next_history_deal_evidence_revisions);
             if (batch.history_deals_window)
                 add_coverage(&next_history_deal_coverage,
                              {*batch.history_deals_window, next_revision});
@@ -268,10 +276,12 @@ public:
             positions_.swap(next_positions);
         if (observe_history_orders) {
             history_orders_.swap(next_history_orders);
+            history_order_evidence_revisions_.swap(next_history_order_evidence_revisions);
             history_order_coverage_.swap(next_history_order_coverage);
         }
         if (observe_history_deals) {
             history_deals_.swap(next_history_deals);
+            history_deal_evidence_revisions_.swap(next_history_deal_evidence_revisions);
             history_deal_coverage_.swap(next_history_deal_coverage);
         }
         if (replace_active_orders)
@@ -295,6 +305,8 @@ public:
         positions_.clear();
         history_orders_.clear();
         history_deals_.clear();
+        history_order_evidence_revisions_.clear();
+        history_deal_evidence_revisions_.clear();
         history_order_coverage_.clear();
         history_deal_coverage_.clear();
         active_orders_revision_ = 0;
@@ -323,6 +335,20 @@ public:
     /// \return Copy of accumulated history-deal evidence.
     std::vector<Mt5DealSnapshot> history_deals() const {
         return values(history_deals_);
+    }
+
+    /// \brief Returns the revision that last accepted one history order ticket.
+    /// \param ticket MT5 history order ticket.
+    /// \return Evidence revision, or zero when the ticket is absent.
+    std::uint64_t history_order_evidence_revision(std::uint64_t ticket) const {
+        return evidence_revision(history_order_evidence_revisions_, ticket);
+    }
+
+    /// \brief Returns the revision that last accepted one history deal ticket.
+    /// \param ticket MT5 history deal ticket.
+    /// \return Evidence revision, or zero when the ticket is absent.
+    std::uint64_t history_deal_evidence_revision(std::uint64_t ticket) const {
+        return evidence_revision(history_deal_evidence_revisions_, ticket);
     }
 
     /// \brief Returns revision-tagged history-order coverage windows.
@@ -470,6 +496,21 @@ private:
         return true;
     }
 
+    template <typename T>
+    static void mark_evidence_revision(
+        const std::vector<T> &source, std::uint64_t revision,
+        std::map<std::uint64_t, std::uint64_t> *revisions) {
+        for (const auto &value : source)
+            (*revisions)[value.ticket] = revision;
+    }
+
+    static std::uint64_t evidence_revision(
+        const std::map<std::uint64_t, std::uint64_t> &revisions,
+        std::uint64_t ticket) {
+        const auto found = revisions.find(ticket);
+        return found == revisions.end() ? 0 : found->second;
+    }
+
     static bool records_in_window(const ObservationBatch &batch) {
         if (batch.history_orders_window) {
             for (const auto &value : batch.history_orders) {
@@ -595,6 +636,8 @@ private:
     std::map<std::uint64_t, Mt5PositionSnapshot> positions_;
     std::map<std::uint64_t, Mt5HistoryOrderSnapshot> history_orders_;
     std::map<std::uint64_t, Mt5DealSnapshot> history_deals_;
+    std::map<std::uint64_t, std::uint64_t> history_order_evidence_revisions_;
+    std::map<std::uint64_t, std::uint64_t> history_deal_evidence_revisions_;
     std::uint64_t active_orders_revision_ = 0;
     std::uint64_t positions_revision_ = 0;
     std::uint64_t history_orders_revision_ = 0;

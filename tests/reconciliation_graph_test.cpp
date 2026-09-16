@@ -157,6 +157,8 @@ int main() {
                     graph.domain_revision(history_order_domain) == 1 &&
                     graph.domain_revision(history_deal_domain) == 1,
                 "initial domain revisions are incorrect");
+        require(graph.history_deal_evidence_revision(31) == 1,
+                "initial history ticket revision is incorrect");
 
         // An observed active domain is authoritative: an empty result clears
         // it, while the omitted positions domain remains unchanged.
@@ -196,7 +198,9 @@ int main() {
                     graph.history_deals_coverage()[1].window.from_msc == 1500 &&
                     graph.history_deals_coverage()[1].window.to_msc == 2500 &&
                     graph.history_deals_coverage()[1].revision == 4 &&
-                    graph.domain_revision(history_deal_domain) == 4,
+                    graph.domain_revision(history_deal_domain) == 4 &&
+                    graph.history_deal_evidence_revision(30) == 4 &&
+                    graph.history_deal_evidence_revision(31) == 1,
                 "history upsert or coverage provenance is incorrect");
         require(graph.history_deals_covered({1500, 2500}, 3) &&
                     !graph.history_deals_covered({1000, 2500}, 3) &&
@@ -210,7 +214,8 @@ int main() {
         const auto fifth = graph.apply(positive_only);
         require(fifth.accepted() && fifth.revision == 5 && graph.history_deals().size() == 3 &&
                     graph.history_deals_coverage().size() == 2 &&
-                    graph.domain_revision(history_deal_domain) == 5,
+                    graph.domain_revision(history_deal_domain) == 5 &&
+                    graph.history_deal_evidence_revision(32) == 5,
                 "positive history evidence without coverage was rejected incorrectly");
 
         mt5bridge::ObservationBatch foreign;
@@ -339,6 +344,7 @@ int main() {
                     graph.domain_revision(active_domain) == 0 &&
                     graph.domain_revision(position_domain) == 0 &&
                     graph.domain_revision(history_deal_domain) == 0 &&
+                    graph.history_deal_evidence_revision(30) == 0 &&
                     !graph.history_deals_covered({1000, 2000}, 0),
                 "clear did not retain account scope or clear coverage");
         std::cout << "observation graph checks passed\n";

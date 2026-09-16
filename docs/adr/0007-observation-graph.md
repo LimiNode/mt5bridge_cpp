@@ -60,7 +60,9 @@ never merged into an untagged range. `history_*_covered(window, since_revision)`
 counts only coverage with `revision > since_revision`, so it can be used for a
 baseline-aware negative-evidence proof. Positive history evidence without a
 window updates the history domain revision but does not prove absence over any
-time range.
+time range. Each accepted history ticket also records its own evidence
+revision; reconciliation must use that per-ticket revision rather than treating
+an older retained ticket as newly observed.
 
 `clear_evidence()` removes records and coverage, retains the account scope, and
 resets all domain freshness revisions to zero. Staging uses temporary maps,

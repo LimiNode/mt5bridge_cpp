@@ -31,6 +31,11 @@ if(BUILD_TESTING)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
     add_test(NAME mt5bridge_reconciliation_graph
              COMMAND mt5bridge_reconciliation_graph_test)
+    add_executable(mt5bridge_reconciliation_worker_test
+                   tests/reconciliation_worker_test.cpp)
+    target_link_libraries(mt5bridge_reconciliation_worker_test PRIVATE mt5bridge::client)
+    add_test(NAME mt5bridge_reconciliation_worker
+             COMMAND mt5bridge_reconciliation_worker_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)

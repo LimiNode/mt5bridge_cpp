@@ -166,7 +166,7 @@ state; callers must serialize access.
 
 ## Observation-only reconciliation predicates
 
-The header [`reconciliation_worker.hpp`](../include/mt5bridge/reconciliation_worker.hpp)
+The header [`reconciliation_engine.hpp`](../include/mt5bridge/reconciliation_engine.hpp)
 provides `ReconciliationEngine` for evaluating evidence without side effects.
 Capture a `ReconciliationBaseline` before the operation, collect fresh
 authoritative observations into `ObservationGraph`, and evaluate explicit
@@ -176,7 +176,7 @@ predicates such as `require_active_order()`, `require_position_absent()`, or
 Active and position predicates require a domain revision newer than the
 baseline. History presence predicates require a per-ticket evidence revision
 newer than the baseline history revision; an old ticket retained in the
-positive-evidence map is not reused. A bounded history presence predicate also
+positive-evidence map is not reused. Any bounded history predicate also
 requires the corresponding native millisecond time bit; missing time is
 reported as contradictory evidence rather than matched using a default value.
 History absence predicates require a complete revision-filtered coverage
@@ -187,9 +187,16 @@ The evaluator returns `PENDING`, `CONFIRMED`, `NOT_OBSERVED`,
 `ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or `AMBIGUOUS`. It does not call the
 runtime, write a journal, or invoke `order_send`. `TRADE_EVENT_GAP` is supplied
 explicitly by a caller whose hint/event stream was incomplete; it is not
-invented from a snapshot alone. A future `ReconciliationWorker` may own the
-snapshot collection loop, but must be the component that builds authoritative
-account-wide batches.
+invented from a snapshot alone. A fresh mismatch remains `PENDING` until the
+caller sets `ReconciliationRequest::deadline_expired`; only then can it become
+`NOT_OBSERVED`. That outcome is unresolved and must not stop later
+reconciliation. Use `ReconciliationResult::resolved()` only for
+`CONFIRMED`, `ACCOUNT_MISMATCH`, and `AMBIGUOUS`. A future
+`ReconciliationWorker` may own the snapshot collection loop, but must be the
+component that builds authoritative account-wide batches. The result counters
+separate stale/missing observations from contradictory evidence, so callers
+can continue polling while `PENDING` without interpreting a missing predicate
+as a final outcome.
 
 ## Quickstart scenarios
 

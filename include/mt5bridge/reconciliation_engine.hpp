@@ -1,6 +1,6 @@
 #pragma once
 
-/// \file reconciliation_worker.hpp
+/// \file reconciliation_engine.hpp
 /// \brief Defines observation-only reconciliation predicates over the graph.
 
 #include "reconciliation.hpp"
@@ -19,7 +19,7 @@ namespace mt5bridge {
 enum class ReconciliationOutcome {
     pending,          ///< Required post-baseline observations are not ready.
     confirmed,        ///< Every predicate has matching post-baseline evidence.
-    not_observed,     ///< Fresh authoritative evidence disproves a presence predicate.
+    not_observed,     ///< The deadline elapsed without satisfying every predicate.
     account_mismatch, ///< The graph and baseline do not share one account scope.
     trade_event_gap,  ///< An incomplete event hint stream still lacks fresh snapshots.
     ambiguous,        ///< Evidence is contradictory or the request is invalid.
@@ -29,9 +29,9 @@ enum class ReconciliationOutcome {
 /// \brief Explains the state selected by the predicate evaluator.
 enum class ReconciliationReason {
     none,                    ///< No additional diagnostic reason.
-    waiting_for_observation, ///< A required domain is not newer than the baseline.
-    evidence_missing,        ///< A fresh domain lacks a requested presence predicate.
-    contradictory_evidence,  ///< A fresh domain contains evidence requested absent.
+    waiting_for_observation, ///< Fresh evidence or a caller-owned deadline is pending.
+    evidence_missing,        ///< The caller's deadline elapsed without a match.
+    contradictory_evidence,  ///< Evidence is unusable or mutually inconsistent.
     account_mismatch,        ///< Account identities differ.
     trade_event_gap,         ///< Event hints were incomplete before fresh snapshots.
     invalid_request,         ///< Predicate, baseline, or account input is malformed.
@@ -84,7 +84,9 @@ inline ReconciliationBaseline capture_reconciliation_baseline(
 struct ReconciliationPredicate {
     ReconciliationPredicateKind kind = ReconciliationPredicateKind::active_order_present;
     std::uint64_t ticket = 0; ///< Primary MT5 ticket asserted by the predicate.
-    std::optional<ObservationWindow> history_window; ///< Required for history absence.
+    /// \brief Optional time window for a history predicate.
+    /// \note Required for history absence and optional for history presence.
+    std::optional<ObservationWindow> history_window;
 };
 
 /// \brief Requires a post-baseline active order ticket.
@@ -157,6 +159,7 @@ struct ReconciliationRequest {
     ReconciliationBaseline baseline; ///< Revisions captured before the operation.
     std::vector<ReconciliationPredicate> predicates; ///< Assertions to evaluate.
     bool trade_event_gap = false; ///< Event hints were incomplete and need snapshots.
+    bool deadline_expired = false; ///< The caller's bounded observation deadline elapsed.
 };
 
 /// \struct ReconciliationResult
@@ -168,12 +171,16 @@ struct ReconciliationResult {
     std::size_t predicate_count = 0; ///< Number of requested predicates.
     std::size_t satisfied_predicates = 0; ///< Predicates currently satisfied.
     std::size_t pending_predicates = 0; ///< Predicates lacking fresh evidence.
-    std::size_t not_observed_predicates = 0; ///< Presence predicates absent in fresh data.
-    std::size_t contradictory_predicates = 0; ///< Predicates contradicted by fresh data.
+    std::size_t missing_predicates = 0; ///< Predicates not currently satisfied.
+    std::size_t contradictory_predicates = 0; ///< Predicates with unusable or conflicting evidence.
 
-    /// \brief Tests whether evaluation reached a non-pending state.
-    /// \return True for every outcome except pending.
-    bool terminal() const { return outcome != ReconciliationOutcome::pending; }
+    /// \brief Tests whether the result is settled by the current evidence.
+    /// \return True only for confirmed, account-mismatch, or ambiguous results.
+    bool resolved() const {
+        return outcome == ReconciliationOutcome::confirmed ||
+               outcome == ReconciliationOutcome::account_mismatch ||
+               outcome == ReconciliationOutcome::ambiguous;
+    }
 };
 
 /// \class ReconciliationEngine
@@ -217,7 +224,7 @@ public:
         const auto history_orders = graph.history_orders();
         const auto history_deals = graph.history_deals();
         bool has_pending = false;
-        bool has_not_observed = false;
+        bool has_missing = false;
         bool has_contradiction = false;
 
         for (const auto &predicate : request.predicates) {
@@ -236,11 +243,11 @@ public:
                 if (found == must_be_present) {
                     ++result.satisfied_predicates;
                 } else if (must_be_present) {
-                    ++result.not_observed_predicates;
-                    has_not_observed = true;
+                    ++result.missing_predicates;
+                    has_missing = true;
                 } else {
-                    ++result.contradictory_predicates;
-                    has_contradiction = true;
+                    ++result.missing_predicates;
+                    has_missing = true;
                 }
                 continue;
             }
@@ -258,11 +265,11 @@ public:
                 if (found == must_be_present) {
                     ++result.satisfied_predicates;
                 } else if (must_be_present) {
-                    ++result.not_observed_predicates;
-                    has_not_observed = true;
+                    ++result.missing_predicates;
+                    has_missing = true;
                 } else {
-                    ++result.contradictory_predicates;
-                    has_contradiction = true;
+                    ++result.missing_predicates;
+                    has_missing = true;
                 }
                 continue;
             }
@@ -289,8 +296,8 @@ public:
                                graph.history_orders_covered(*predicate.history_window,
                                                             request.baseline
                                                                 .history_orders_revision)) {
-                        ++result.not_observed_predicates;
-                        has_not_observed = true;
+                        ++result.missing_predicates;
+                        has_missing = true;
                     } else {
                         ++result.pending_predicates;
                         has_pending = true;
@@ -302,11 +309,13 @@ public:
                     if (!covered) {
                         ++result.pending_predicates;
                         has_pending = true;
-                    } else if (fresh_record && record &&
-                               (!record_time_known ||
-                                in_window(record->time_done_msc, *predicate.history_window))) {
+                    } else if (fresh_record && record && !record_time_known) {
                         ++result.contradictory_predicates;
                         has_contradiction = true;
+                    } else if (fresh_record && record &&
+                               in_window(record->time_done_msc, *predicate.history_window)) {
+                        ++result.missing_predicates;
+                        has_missing = true;
                     } else {
                         ++result.satisfied_predicates;
                     }
@@ -336,8 +345,8 @@ public:
                                graph.history_deals_covered(*predicate.history_window,
                                                            request.baseline
                                                                .history_deals_revision)) {
-                        ++result.not_observed_predicates;
-                        has_not_observed = true;
+                        ++result.missing_predicates;
+                        has_missing = true;
                     } else {
                         ++result.pending_predicates;
                         has_pending = true;
@@ -349,11 +358,13 @@ public:
                     if (!covered) {
                         ++result.pending_predicates;
                         has_pending = true;
-                    } else if (fresh_record && record &&
-                               (!record_time_known ||
-                                in_window(record->time_msc, *predicate.history_window))) {
+                    } else if (fresh_record && record && !record_time_known) {
                         ++result.contradictory_predicates;
                         has_contradiction = true;
+                    } else if (fresh_record && record &&
+                               in_window(record->time_msc, *predicate.history_window)) {
+                        ++result.missing_predicates;
+                        has_missing = true;
                     } else {
                         ++result.satisfied_predicates;
                     }
@@ -371,9 +382,12 @@ public:
                                                      : ReconciliationOutcome::pending;
             result.reason = request.trade_event_gap ? ReconciliationReason::trade_event_gap
                                                     : ReconciliationReason::waiting_for_observation;
-        } else if (has_not_observed) {
+        } else if (has_missing && request.deadline_expired) {
             result.outcome = ReconciliationOutcome::not_observed;
             result.reason = ReconciliationReason::evidence_missing;
+        } else if (has_missing) {
+            result.outcome = ReconciliationOutcome::pending;
+            result.reason = ReconciliationReason::waiting_for_observation;
         } else {
             result.outcome = ReconciliationOutcome::confirmed;
             result.reason = ReconciliationReason::none;

@@ -117,7 +117,7 @@ The read-only account-scoped evidence graph is specified in
 `include/mt5bridge/reconciliation.hpp`.
 The observation-only predicate evaluator is specified in
 [ADR-0008](adr/0008-observation-reconciliation.md) and exposed by
-`include/mt5bridge/reconciliation_worker.hpp`.
+`include/mt5bridge/reconciliation_engine.hpp`.
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -158,7 +158,8 @@ worker process.
    position identifier, order/deal link, reason, entry, volume, price, and
    external id needed by the future graph. No unmanaged public `order_send` is
    exposed.
-3. Build the observation-only account-scoped graph and reconciliation worker.
+3. Build the observation-only account-scoped graph and reconciliation
+   evaluator.
    The current `ObservationGraph` stores deterministic ticket-keyed evidence
    and explicit order/deal/position links without side effects. Its global
    revision is supplemented by per-domain freshness and revision-tagged
@@ -166,8 +167,9 @@ worker process.
    treating stale evidence as current. A later journal layer may associate
    `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation`; the graph
    must not infer them from raw snapshots. `ReconciliationEngine` currently
-   evaluates explicit predicates over this evidence; snapshot collection and
-   durable operation state remain separate.
+   evaluates explicit predicates over this evidence and leaves deadline
+   ownership to its caller; snapshot collection and durable operation state
+   remain separate.
 4. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable

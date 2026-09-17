@@ -1,4 +1,4 @@
-/// \file reconciliation_worker_test.cpp
+/// \file reconciliation_engine_test.cpp
 /// \brief Exercises observation-only reconciliation predicates and freshness.
 
 #include <mt5bridge.hpp>
@@ -105,7 +105,7 @@ int main() {
         const auto active_result =
             mt5bridge::ReconciliationEngine::evaluate(graph, active_request);
         require(active_result.outcome == mt5bridge::ReconciliationOutcome::confirmed &&
-                    active_result.satisfied_predicates == 2,
+                    active_result.satisfied_predicates == 2 && active_result.resolved(),
                 "fresh active evidence was not confirmed");
 
         const auto active_baseline = mt5bridge::capture_reconciliation_baseline(graph);
@@ -127,6 +127,11 @@ int main() {
                     stale_position.reason ==
                         mt5bridge::ReconciliationReason::waiting_for_observation,
                 "stale position evidence was treated as fresh");
+        stale_position_request.deadline_expired = true;
+        require(mt5bridge::ReconciliationEngine::evaluate(graph, stale_position_request).outcome ==
+                    mt5bridge::ReconciliationOutcome::pending,
+                "stale position evidence became unresolved without a fresh snapshot");
+        stale_position_request.deadline_expired = false;
 
         require(graph.apply(active_batch(key, {}, {})).accepted(),
                 "authoritative disappearance observation was rejected");
@@ -157,9 +162,15 @@ int main() {
         stale_history.predicates = {
             mt5bridge::require_history_deal(30, mt5bridge::ObservationWindow{1000, 2000}),
         };
+        const auto stale_history_result =
+            mt5bridge::ReconciliationEngine::evaluate(graph, stale_history);
+        require(stale_history_result.outcome == mt5bridge::ReconciliationOutcome::pending &&
+                    stale_history_result.missing_predicates == 1,
+                "old history ticket was reused as post-baseline evidence");
+        stale_history.deadline_expired = true;
         require(mt5bridge::ReconciliationEngine::evaluate(graph, stale_history).outcome ==
                     mt5bridge::ReconciliationOutcome::not_observed,
-                "old history ticket was reused as post-baseline evidence");
+                "stale history ticket did not become unresolved after the deadline");
 
         mt5bridge::ReconciliationRequest history_missing;
         history_missing.baseline = history_baseline;
@@ -168,8 +179,16 @@ int main() {
         };
         const auto missing_deal =
             mt5bridge::ReconciliationEngine::evaluate(graph, history_missing);
-        require(missing_deal.outcome == mt5bridge::ReconciliationOutcome::not_observed,
-                "fresh bounded history absence was not reported");
+        require(missing_deal.outcome == mt5bridge::ReconciliationOutcome::pending &&
+                    !missing_deal.resolved(),
+                "fresh bounded history absence became terminal before the deadline");
+        history_missing.deadline_expired = true;
+        const auto missing_deal_after_deadline =
+            mt5bridge::ReconciliationEngine::evaluate(graph, history_missing);
+        require(missing_deal_after_deadline.outcome ==
+                    mt5bridge::ReconciliationOutcome::not_observed &&
+                    !missing_deal_after_deadline.resolved(),
+                "bounded history absence did not become unresolved after the deadline");
 
         mt5bridge::ReconciliationRequest absent_deal;
         absent_deal.baseline = history_baseline;
@@ -218,8 +237,22 @@ int main() {
             mt5bridge::ReconciliationEngine::evaluate(graph, unknown_time);
         require(unknown_time_result.outcome == mt5bridge::ReconciliationOutcome::ambiguous &&
                     unknown_time_result.reason ==
-                        mt5bridge::ReconciliationReason::contradictory_evidence,
+                        mt5bridge::ReconciliationReason::contradictory_evidence &&
+                    unknown_time_result.resolved(),
                 "unknown history time did not fail closed for a bounded presence predicate");
+        require(graph.apply(history_deal_batch(key, mt5bridge::ObservationWindow{1000, 2000}, {}))
+                        .accepted(),
+                "history coverage for unknown-time absence was rejected");
+        mt5bridge::ReconciliationRequest unknown_time_absence;
+        unknown_time_absence.baseline = unknown_time_baseline;
+        unknown_time_absence.predicates = {
+            mt5bridge::require_history_deal_absent(40, {1000, 2000}),
+        };
+        const auto unknown_time_absence_result =
+            mt5bridge::ReconciliationEngine::evaluate(graph, unknown_time_absence);
+        require(unknown_time_absence_result.outcome ==
+                    mt5bridge::ReconciliationOutcome::ambiguous,
+                "unknown history time was treated as a bounded absence");
 
         const auto gap_baseline = mt5bridge::capture_reconciliation_baseline(graph);
         const bool coverage_fragments_accepted =
@@ -240,30 +273,50 @@ int main() {
 
         require(graph.apply(active_batch(key, {order(20, 700)}, {})).accepted(),
                 "active order refresh was rejected");
-        mt5bridge::ReconciliationRequest contradictory;
-        contradictory.baseline = history_baseline;
-        contradictory.predicates = {
+        mt5bridge::ReconciliationRequest active_absence;
+        active_absence.baseline = history_baseline;
+        active_absence.predicates = {
             mt5bridge::require_active_order_absent(20),
         };
-        require(mt5bridge::ReconciliationEngine::evaluate(graph, contradictory).outcome ==
-                    mt5bridge::ReconciliationOutcome::ambiguous,
-                "contradictory active evidence was not ambiguous");
+        const auto active_still_present =
+            mt5bridge::ReconciliationEngine::evaluate(graph, active_absence);
+        require(active_still_present.outcome == mt5bridge::ReconciliationOutcome::pending &&
+                    !active_still_present.resolved(),
+                "active absence mismatch became terminal before the deadline");
+        active_absence.deadline_expired = true;
+        const auto active_still_present_after_deadline =
+            mt5bridge::ReconciliationEngine::evaluate(graph, active_absence);
+        require(active_still_present_after_deadline.outcome ==
+                    mt5bridge::ReconciliationOutcome::not_observed &&
+                    !active_still_present_after_deadline.resolved(),
+                "active absence mismatch did not become unresolved after the deadline");
 
         mt5bridge::ReconciliationRequest event_gap;
         event_gap.baseline = mt5bridge::capture_reconciliation_baseline(graph);
         event_gap.trade_event_gap = true;
         event_gap.predicates = {mt5bridge::require_active_order(20)};
-        require(mt5bridge::ReconciliationEngine::evaluate(graph, event_gap).outcome ==
-                    mt5bridge::ReconciliationOutcome::trade_event_gap,
+        const auto event_gap_result =
+            mt5bridge::ReconciliationEngine::evaluate(graph, event_gap);
+        require(event_gap_result.outcome == mt5bridge::ReconciliationOutcome::trade_event_gap &&
+                    !event_gap_result.resolved(),
                 "event gap was hidden as ordinary pending state");
+        event_gap.deadline_expired = true;
+        const auto event_gap_after_deadline =
+            mt5bridge::ReconciliationEngine::evaluate(graph, event_gap);
+        require(event_gap_after_deadline.outcome ==
+                    mt5bridge::ReconciliationOutcome::trade_event_gap &&
+                    !event_gap_after_deadline.resolved(),
+                "event gap became resolved merely because the deadline elapsed");
 
         auto foreign_baseline = baseline;
         foreign_baseline.account = {"Other-Server", 42};
         mt5bridge::ReconciliationRequest mismatch;
         mismatch.baseline = foreign_baseline;
         mismatch.predicates = {mt5bridge::require_active_order(20)};
-        require(mt5bridge::ReconciliationEngine::evaluate(graph, mismatch).outcome ==
-                    mt5bridge::ReconciliationOutcome::account_mismatch,
+        const auto mismatch_result =
+            mt5bridge::ReconciliationEngine::evaluate(graph, mismatch);
+        require(mismatch_result.outcome == mt5bridge::ReconciliationOutcome::account_mismatch &&
+                    mismatch_result.resolved(),
                 "account mismatch was not isolated");
 
         mt5bridge::ReconciliationRequest invalid;

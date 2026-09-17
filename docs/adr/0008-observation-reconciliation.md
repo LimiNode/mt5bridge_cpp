@@ -93,5 +93,5 @@ queries as account-wide observations.
 `tests/reconciliation_engine_test.cpp` covers baseline capture, fresh active
 confirmation, stale-domain pending state, authoritative disappearance,
 revision-aware history presence/absence, stale history ticket rejection,
-contradictory evidence, account mismatch, invalid predicates, and event-gap
-handling.
+deadline-gated `NOT_OBSERVED`, contradictory evidence, account mismatch,
+invalid predicates, and event-gap handling.

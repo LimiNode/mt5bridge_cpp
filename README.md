@@ -193,7 +193,11 @@ apply fresh snapshots to the same graph, and evaluate explicit predicates with
 `AMBIGUOUS` without invoking `order_send`. The caller supplies
 `deadline_expired` when its bounded wait has elapsed; an unsatisfied fresh
 predicate remains `PENDING` before that point, and `NOT_OBSERVED` remains
-unresolved for later reconciliation.
+unresolved for later reconciliation. The observation-only coordinator and
+`DispatchConsistencyGate` add a synchronous provider seam and a pre-dispatch
+freshness check; `ready` never submits an order, starts a worker, or writes a
+journal. Their contract is recorded in
+[`docs/adr/0009-observation-coordinator.md`](docs/adr/0009-observation-coordinator.md).
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

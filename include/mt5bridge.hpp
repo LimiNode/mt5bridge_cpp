@@ -14,4 +14,5 @@
 #include <mt5bridge/trade.h>
 #include <mt5bridge/reconciliation.hpp>
 #include <mt5bridge/reconciliation_engine.hpp>
+#include <mt5bridge/reconciliation_coordinator.hpp>
 #include <mt5bridge/client.hpp>

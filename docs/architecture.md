@@ -118,6 +118,9 @@ The read-only account-scoped evidence graph is specified in
 The observation-only predicate evaluator is specified in
 [ADR-0008](adr/0008-observation-reconciliation.md) and exposed by
 `include/mt5bridge/reconciliation_engine.hpp`.
+The synchronous observation coordinator and pre-dispatch consistency gate are
+specified in [ADR-0009](adr/0009-observation-coordinator.md) and exposed by
+`include/mt5bridge/reconciliation_coordinator.hpp`.
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL

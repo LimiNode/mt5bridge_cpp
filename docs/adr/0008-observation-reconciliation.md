@@ -105,4 +105,5 @@ filtered queries as account-wide observations.
 confirmation, stale-domain pending state, authoritative disappearance,
 revision-aware history presence/absence, stale history ticket rejection,
 deadline-gated `NOT_OBSERVED`, contradictory evidence, account mismatch,
-invalid predicates, and event-gap handling.
+same-account graph provenance mismatch, explicit missing baselines, invalid
+predicates, and event-gap handling.

@@ -35,6 +35,7 @@ enum class ReconciliationReason {
     contradictory_evidence,  ///< Evidence is unusable or mutually inconsistent.
     account_mismatch,        ///< Account identities differ.
     graph_mismatch,          ///< Baseline belongs to another graph instance.
+    unresolved_operation,     ///< A prior operation remains unresolved.
     trade_event_gap,         ///< Event hints were incomplete before fresh snapshots.
     invalid_request,         ///< Predicate, baseline, or account input is malformed.
 };

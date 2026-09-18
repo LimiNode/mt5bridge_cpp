@@ -193,7 +193,14 @@ apply fresh snapshots to the same graph, and evaluate explicit predicates with
 `AMBIGUOUS` without invoking `order_send`. The caller supplies
 `deadline_expired` when its bounded wait has elapsed; an unsatisfied fresh
 predicate remains `PENDING` before that point, and `NOT_OBSERVED` remains
-unresolved for later reconciliation.
+unresolved for later reconciliation. The observation-only coordinator and
+`DispatchConsistencyGate` add a synchronous provider seam and a pre-dispatch
+freshness check. The coordinator rejects provider batches whose domains or
+windows do not exactly match the request and verifies account identity before
+and after collection. `ready` never submits an order, starts a worker, or
+writes a journal; it is not an atomic cross-domain MT5 snapshot proof. Their
+contract is recorded in
+[`docs/adr/0009-observation-coordinator.md`](docs/adr/0009-observation-coordinator.md).
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

@@ -161,7 +161,10 @@ baseline-aware history absence proofs. Positive history evidence without a
 coverage window does not prove absence. History tickets expose their own last
 evidence revision, so an old retained ticket cannot satisfy a post-baseline
 presence predicate. `clear_evidence()` retains the account scope while
-removing records, coverage, and freshness metadata. The graph is single-owner
+removing records, coverage, and freshness metadata. Every graph has a
+process-local `instance_id()`; `ObservationGraph` is non-copyable and
+non-movable, so this provenance cannot be confused with another graph that
+happens to use the same account and revision numbers. The graph is single-owner
 state; callers must serialize access.
 
 ## Observation-only reconciliation predicates
@@ -172,6 +175,15 @@ Capture a `ReconciliationBaseline` before the operation, collect fresh
 authoritative observations into `ObservationGraph`, and evaluate explicit
 predicates such as `require_active_order()`, `require_position_absent()`, or
 `require_history_deal_absent()`.
+
+Create the baseline only with `capture_reconciliation_baseline()`. The returned
+graph provenance and revision fields are read-only; `ReconciliationRequest`
+stores the baseline as `std::optional`, so a missing capture is explicit and
+cannot be confused with a default-invalid value. This keeps application code
+from editing one domain counter or reusing a baseline from another graph. A
+baseline from a different process-local graph produces `AMBIGUOUS` with
+`ReconciliationReason::graph_mismatch`. The future worker/journal owner should
+capture and retain this value itself.
 
 Active and position predicates require a domain revision newer than the
 baseline. History presence predicates require a per-ticket evidence revision

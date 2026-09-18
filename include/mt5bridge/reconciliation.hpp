@@ -6,18 +6,34 @@
 #include "trade.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
 namespace mt5bridge {
+
+namespace detail {
+
+/// \brief Allocates a process-local identity for one observation graph.
+/// \return Non-zero identity unique within the current process.
+inline std::uint64_t allocate_observation_graph_instance_id() {
+    static std::atomic<std::uint64_t> next_id{1};
+    const std::uint64_t id = next_id.fetch_add(1, std::memory_order_relaxed);
+    if (id == 0)
+        throw std::overflow_error("observation graph instance id exhausted");
+    return id;
+}
+
+} // namespace detail
 
 /// \struct AccountKey
 /// \brief Immutable terminal identity used to scope observed trade evidence.
@@ -154,13 +170,23 @@ struct ObservationApplyResult {
 class ObservationGraph {
 public:
     /// \brief Creates an unbound graph that adopts the first valid account.
-    ObservationGraph() = default;
+    ObservationGraph() : instance_id_(detail::allocate_observation_graph_instance_id()) {}
 
     /// \brief Creates a graph bound to one terminal account.
     /// \param account Immutable account identity to enforce.
     explicit ObservationGraph(AccountKey account)
-        : account_(account.valid() ? std::move(account) : AccountKey{}),
+        : instance_id_(detail::allocate_observation_graph_instance_id()),
+          account_(account.valid() ? std::move(account) : AccountKey{}),
           bound_(account_.valid()) {}
+
+    ObservationGraph(const ObservationGraph &) = delete;
+    ObservationGraph &operator=(const ObservationGraph &) = delete;
+    ObservationGraph(ObservationGraph &&) = delete;
+    ObservationGraph &operator=(ObservationGraph &&) = delete;
+
+    /// \brief Returns this graph's process-local provenance identity.
+    /// \return Non-zero identity that is not reusable after process restart.
+    std::uint64_t instance_id() const { return instance_id_; }
 
     /// \brief Returns whether the graph has an account scope.
     /// \return True after construction with a valid key or the first accepted batch.
@@ -629,6 +655,7 @@ private:
         return result;
     }
 
+    const std::uint64_t instance_id_;
     AccountKey account_;
     bool bound_ = false;
     std::uint64_t revision_ = 0;

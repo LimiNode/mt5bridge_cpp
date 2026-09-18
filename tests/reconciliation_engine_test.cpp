@@ -89,7 +89,9 @@ int main() {
         mt5bridge::ObservationGraph graph(key);
         const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
 
-        require(baseline.graph_revision == 0 && baseline.account == key,
+        require(baseline.valid() && baseline.graph_revision() == 0 &&
+                    baseline.graph_instance_id() == graph.instance_id() &&
+                    baseline.graph_instance_id() != 0 && baseline.account() == key,
                 "baseline did not capture the initial account scope");
 
         require(graph.apply(active_batch(key, {order(20, 700)}, {position(500, 700)}))
@@ -308,8 +310,10 @@ int main() {
                     !event_gap_after_deadline.resolved(),
                 "event gap became resolved merely because the deadline elapsed");
 
-        auto foreign_baseline = baseline;
-        foreign_baseline.account = {"Other-Server", 42};
+        const mt5bridge::AccountKey foreign_key{"Other-Server", 42};
+        mt5bridge::ObservationGraph foreign_graph(foreign_key);
+        const auto foreign_baseline =
+            mt5bridge::capture_reconciliation_baseline(foreign_graph);
         mt5bridge::ReconciliationRequest mismatch;
         mismatch.baseline = foreign_baseline;
         mismatch.predicates = {mt5bridge::require_active_order(20)};
@@ -318,6 +322,19 @@ int main() {
         require(mismatch_result.outcome == mt5bridge::ReconciliationOutcome::account_mismatch &&
                     mismatch_result.resolved(),
                 "account mismatch was not isolated");
+
+        mt5bridge::ObservationGraph same_account_graph(key);
+        const auto foreign_instance_baseline =
+            mt5bridge::capture_reconciliation_baseline(same_account_graph);
+        mt5bridge::ReconciliationRequest graph_mismatch;
+        graph_mismatch.baseline = foreign_instance_baseline;
+        graph_mismatch.predicates = {mt5bridge::require_active_order(20)};
+        const auto graph_mismatch_result =
+            mt5bridge::ReconciliationEngine::evaluate(graph, graph_mismatch);
+        require(graph_mismatch_result.outcome == mt5bridge::ReconciliationOutcome::ambiguous &&
+                    graph_mismatch_result.reason ==
+                        mt5bridge::ReconciliationReason::graph_mismatch,
+                "baseline from another same-account graph was reused");
 
         mt5bridge::ReconciliationRequest invalid;
         invalid.baseline = baseline;
@@ -330,7 +347,7 @@ int main() {
 
         mt5bridge::ObservationGraph unbound;
         mt5bridge::ReconciliationRequest invalid_unbound;
-        invalid_unbound.baseline.account = key;
+        invalid_unbound.baseline = baseline;
         invalid_unbound.predicates = {mt5bridge::require_active_order(0)};
         const auto invalid_unbound_result =
             mt5bridge::ReconciliationEngine::evaluate(unbound, invalid_unbound);
@@ -340,8 +357,7 @@ int main() {
                 "invalid predicate was hidden by an unbound graph");
 
         mt5bridge::ReconciliationRequest invalid_baseline;
-        invalid_baseline.baseline = baseline;
-        invalid_baseline.baseline.active_orders_revision = baseline.graph_revision + 1;
+        invalid_baseline.baseline = {};
         invalid_baseline.predicates = {mt5bridge::require_active_order(20)};
         const auto invalid_baseline_result =
             mt5bridge::ReconciliationEngine::evaluate(graph, invalid_baseline);

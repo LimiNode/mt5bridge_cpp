@@ -181,11 +181,14 @@ namespace, while history observations retain revision-tagged coverage windows.
 Use the domain revision and baseline-aware history coverage helpers before
 treating absence as evidence. The graph never calls MT5 or sends an order;
 durable journal and managed `TradeId`/`OperationId` association remain the next
-stage.
+stage. Each graph has a process-local `instance_id()` and is non-copyable; a
+`ReconciliationBaseline` captured from one graph cannot be reused with another
+graph, even when account and revision values happen to match.
 
 For pure observation reconciliation, capture a
-`ReconciliationBaseline`, apply fresh snapshots to the graph, and evaluate
-explicit predicates with `ReconciliationEngine`. This produces `PENDING`,
+`ReconciliationBaseline`, store it in the request's `std::optional` baseline,
+apply fresh snapshots to the same graph, and evaluate explicit predicates with
+`ReconciliationEngine`. This produces `PENDING`,
 `CONFIRMED`, `NOT_OBSERVED`, `ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or
 `AMBIGUOUS` without invoking `order_send`. The caller supplies
 `deadline_expired` when its bounded wait has elapsed; an unsatisfied fresh

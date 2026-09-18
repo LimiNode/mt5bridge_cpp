@@ -168,24 +168,36 @@ worker process.
    `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation`; the graph
    must not infer them from raw snapshots. `ReconciliationEngine` currently
    evaluates explicit predicates over this evidence and leaves deadline
-   ownership to its caller; snapshot collection and durable operation state
-   remain separate.
-4. Add the durable dispatch journal and reconciliation barrier described in
+   ownership to its caller. `ObservationGraph` instances carry a process-local
+   provenance identity and are non-copyable, so a baseline cannot silently move
+   to another owner. `ReconciliationBaseline` is captured through the graph
+   factory and exposes both that identity and revisions read-only. Requests carry
+   the baseline as `std::optional`, making absence explicit rather than a
+   default-invalid sentinel. A future worker/journal owner must retain the
+   captured value and evaluate it against the same graph instance. Snapshot
+   collection and durable operation state remain separate.
+4. Add an observation coordinator and pre-dispatch consistency gate. The
+   coordinator owns one graph loop, captures a baseline, collects authoritative
+   account-wide snapshots through the typed client, applies them, and invokes
+   the pure evaluator. The gate may return only evidence-based readiness or an
+   explicit unresolved state; this slice still has no `order_send`, journal,
+   worker thread, or side effect.
+5. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable
    dispatch boundary must be designed together.
-5. Add the high-level asynchronous `TradeManager` only after raw observations,
+6. Add the high-level asynchronous `TradeManager` only after raw observations,
    journal recovery, and identity rules are covered by fake-runtime tests.
    Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
-6. Add timed close obligations, then a separate execution planner for sliced
+7. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
-7. Add hybrid virtual/broker exit policies and a risk engine only after the
+8. Add hybrid virtual/broker exit policies and a risk engine only after the
    lifecycle and reconciliation invariants are executable.
-8. If startup/reliability requires process isolation, introduce a transport
+9. If startup/reliability requires process isolation, introduce a transport
    implementation behind the same C ABI; do not duplicate business methods.
-9. Add a native or alternate MT5 backend only behind a backend interface after
+10. Add a native or alternate MT5 backend only behind a backend interface after
    measuring lifecycle, error, and compatibility behavior.
-10. After realtime ABI stabilization, ship an external runtime ZIP, split the
+11. After realtime ABI stabilization, ship an external runtime ZIP, split the
    bootstrap/core DLLs, and then produce the self-extracting artifact described
    by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
 

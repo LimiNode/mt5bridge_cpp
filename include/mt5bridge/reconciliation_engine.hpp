@@ -119,7 +119,7 @@ inline ReconciliationPredicate require_position_absent(std::uint64_t ticket) {
 
 /// \brief Requires a history order ticket, optionally within a time window.
 /// \param ticket MT5 history order ticket.
-/// \param window Optional inclusive completion-time window for absence proof.
+/// \param window Optional inclusive completion-time window constraining the match.
 /// \return Presence predicate.
 inline ReconciliationPredicate require_history_order(
     std::uint64_t ticket, std::optional<ObservationWindow> window = std::nullopt) {
@@ -137,7 +137,7 @@ inline ReconciliationPredicate require_history_order_absent(
 
 /// \brief Requires a history deal ticket, optionally within a time window.
 /// \param ticket MT5 history deal ticket.
-/// \param window Optional inclusive deal-time window for absence proof.
+/// \param window Optional inclusive deal-time window constraining the match.
 /// \return Presence predicate.
 inline ReconciliationPredicate require_history_deal(
     std::uint64_t ticket, std::optional<ObservationWindow> window = std::nullopt) {

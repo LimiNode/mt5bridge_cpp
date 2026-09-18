@@ -173,6 +173,12 @@ authoritative observations into `ObservationGraph`, and evaluate explicit
 predicates such as `require_active_order()`, `require_position_absent()`, or
 `require_history_deal_absent()`.
 
+Create the baseline only with `capture_reconciliation_baseline()`. The returned
+revision fields are read-only; a default-constructed `ReconciliationBaseline`
+is invalid. This keeps application code from editing one domain counter and
+presenting it as a real graph capture. The future worker/journal owner should
+capture and retain this value itself.
+
 Active and position predicates require a domain revision newer than the
 baseline. History presence predicates require a per-ticket evidence revision
 newer than the baseline history revision; an old ticket retained in the

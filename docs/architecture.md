@@ -168,8 +168,10 @@ worker process.
    `TradeGroupId`, `TradeId`, `OperationId`, and `CloseObligation`; the graph
    must not infer them from raw snapshots. `ReconciliationEngine` currently
    evaluates explicit predicates over this evidence and leaves deadline
-   ownership to its caller; snapshot collection and durable operation state
-   remain separate.
+   ownership to its caller. `ReconciliationBaseline` is captured through the
+   graph factory and exposes revisions read-only; a future worker/journal
+   owner must retain that capture rather than accepting hand-built counters.
+   Snapshot collection and durable operation state remain separate.
 4. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable

@@ -18,7 +18,11 @@ not be reused as new evidence.
 `ReconciliationEngine` is a pure C++ consumer-side evaluator. A caller captures
 `ReconciliationBaseline` before an operation or observation cycle. The
 baseline contains the account identity, global graph revision, and last
-revision for every observation domain.
+revision for every observation domain. The baseline is an immutable value
+created by `capture_reconciliation_baseline()`; its revision fields are exposed
+read-only, so application code cannot manufacture a coherent-looking baseline
+by editing individual counters. A default-constructed baseline is invalid and
+is rejected by the evaluator.
 
 The caller then supplies explicit `ReconciliationPredicate` values:
 

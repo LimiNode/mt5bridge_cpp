@@ -34,6 +34,7 @@ enum class ReconciliationReason {
     evidence_missing,        ///< The caller's deadline elapsed without a match.
     contradictory_evidence,  ///< Evidence is unusable or mutually inconsistent.
     account_mismatch,        ///< Account identities differ.
+    graph_mismatch,          ///< Baseline belongs to another graph instance.
     trade_event_gap,         ///< Event hints were incomplete before fresh snapshots.
     invalid_request,         ///< Predicate, baseline, or account input is malformed.
 };
@@ -55,9 +56,6 @@ enum class ReconciliationPredicateKind {
 /// \brief Immutable graph revisions captured before an observation cycle.
 class ReconciliationBaseline {
 public:
-    /// \brief Creates an invalid baseline for default-constructed requests.
-    ReconciliationBaseline() = default;
-
     /// \brief Returns the account scope captured with the revisions.
     /// \return Immutable account identity.
     const AccountKey &account() const { return account_; }
@@ -65,6 +63,10 @@ public:
     /// \brief Returns the global graph revision at capture time.
     /// \return Global graph revision.
     std::uint64_t graph_revision() const { return graph_revision_; }
+
+    /// \brief Returns the graph provenance captured with the revisions.
+    /// \return Process-local graph instance identity.
+    std::uint64_t graph_instance_id() const { return graph_instance_id_; }
 
     /// \brief Returns the active-order domain revision at capture time.
     /// \return Active-order domain revision.
@@ -85,7 +87,8 @@ public:
     /// \brief Tests whether this baseline was captured from a valid graph.
     /// \return True only for an account-bound, internally ordered snapshot.
     bool valid() const {
-        return account_.valid() && active_orders_revision_ <= graph_revision_ &&
+        return account_.valid() && graph_instance_id_ != 0 &&
+               active_orders_revision_ <= graph_revision_ &&
                positions_revision_ <= graph_revision_ &&
                history_orders_revision_ <= graph_revision_ &&
                history_deals_revision_ <= graph_revision_;
@@ -95,12 +98,14 @@ private:
     friend ReconciliationBaseline capture_reconciliation_baseline(
         const ObservationGraph &graph);
 
-    ReconciliationBaseline(AccountKey account, std::uint64_t graph_revision,
+    ReconciliationBaseline(AccountKey account, std::uint64_t graph_instance_id,
+                           std::uint64_t graph_revision,
                            std::uint64_t active_orders_revision,
                            std::uint64_t positions_revision,
                            std::uint64_t history_orders_revision,
                            std::uint64_t history_deals_revision)
         : account_(std::move(account)),
+          graph_instance_id_(graph_instance_id),
           graph_revision_(graph_revision),
           active_orders_revision_(active_orders_revision),
           positions_revision_(positions_revision),
@@ -108,6 +113,7 @@ private:
           history_deals_revision_(history_deals_revision) {}
 
     AccountKey account_;
+    std::uint64_t graph_instance_id_ = 0;
     std::uint64_t graph_revision_ = 0;
     std::uint64_t active_orders_revision_ = 0;
     std::uint64_t positions_revision_ = 0;
@@ -121,7 +127,7 @@ private:
 inline ReconciliationBaseline capture_reconciliation_baseline(
     const ObservationGraph &graph) {
     return ReconciliationBaseline(
-        graph.account_key(), graph.revision(),
+        graph.account_key(), graph.instance_id(), graph.revision(),
         graph.domain_revision(ObservationDomain::active_orders),
         graph.domain_revision(ObservationDomain::positions),
         graph.domain_revision(ObservationDomain::history_orders),
@@ -205,7 +211,7 @@ inline ReconciliationPredicate require_history_deal_absent(
 /// \struct ReconciliationRequest
 /// \brief Groups a baseline and explicit observation predicates.
 struct ReconciliationRequest {
-    ReconciliationBaseline baseline; ///< Revisions captured before the operation.
+    std::optional<ReconciliationBaseline> baseline; ///< Capture before the operation.
     std::vector<ReconciliationPredicate> predicates; ///< Assertions to evaluate.
     bool trade_event_gap = false; ///< Event hints were incomplete and need snapshots.
     bool deadline_expired = false; ///< The caller's bounded observation deadline elapsed.
@@ -246,9 +252,10 @@ public:
         result.evaluated_revision = graph.revision();
         result.predicate_count = request.predicates.size();
 
-        if (!request.baseline.valid() || request.predicates.empty() ||
-            request.baseline.graph_revision() > graph.revision())
+        if (!request.baseline || !request.baseline->valid() || request.predicates.empty() ||
+            request.baseline->graph_revision() > graph.revision())
             return invalid(result);
+        const auto &baseline = *request.baseline;
         for (const auto &predicate : request.predicates) {
             if (!valid_predicate(predicate))
                 return invalid(result);
@@ -258,9 +265,14 @@ public:
             result.pending_predicates = result.predicate_count;
             return result;
         }
-        if (graph.account_key() != request.baseline.account()) {
+        if (graph.account_key() != baseline.account()) {
             result.outcome = ReconciliationOutcome::account_mismatch;
             result.reason = ReconciliationReason::account_mismatch;
+            return result;
+        }
+        if (graph.instance_id() != baseline.graph_instance_id()) {
+            result.outcome = ReconciliationOutcome::ambiguous;
+            result.reason = ReconciliationReason::graph_mismatch;
             return result;
         }
 
@@ -277,7 +289,7 @@ public:
             case ReconciliationPredicateKind::active_order_present:
             case ReconciliationPredicateKind::active_order_absent: {
                 if (graph.domain_revision(ObservationDomain::active_orders) <=
-                    request.baseline.active_orders_revision()) {
+                    baseline.active_orders_revision()) {
                     ++result.pending_predicates;
                     has_pending = true;
                     continue;
@@ -299,7 +311,7 @@ public:
             case ReconciliationPredicateKind::position_present:
             case ReconciliationPredicateKind::position_absent: {
                 if (graph.domain_revision(ObservationDomain::positions) <=
-                    request.baseline.positions_revision()) {
+                    baseline.positions_revision()) {
                     ++result.pending_predicates;
                     has_pending = true;
                     continue;
@@ -323,7 +335,7 @@ public:
                 const auto *record = find_ticket(history_orders, predicate.ticket);
                 const bool fresh_record =
                     graph.history_order_evidence_revision(predicate.ticket) >
-                    request.baseline.history_orders_revision();
+                    baseline.history_orders_revision();
                 const bool record_time_known =
                     record && has_field(record->known_fields, MT5BRIDGE_ORDER_KNOWN_TIME_DONE);
                 if (predicate.kind == ReconciliationPredicateKind::history_order_present) {
@@ -339,8 +351,7 @@ public:
                         has_contradiction = true;
                     } else if (predicate.history_window &&
                                graph.history_orders_covered(*predicate.history_window,
-                                                            request.baseline
-                                                                .history_orders_revision())) {
+                                                             baseline.history_orders_revision())) {
                         ++result.missing_predicates;
                         has_missing = true;
                     } else {
@@ -350,7 +361,7 @@ public:
                 } else {
                     const bool covered =
                         graph.history_orders_covered(*predicate.history_window,
-                                                     request.baseline.history_orders_revision());
+                                                      baseline.history_orders_revision());
                     if (!covered) {
                         ++result.pending_predicates;
                         has_pending = true;
@@ -372,7 +383,7 @@ public:
                 const auto *record = find_ticket(history_deals, predicate.ticket);
                 const bool fresh_record =
                     graph.history_deal_evidence_revision(predicate.ticket) >
-                    request.baseline.history_deals_revision();
+                    baseline.history_deals_revision();
                 const bool record_time_known =
                     record && has_field(record->known_fields, MT5BRIDGE_DEAL_KNOWN_TIME);
                 if (predicate.kind == ReconciliationPredicateKind::history_deal_present) {
@@ -388,8 +399,7 @@ public:
                         has_contradiction = true;
                     } else if (predicate.history_window &&
                                graph.history_deals_covered(*predicate.history_window,
-                                                           request.baseline
-                                                               .history_deals_revision())) {
+                                                            baseline.history_deals_revision())) {
                         ++result.missing_predicates;
                         has_missing = true;
                     } else {
@@ -399,7 +409,7 @@ public:
                 } else {
                     const bool covered =
                         graph.history_deals_covered(*predicate.history_window,
-                                                    request.baseline.history_deals_revision());
+                                                     baseline.history_deals_revision());
                     if (!covered) {
                         ++result.pending_predicates;
                         has_pending = true;

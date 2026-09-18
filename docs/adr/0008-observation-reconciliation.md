@@ -17,12 +17,17 @@ not be reused as new evidence.
 
 `ReconciliationEngine` is a pure C++ consumer-side evaluator. A caller captures
 `ReconciliationBaseline` before an operation or observation cycle. The
-baseline contains the account identity, global graph revision, and last
-revision for every observation domain. The baseline is an immutable value
-created by `capture_reconciliation_baseline()`; its revision fields are exposed
-read-only, so application code cannot manufacture a coherent-looking baseline
-by editing individual counters. A default-constructed baseline is invalid and
-is rejected by the evaluator.
+baseline contains the account identity, process-local graph provenance, global
+graph revision, and last revision for every observation domain. The baseline is
+an immutable value created by `capture_reconciliation_baseline()`; its
+provenance and revision fields are exposed read-only, so application code
+cannot manufacture a coherent-looking baseline by editing individual counters.
+`ReconciliationRequest` stores the baseline as `std::optional`; a missing
+capture is explicit and rejected by the evaluator. A baseline from another
+graph instance with the same account and revision counters is rejected as
+`AMBIGUOUS` with `ReconciliationReason::graph_mismatch`. Graph instances are
+non-copyable and non-movable, and the provenance is process-local rather than
+durable; a process restart invalidates every old baseline.
 
 The caller then supplies explicit `ReconciliationPredicate` values:
 
@@ -77,9 +82,9 @@ produce `AMBIGUOUS`. An explicitly reported incomplete event hint stream
 produces `TRADE_EVENT_GAP` while required fresh snapshots are still missing.
 
 The engine never calls Python/MT5, starts a worker thread, writes a journal,
-or invokes `order_send`. A future worker may collect authoritative snapshots
-and feed them to the graph, but application code must not treat filtered
-queries as account-wide observations.
+or invokes `order_send`. A future coordinator may collect authoritative
+snapshots and feed them to the graph, but application code must not treat
+filtered queries as account-wide observations.
 
 ## Consequences
 
@@ -89,6 +94,8 @@ queries as account-wide observations.
   coverage.
 - Account mismatch and event gaps remain explicit outcomes instead of being
   collapsed into ordinary absence.
+- Graph provenance is an in-memory guardrail, not a restart or persistence
+  mechanism.
 - Durable operation identity, deadlines, persistence, and side effects remain
   separate future stages.
 

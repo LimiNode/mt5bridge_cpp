@@ -183,6 +183,15 @@ treating absence as evidence. The graph never calls MT5 or sends an order;
 durable journal and managed `TradeId`/`OperationId` association remain the next
 stage.
 
+For pure observation reconciliation, capture a
+`ReconciliationBaseline`, apply fresh snapshots to the graph, and evaluate
+explicit predicates with `ReconciliationEngine`. This produces `PENDING`,
+`CONFIRMED`, `NOT_OBSERVED`, `ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or
+`AMBIGUOUS` without invoking `order_send`. The caller supplies
+`deadline_expired` when its bounded wait has elapsed; an unsatisfied fresh
+predicate remains `PENDING` before that point, and `NOT_OBSERVED` remains
+unresolved for later reconciliation.
+
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 
 With a logged-in terminal, run the bounded native market-data smoke check from

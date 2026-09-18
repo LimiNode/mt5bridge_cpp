@@ -158,9 +158,45 @@ revision and updates only the observed domains' revisions. Use
 `domain_revision()` for active/position freshness, and use the revision-tagged
 `history_*_coverage()` or `history_*_covered(window, since_revision)` for
 baseline-aware history absence proofs. Positive history evidence without a
-coverage window does not prove absence. `clear_evidence()` retains the account
-scope while removing records, coverage, and freshness metadata. The graph is
-single-owner state; callers must serialize access.
+coverage window does not prove absence. History tickets expose their own last
+evidence revision, so an old retained ticket cannot satisfy a post-baseline
+presence predicate. `clear_evidence()` retains the account scope while
+removing records, coverage, and freshness metadata. The graph is single-owner
+state; callers must serialize access.
+
+## Observation-only reconciliation predicates
+
+The header [`reconciliation_engine.hpp`](../include/mt5bridge/reconciliation_engine.hpp)
+provides `ReconciliationEngine` for evaluating evidence without side effects.
+Capture a `ReconciliationBaseline` before the operation, collect fresh
+authoritative observations into `ObservationGraph`, and evaluate explicit
+predicates such as `require_active_order()`, `require_position_absent()`, or
+`require_history_deal_absent()`.
+
+Active and position predicates require a domain revision newer than the
+baseline. History presence predicates require a per-ticket evidence revision
+newer than the baseline history revision; an old ticket retained in the
+positive-evidence map is not reused. Any bounded history predicate also
+requires the corresponding native millisecond time bit; missing time is
+reported as contradictory evidence rather than matched using a default value.
+History absence predicates require a complete revision-filtered coverage
+window. Malformed predicates and baselines with impossible revision ordering
+are rejected before graph state is evaluated.
+
+The evaluator returns `PENDING`, `CONFIRMED`, `NOT_OBSERVED`,
+`ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or `AMBIGUOUS`. It does not call the
+runtime, write a journal, or invoke `order_send`. `TRADE_EVENT_GAP` is supplied
+explicitly by a caller whose hint/event stream was incomplete; it is not
+invented from a snapshot alone. A fresh mismatch remains `PENDING` until the
+caller sets `ReconciliationRequest::deadline_expired`; only then can it become
+`NOT_OBSERVED`. That outcome is unresolved and must not stop later
+reconciliation. Use `ReconciliationResult::resolved()` only for
+`CONFIRMED`, `ACCOUNT_MISMATCH`, and `AMBIGUOUS`. A future
+`ReconciliationWorker` may own the snapshot collection loop, but must be the
+component that builds authoritative account-wide batches. The result counters
+separate stale/missing observations from contradictory evidence, so callers
+can continue polling while `PENDING` without interpreting a missing predicate
+as a final outcome.
 
 ## Quickstart scenarios
 

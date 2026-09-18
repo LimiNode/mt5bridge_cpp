@@ -64,7 +64,10 @@ public:
             throw std::invalid_argument("invalid observation collection window");
 
         ObservationBatch batch;
-        batch.account = make_account_key(client_.account_info());
+        const auto account_before = make_account_key(client_.account_info());
+        if (!account_before.valid())
+            throw std::runtime_error("account identity unavailable before observation");
+        batch.account = account_before;
         if (request.observe_active_orders) {
             batch.observed_domains = batch.observed_domains |
                                      ObservationDomain::active_orders;
@@ -93,6 +96,11 @@ public:
             query.to_msc = request.history_deals_window->to_msc;
             batch.history_deals = client_.history_deals(query);
         }
+        const auto account_after = make_account_key(client_.account_info());
+        if (!account_after.valid())
+            throw std::runtime_error("account identity unavailable after observation");
+        if (account_after != account_before)
+            throw std::runtime_error("account changed during observation collection");
         return batch;
     }
 
@@ -123,6 +131,8 @@ public:
         if (!request.valid())
             return {ObservationApplyStatus::invalid_evidence, graph_.revision()};
         const auto batch = provider_.collect(request);
+        if (!matches_request(request, batch))
+            return {ObservationApplyStatus::invalid_evidence, graph_.revision()};
         return graph_.apply(batch);
     }
 
@@ -144,12 +154,43 @@ public:
     const ObservationGraph &graph() const { return graph_; }
 
 private:
+    static bool same_window(const std::optional<ObservationWindow> &left,
+                            const std::optional<ObservationWindow> &right) {
+        if (left.has_value() != right.has_value())
+            return false;
+        return !left || (left->from_msc == right->from_msc &&
+                         left->to_msc == right->to_msc);
+    }
+
+    static bool matches_request(const ObservationCollectionRequest &request,
+                                const ObservationBatch &batch) {
+        ObservationDomain expected_domains = ObservationDomain::none;
+        if (request.observe_active_orders)
+            expected_domains = expected_domains | ObservationDomain::active_orders;
+        if (request.observe_positions)
+            expected_domains = expected_domains | ObservationDomain::positions;
+        if (request.history_orders_window)
+            expected_domains = expected_domains | ObservationDomain::history_orders;
+        if (request.history_deals_window)
+            expected_domains = expected_domains | ObservationDomain::history_deals;
+
+        return batch.observed_domains == expected_domains &&
+               (request.observe_active_orders || batch.active_orders.empty()) &&
+               (request.observe_positions || batch.positions.empty()) &&
+               ((!request.history_orders_window && batch.history_orders.empty()) ||
+                request.history_orders_window.has_value()) &&
+               ((!request.history_deals_window && batch.history_deals.empty()) ||
+                request.history_deals_window.has_value()) &&
+               same_window(request.history_orders_window, batch.history_orders_window) &&
+               same_window(request.history_deals_window, batch.history_deals_window);
+    }
+
     ObservationProvider &provider_;
     ObservationGraph graph_;
 };
 
 /// \enum DispatchConsistencyState
-/// \brief Describes whether observation evidence permits a future dispatch.
+/// \brief Describes whether requested observation evidence permits a future dispatch.
 enum class DispatchConsistencyState {
     ready,                  ///< Required post-baseline evidence is fresh.
     waiting_for_active_orders, ///< Active orders need an authoritative refresh.
@@ -174,27 +215,38 @@ struct DispatchConsistencyRequest {
     bool event_gap = false; ///< Caller observed an incomplete hint stream.
 
     /// \brief Tests whether all requested history windows are valid.
-    /// \return True when supplied windows are ordered and non-negative.
+    /// \return True when at least one evidence requirement is present and
+    /// supplied windows are ordered and non-negative.
     bool valid() const {
-        return (!history_orders_window || history_orders_window->valid()) &&
+        const bool has_requirement = require_active_orders || require_positions ||
+                                     history_orders_window.has_value() ||
+                                     history_deals_window.has_value();
+        return has_requirement &&
+               (!history_orders_window || history_orders_window->valid()) &&
                (!history_deals_window || history_deals_window->valid());
     }
 };
 
 /// \struct DispatchConsistencyResult
-/// \brief Reports an evidence-based pre-dispatch decision.
+/// \brief Reports an evidence-based observation-readiness decision.
 struct DispatchConsistencyResult {
     DispatchConsistencyState state = DispatchConsistencyState::invalid_request;
     ReconciliationReason reason = ReconciliationReason::invalid_request;
     std::uint64_t evaluated_revision = 0; ///< Graph revision used for the decision.
 
     /// \brief Tests whether the caller may proceed to a future dispatch layer.
-    /// \return True only for the side-effect-free `ready` state.
+    /// \return True only for fresh requested evidence; this does not prove an
+    /// atomic cross-domain MT5 snapshot or submit an order.
     bool ready() const { return state == DispatchConsistencyState::ready; }
 };
 
 /// \class DispatchConsistencyGate
-/// \brief Evaluates freshness and ownership before any future side effect.
+/// \brief Evaluates observation readiness before any future side effect.
+///
+/// This gate checks graph provenance, requested freshness, coverage, and
+/// caller-owned blockers. It does not prove that sequential MT5 queries came
+/// from one atomic terminal snapshot; a later environment-consistency policy
+/// must own that stronger claim.
 class DispatchConsistencyGate {
 public:
     /// \brief Evaluates the gate without querying the runtime or changing state.

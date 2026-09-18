@@ -215,20 +215,28 @@ as a final outcome.
 The header [`reconciliation_coordinator.hpp`](../include/mt5bridge/reconciliation_coordinator.hpp)
 provides the next observation-only layer. `ObservationProvider` is a narrow
 test seam that assembles one `ObservationBatch`; `ClientObservationProvider`
-uses unfiltered active queries and bounded history windows. The
-`ObservationCoordinator` owns one non-copyable graph and applies a provider
-batch only after collection completes, so a provider failure cannot leave a
-partial graph update. `refresh()` is synchronous and caller-driven: it does not
-start a worker, retry a failed call, or invoke `order_send`.
+uses unfiltered active queries and bounded history windows. The coordinator
+requires the returned domains, windows, and payload namespaces to match the
+request exactly; a provider response with an extra or missing domain is
+rejected before graph mutation. `ClientObservationProvider` checks a valid
+account identity before collection and compares it again after collection, so
+an account switch discards the whole batch. The `ObservationCoordinator` owns
+one non-copyable graph and applies a provider batch only after collection
+completes, so a provider failure cannot leave a partial graph update.
+`refresh()` is synchronous and caller-driven: it does not start a worker, retry
+a failed call, or invoke `order_send`.
 
 Capture the baseline on the coordinator graph, refresh the requested domains,
 then pass a `DispatchConsistencyRequest` to `DispatchConsistencyGate`. The gate
 returns `ready` only when account and graph provenance match, no event gap or
 unresolved prior operation is declared, and every requested active, position,
-and history requirement is newer than the baseline. Its waiting and mismatch
-states are non-authorizing; `ready` is evidence that a future dispatch layer may
-continue, not a dispatch operation itself. Durable journal, WAL, and
-`order_send` remain a later stage.
+and history requirement is newer than the baseline. A request with no evidence
+requirement is invalid rather than vacuously ready. This is observation
+readiness, not proof that sequential MT5 calls formed one atomic cross-domain
+snapshot; a later environment-consistency policy owns that stronger claim. Its
+waiting and mismatch states are non-authorizing; `ready` is evidence that a
+future dispatch layer may continue, not a dispatch operation itself. Durable
+journal, WAL, and `order_send` remain a later stage.
 
 ## Quickstart scenarios
 

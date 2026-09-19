@@ -41,6 +41,11 @@ if(BUILD_TESTING)
     target_link_libraries(mt5bridge_reconciliation_coordinator_test PRIVATE mt5bridge::client)
     add_test(NAME mt5bridge_reconciliation_coordinator
              COMMAND mt5bridge_reconciliation_coordinator_test)
+    add_executable(mt5bridge_environment_consistency_test
+                   tests/environment_consistency_test.cpp)
+    target_link_libraries(mt5bridge_environment_consistency_test PRIVATE mt5bridge::client)
+    add_test(NAME mt5bridge_environment_consistency
+             COMMAND mt5bridge_environment_consistency_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)

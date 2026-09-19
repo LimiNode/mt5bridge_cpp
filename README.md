@@ -202,6 +202,23 @@ writes a journal; it is not an atomic cross-domain MT5 snapshot proof. Their
 contract is recorded in
 [`docs/adr/0009-observation-coordinator.md`](docs/adr/0009-observation-coordinator.md).
 
+For the next observation-only step, collect accepted `ObservationSample` values
+from `ObservationCoordinator` and feed two or more sequential samples into
+`mt5bridge::EnvironmentConsistencyPolicy`. It requires one graph identity,
+consecutive revisions, and the exact requested domains/windows to remain
+account-scoped; it also checks visible order/deal/position links and requires
+two consecutive coherent identity signatures before
+returning `consistent`. Delayed publication such as a deal appearing before
+its history order returns `awaiting_confirmation` only when both order
+namespaces are requested; direct link conflicts, account changes, bounded
+instability, and order links outside the requested history coverage return
+explicit fail-closed states. Publication lag that persists through the bounded
+observation budget becomes `unstable_environment`, not a false
+`cross_view_mismatch`.
+This policy still does not claim an atomic MT5 snapshot and does not call or
+authorize `order_send`; its contract is recorded in
+[`docs/adr/0010-environment-consistency.md`](docs/adr/0010-environment-consistency.md).
+
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 
 With a logged-in terminal, run the bounded native market-data smoke check from

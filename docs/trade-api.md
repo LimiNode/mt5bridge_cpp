@@ -238,6 +238,43 @@ waiting and mismatch states are non-authorizing; `ready` is evidence that a
 future dispatch layer may continue, not a dispatch operation itself. Durable
 journal, WAL, and `order_send` remain a later stage.
 
+## Bounded environment consistency
+
+The header [`environment_consistency.hpp`](../include/mt5bridge/environment_consistency.hpp)
+adds the next observation-only layer. `ObservationCoordinator::refresh()` now
+returns an accepted `ObservationSample` only after the batch has passed shape
+validation and graph admission. `EnvironmentConsistencyPolicy` accepts a
+caller-owned bounded sequence of those samples, requires one graph identity and
+strictly consecutive graph revisions, and verifies exact domains/windows,
+required known fields, unique primary tickets, and identity links visible
+across the supplied views.
+
+Use at least two collections for a normal cycle:
+
+```cpp
+mt5bridge::EnvironmentConsistencyRequest request;
+auto result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+    {first_sample, confirmation_sample}, request);
+```
+
+The policy requires two consecutive coherent identity/link signatures for
+`consistent`. A deal that appears before its history order is
+`awaiting_confirmation` only when both active and history order namespaces are
+part of the request; directly conflicting order/deal links are
+`cross_view_mismatch`. An account switch is `account_changed`; changing
+coherent views, or unresolved publication lag after the bounded budget, are
+`unstable_environment`. Missing
+domains, missing order namespaces, order links outside the requested history
+coverage, or required known fields are `insufficient_evidence`, and malformed
+scope is `invalid_request`.
+
+This is a bounded consistency check, not an atomic MT5 snapshot proof. MT5 may
+change between sequential calls, and a historical deal may legitimately refer
+to a position that is no longer active. `consistent` is therefore only an
+observation result for a later journal/admission layer; it does not call or
+authorize `order_send`. The full contract is recorded in
+[`docs/adr/0010-environment-consistency.md`](adr/0010-environment-consistency.md).
+
 ## Quickstart scenarios
 
 The runnable [`trade_observation_example.cpp`](../examples/trade_observation_example.cpp)

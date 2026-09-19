@@ -77,6 +77,7 @@ struct EnvironmentConsistencyResult {
     std::size_t observation_count = 0; ///< Number of observations evaluated.
     std::size_t unresolved_links = 0; ///< Links still awaiting another view.
     std::size_t contradictory_links = 0; ///< Directly conflicting links found.
+    std::size_t insufficient_links = 0; ///< Links outside the requested evidence scope.
 
     /// \brief Tests whether the environment may enter a later dispatch layer.
     /// \return True only after two consecutive coherent observations agree.
@@ -136,6 +137,7 @@ public:
             const auto analysis = analyze(observation, request);
             result.unresolved_links = analysis.unresolved_links;
             result.contradictory_links += analysis.contradictory_links;
+            result.insufficient_links += analysis.insufficient_links;
             if (analysis.contradictory_links != 0) {
                 result.state = EnvironmentConsistencyState::cross_view_mismatch;
                 return result;
@@ -143,9 +145,16 @@ public:
             analyses.push_back(analysis);
         }
 
+        if (result.insufficient_links != 0) {
+            result.state = EnvironmentConsistencyState::insufficient_evidence;
+            return result;
+        }
+
         const auto &latest = analyses.back();
         if (latest.unresolved_links != 0) {
-            result.state = EnvironmentConsistencyState::awaiting_confirmation;
+            result.state = analyses.size() == request.max_observations
+                               ? EnvironmentConsistencyState::unstable_environment
+                               : EnvironmentConsistencyState::awaiting_confirmation;
             return result;
         }
 
@@ -177,6 +186,7 @@ private:
         std::vector<SignatureItem> signature;
         std::size_t unresolved_links = 0;
         std::size_t contradictory_links = 0;
+        std::size_t insufficient_links = 0;
     };
 
     static bool same_window(const std::optional<ObservationWindow> &left,
@@ -313,7 +323,14 @@ private:
                 if (history_order == history_order_positions.end() &&
                     active_order == active_order_positions.end() &&
                     observes(batch.observed_domains, ObservationDomain::history_orders)) {
-                    ++result.unresolved_links;
+                    if (!batch.history_orders_window || !batch.history_deals_window ||
+                        !in_window(value.time_msc, *batch.history_orders_window))
+                        ++result.insufficient_links;
+                    else
+                        ++result.unresolved_links;
+                } else if (history_order == history_order_positions.end() &&
+                           active_order == active_order_positions.end()) {
+                    ++result.insufficient_links;
                 } else {
                     if (history_order != history_order_positions.end() &&
                         history_order->second != 0 && value.position_id != 0 &&
@@ -324,6 +341,8 @@ private:
                         active_order->second != value.position_id)
                         ++result.contradictory_links;
                 }
+            } else if (value.order_ticket != 0) {
+                ++result.insufficient_links;
             }
         }
         for (const auto &entry : active_order_positions) {

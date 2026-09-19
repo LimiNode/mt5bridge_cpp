@@ -258,8 +258,10 @@ The policy requires two consecutive coherent identity/link signatures for
 `consistent`. A deal that appears before its history order is
 `awaiting_confirmation`, while directly conflicting order/deal links are
 `cross_view_mismatch`. An account switch is `account_changed`; changing
-coherent views after the bounded budget is `unstable_environment`. Missing
-domains or required known fields are `insufficient_evidence`, and malformed
+coherent views, or unresolved publication lag after the bounded budget, are
+`unstable_environment`. Missing
+domains, missing order namespaces, order links outside the requested history
+coverage, or required known fields are `insufficient_evidence`, and malformed
 scope is `invalid_request`.
 
 This is a bounded consistency check, not an atomic MT5 snapshot proof. MT5 may

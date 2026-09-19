@@ -51,6 +51,9 @@ The policy then checks the links that can be proved from the supplied views:
 - an observed deal whose `DEAL_ORDER` is not yet present in the requested order
   view is provisional, not contradictory, because MT5 may publish the deal
   first;
+- if no active/history order namespace is requested, or the deal timestamp lies
+  outside the requested history-order coverage, the order link is
+  `insufficient_evidence` rather than an inferred absence;
 - when the same order is present in active/history orders and deals, non-zero
   position identifiers must agree;
 - duplicate position identifiers attached to different current position
@@ -72,12 +75,15 @@ invalid_request
 
 `consistent` requires two consecutive batches with no unresolved links and the
 same deterministic identity/link signature. A missing counterpart or a deal
-that precedes its history order yields `awaiting_confirmation`. Directly
-conflicting links yield `cross_view_mismatch`; an account switch yields
+that precedes its history order yields `awaiting_confirmation` while the
+bounded budget remains; if the budget is exhausted without a confirmation it
+becomes `unstable_environment`, not a hard link mismatch. Directly conflicting
+links yield `cross_view_mismatch`; an account switch yields
 `account_changed`; coherent signatures that keep changing until the requested
-bounded budget is exhausted yield `unstable_environment`. Missing required
-domains, malformed records, and incomplete known fields yield
-`insufficient_evidence`; a malformed policy scope yields `invalid_request`.
+bounded budget is exhausted also yield `unstable_environment`. Missing
+required domains, order links outside the requested coverage, malformed
+records, and incomplete known fields yield `insufficient_evidence`; a malformed
+policy scope yields `invalid_request`.
 
 The policy is deliberately separate from `DispatchConsistencyGate`:
 

@@ -114,8 +114,10 @@ int main() {
                 "one coherent observation was treated as a stable environment");
 
         const auto missing_position = active_batch(key, {order(20, 700)}, {});
+        auto awaiting_request = request;
+        awaiting_request.max_observations = 3;
         result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
-            {missing_position, missing_position}, request);
+            {missing_position, missing_position}, awaiting_request);
         require(result.state == mt5bridge::EnvironmentConsistencyState::awaiting_confirmation &&
                     result.unresolved_links == 1,
                 "missing active-order position link was not provisional");
@@ -126,7 +128,7 @@ int main() {
         const auto missing_close_by_position =
             active_batch(key, {close_by}, {position(500, 700)});
         result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
-            {missing_close_by_position, missing_close_by_position}, request);
+            {missing_close_by_position, missing_close_by_position}, awaiting_request);
         require(result.state == mt5bridge::EnvironmentConsistencyState::awaiting_confirmation &&
                     result.unresolved_links == 1,
                 "missing ORDER_POSITION_BY_ID link was not provisional");
@@ -170,6 +172,37 @@ int main() {
             {deal_before_order, order_after_deal, order_after_deal}, confirmation_request);
         require(result.consistent(),
                 "stable confirmation after delayed history order was not accepted");
+        result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {deal_before_order, deal_before_order}, full_request);
+        require(result.state == mt5bridge::EnvironmentConsistencyState::unstable_environment,
+                "unresolved publication lag ignored the bounded observation budget");
+
+        auto deals_only_request = full_request;
+        deals_only_request.require_active_orders = false;
+        deals_only_request.require_positions = false;
+        deals_only_request.history_orders_window.reset();
+        const auto deals_only = complete_batch(
+            key, {}, {}, {}, {deal(30, 20, 700)});
+        auto deals_only_batch = deals_only;
+        deals_only_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+        deals_only_batch.history_orders_window.reset();
+        result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {deals_only_batch, deals_only_batch}, deals_only_request);
+        require(result.state == mt5bridge::EnvironmentConsistencyState::insufficient_evidence &&
+                    result.insufficient_links != 0,
+                "deal without any requested order evidence was treated as coherent");
+
+        auto outside_window_request = full_request;
+        outside_window_request.history_orders_window =
+            mt5bridge::ObservationWindow{1000, 1200};
+        auto outside_window = complete_batch(
+            key, {}, {position(500, 700)}, {}, {deal(30, 20, 700)});
+        outside_window.history_orders_window = outside_window_request.history_orders_window;
+        result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {outside_window, outside_window}, outside_window_request);
+        require(result.state == mt5bridge::EnvironmentConsistencyState::insufficient_evidence &&
+                    result.insufficient_links != 0,
+                "deal outside order-history coverage was treated as publication lag");
 
         // A closed physical position may legitimately be absent while its deal
         // remains visible; that is not a cross-view contradiction.

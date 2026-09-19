@@ -208,7 +208,10 @@ domains and windows to remain account-scoped, checks visible order/deal/position
 links, and requires two consecutive coherent identity signatures before
 returning `consistent`. Delayed publication such as a deal appearing before
 its history order returns `awaiting_confirmation`; direct link conflicts,
-account changes, and bounded instability return explicit fail-closed states.
+account changes, bounded instability, and order links outside the requested
+history coverage return explicit fail-closed states. Publication lag that
+persists through the bounded observation budget becomes `unstable_environment`,
+not a false `cross_view_mismatch`.
 This policy still does not claim an atomic MT5 snapshot and does not call or
 authorize `order_send`; its contract is recorded in
 [`docs/adr/0010-environment-consistency.md`](docs/adr/0010-environment-consistency.md).

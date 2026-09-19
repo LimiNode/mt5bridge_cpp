@@ -66,6 +66,12 @@ The policy then checks the links that can be proved from the supplied views:
 - a deal may refer to a position that is no longer active: current-position
   absence alone is not a contradiction for a historical lifecycle.
 
+When the result is `consistent`, it also carries an opaque
+`EnvironmentConsistencyProof` containing the account, graph instance identity,
+and final graph revision. The proof is created only by the policy and must be
+checked against the current graph before dispatch admission; copying a result
+or replaying it after another graph mutation cannot authorize a side effect.
+
 The result has explicit fail-closed states:
 
 ```text

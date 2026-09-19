@@ -30,6 +30,57 @@ enum class EnvironmentConsistencyState {
     invalid_request,        ///< The policy request itself is malformed.
 };
 
+/// \class EnvironmentConsistencyProof
+/// \brief Opaque revision-bound proof produced only by a consistent policy run.
+///
+/// A proof is tied to one observation graph instance and its exact latest
+/// revision. Callers may copy the value for a synchronous admission attempt,
+/// but cannot manufacture a valid proof from public fields.
+class EnvironmentConsistencyProof {
+public:
+    EnvironmentConsistencyProof(const EnvironmentConsistencyProof &) = default;
+    EnvironmentConsistencyProof &operator=(const EnvironmentConsistencyProof &) = default;
+    EnvironmentConsistencyProof(EnvironmentConsistencyProof &&) = default;
+    EnvironmentConsistencyProof &operator=(EnvironmentConsistencyProof &&) = default;
+
+    /// \brief Tests whether the proof carries complete provenance.
+    /// \return True only for a valid account, graph identity, and revision.
+    bool valid() const {
+        return account_.valid() && graph_instance_id_ != 0 && last_graph_revision_ != 0;
+    }
+
+    /// \brief Returns the account covered by the proof.
+    /// \return Immutable account identity.
+    const AccountKey &account() const { return account_; }
+
+    /// \brief Returns the observation graph provenance identity.
+    /// \return Process-local graph instance ID.
+    std::uint64_t graph_instance_id() const { return graph_instance_id_; }
+
+    /// \brief Returns the exact latest revision covered by the proof.
+    /// \return Graph revision at the final coherent sample.
+    std::uint64_t last_graph_revision() const { return last_graph_revision_; }
+
+private:
+    EnvironmentConsistencyProof() = default;
+
+    static EnvironmentConsistencyProof create(const AccountKey &account,
+                                              std::uint64_t graph_instance_id,
+                                              std::uint64_t last_graph_revision) {
+        EnvironmentConsistencyProof proof;
+        proof.account_ = account;
+        proof.graph_instance_id_ = graph_instance_id;
+        proof.last_graph_revision_ = last_graph_revision;
+        return proof;
+    }
+
+    AccountKey account_;
+    std::uint64_t graph_instance_id_ = 0;
+    std::uint64_t last_graph_revision_ = 0;
+
+    friend class EnvironmentConsistencyPolicy;
+};
+
 /// \struct EnvironmentConsistencyRequest
 /// \brief Selects the domains and bounded confirmation budget for one cycle.
 struct EnvironmentConsistencyRequest {
@@ -75,15 +126,18 @@ struct EnvironmentConsistencyRequest {
 struct EnvironmentConsistencyResult {
     EnvironmentConsistencyState state = EnvironmentConsistencyState::invalid_request;
     AccountKey account; ///< Account shared by all accepted observations.
+    std::optional<EnvironmentConsistencyProof> proof; ///< Present only when consistent.
     std::size_t observation_count = 0; ///< Number of observations evaluated.
     std::size_t unresolved_links = 0; ///< Links still awaiting another view.
     std::size_t contradictory_links = 0; ///< Directly conflicting links found.
     std::size_t insufficient_links = 0; ///< Links outside the requested evidence scope.
 
     /// \brief Tests whether the environment may enter a later dispatch layer.
-    /// \return True only after two consecutive coherent observations agree.
+    /// \return True only after two consecutive coherent observations agree and
+    /// a revision-bound proof is available.
     bool consistent() const {
-        return state == EnvironmentConsistencyState::consistent;
+        return state == EnvironmentConsistencyState::consistent && proof.has_value() &&
+               proof->valid();
     }
 };
 
@@ -179,6 +233,8 @@ public:
             const auto &previous = analyses[analyses.size() - 2];
             if (previous.unresolved_links == 0 && previous.signature == latest.signature) {
                 result.state = EnvironmentConsistencyState::consistent;
+                result.proof = EnvironmentConsistencyProof::create(
+                    result.account, graph_instance_id, observations.back().graph_revision());
                 return result;
             }
         }

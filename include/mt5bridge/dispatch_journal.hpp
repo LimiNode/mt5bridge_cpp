@@ -91,6 +91,13 @@ constexpr bool valid_journal_state(JournalState state) {
     return false;
 }
 
+/// \brief Tests whether journal and operation state form a recoverable pair.
+/// \param journal_state Durable write-ahead state.
+/// \param operation_state Canonical managed-operation state.
+/// \return True only for combinations admitted by the staged lifecycle.
+constexpr bool valid_state_pair(JournalState journal_state,
+                                OperationState operation_state);
+
 /// \struct OperationKey
 /// \brief Account-scoped identity used to address one journal operation.
 struct OperationKey {
@@ -136,16 +143,23 @@ struct OperationKey {
 struct OperationRecord {
     OperationKey key; ///< Immutable account and managed-operation identity.
     std::vector<std::uint8_t> request_payload; ///< Exact opaque request bytes.
+    std::vector<std::uint8_t> result_payload; ///< Opaque backend result, when persisted.
     OperationState operation_state = OperationState::queued; ///< Managed lifecycle state.
     JournalState journal_state = JournalState::created; ///< Write-ahead state.
     std::uint64_t revision = 0; ///< Monotonic journal revision for this record.
     std::uint64_t fencing_token = 0; ///< Writer token committed at dispatching.
 
     /// \brief Tests whether the record can be persisted or recovered safely.
-    /// \return True when identity, payload, revision, and dispatch fencing agree.
+    /// \return True when identity, payload, state pair, revision, and fencing agree.
     bool valid() const {
         if (!key.valid() || request_payload.empty() || revision == 0 ||
             !valid_operation_state(operation_state) || !valid_journal_state(journal_state))
+            return false;
+        if (!valid_state_pair(journal_state, operation_state))
+            return false;
+        if (journal_state < JournalState::result_persisted && !result_payload.empty())
+            return false;
+        if (journal_state == JournalState::result_persisted && result_payload.empty())
             return false;
         if (journal_state < JournalState::dispatching)
             return fencing_token == 0;
@@ -153,18 +167,70 @@ struct OperationRecord {
     }
 };
 
+constexpr bool valid_state_pair(JournalState journal_state,
+                                OperationState operation_state) {
+    switch (journal_state) {
+    case JournalState::created:
+        return operation_state == OperationState::queued ||
+               operation_state == OperationState::prechecking ||
+               operation_state == OperationState::rejected ||
+               operation_state == OperationState::failed;
+    case JournalState::prechecked:
+        return operation_state == OperationState::prechecking ||
+               operation_state == OperationState::rejected ||
+               operation_state == OperationState::failed;
+    case JournalState::dispatch_intent_persisted:
+        return operation_state == OperationState::prechecking;
+    case JournalState::dispatching:
+        return operation_state == OperationState::prechecking ||
+               operation_state == OperationState::submitting ||
+               operation_state == OperationState::accepted ||
+               operation_state == OperationState::reconciling ||
+               operation_state == OperationState::ambiguous;
+    case JournalState::result_persisted:
+        return operation_state == OperationState::submitting ||
+               operation_state == OperationState::accepted ||
+               operation_state == OperationState::reconciling ||
+               operation_state == OperationState::ambiguous;
+    case JournalState::reconciling:
+        return operation_state == OperationState::prechecking ||
+               operation_state == OperationState::submitting ||
+               operation_state == OperationState::accepted ||
+               operation_state == OperationState::reconciling ||
+               operation_state == OperationState::partially_filled ||
+               operation_state == OperationState::filled ||
+               operation_state == OperationState::cancelled ||
+               operation_state == OperationState::expired ||
+               operation_state == OperationState::rejected ||
+               operation_state == OperationState::failed ||
+               operation_state == OperationState::ambiguous;
+    }
+    return false;
+}
+
+/// \enum StoreCommitStatus
+/// \brief Reports the result of one compare-and-commit journal write.
+enum class StoreCommitStatus {
+    committed, ///< Candidate replaced the expected durable record.
+    conflict,  ///< Expected revision/absence no longer matches durable state.
+    io_error,  ///< The store could not durably commit the candidate.
+};
+
 /// \class DurableJournalStore
-/// \brief Persistence seam whose commit returns only after durable storage.
+/// \brief Persistence seam whose compare-and-commit returns only after durable storage.
 class DurableJournalStore {
 public:
     virtual ~DurableJournalStore() = default;
 
-    /// \brief Durably replaces one operation record.
+    /// \brief Compare-and-commits one operation record durably.
     /// \param record Complete next record, including its incremented revision.
-    /// \return True only when the record is durable and recoverable.
-    /// \warning Returning true before the record survives a process crash breaks
+    /// \param expected_revision Expected current revision; empty means no record exists.
+    /// \return Commit, conflict, or I/O status.
+    /// \warning Returning `committed` before the record survives a process crash breaks
     /// the non-resendable dispatch barrier.
-    virtual bool commit(const OperationRecord &record) = 0;
+    virtual StoreCommitStatus commit(
+        const OperationRecord &record,
+        std::optional<std::uint64_t> expected_revision) = 0;
 
     /// \brief Loads the last durable record for one operation.
     /// \param key Account-scoped operation identity.
@@ -180,6 +246,7 @@ enum class JournalMutationStatus {
     duplicate_operation,  ///< This operation key already has a durable record.
     not_found,            ///< No in-memory or durable record exists for the key.
     invalid_transition,   ///< The requested lifecycle transition is not allowed.
+    conflict,             ///< A stale owner lost the compare-and-commit race.
     not_durable,          ///< The store rejected the proposed durable commit.
 };
 
@@ -222,7 +289,7 @@ public:
         const OperationKey &key, std::vector<std::uint8_t> request_payload) {
         if (!key.valid() || request_payload.empty())
             return {};
-        if (records_.find(key) != records_.end() || store_.load(key).has_value())
+        if (records_.find(key) != records_.end())
             return {JournalMutationStatus::duplicate_operation, std::nullopt};
 
         OperationRecord candidate;
@@ -231,8 +298,14 @@ public:
         candidate.operation_state = OperationState::queued;
         candidate.journal_state = JournalState::created;
         candidate.revision = 1;
-        if (!store_.commit(candidate))
-            return {JournalMutationStatus::not_durable, std::nullopt};
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, std::nullopt);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
         records_.emplace(key, candidate);
         return {JournalMutationStatus::accepted, std::move(candidate)};
     }
@@ -274,6 +347,8 @@ public:
             return {JournalMutationStatus::not_found, std::nullopt};
         if (!can_transition_journal(it->second.journal_state, next_state))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (next_state == JournalState::result_persisted)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (next_state >= JournalState::prechecked &&
             next_state <= JournalState::dispatching &&
             it->second.operation_state != OperationState::prechecking)
@@ -288,9 +363,48 @@ public:
         candidate.revision += 1;
         if (next_state == JournalState::dispatching)
             candidate.fencing_token = fencing_token;
-        if (!candidate.valid() || !store_.commit(candidate))
-            return {candidate.valid() ? JournalMutationStatus::not_durable
-                                      : JournalMutationStatus::invalid_record,
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
+        it->second = candidate;
+        return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
+    /// \brief Atomically persists a backend result and enters `result_persisted`.
+    /// \param key Account and managed-operation identity.
+    /// \param result_payload Exact opaque backend result bytes.
+    /// \return Mutation status and the committed result-bearing record.
+    JournalMutationResult persist_result(
+        const OperationKey &key, std::vector<std::uint8_t> result_payload) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (it->second.journal_state != JournalState::dispatching ||
+            result_payload.empty() ||
+            (it->second.operation_state != OperationState::submitting &&
+             it->second.operation_state != OperationState::accepted &&
+             it->second.operation_state != OperationState::reconciling &&
+             it->second.operation_state != OperationState::ambiguous))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+
+        OperationRecord candidate = it->second;
+        candidate.journal_state = JournalState::result_persisted;
+        candidate.result_payload = std::move(result_payload);
+        candidate.revision += 1;
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
                     std::nullopt};
         it->second = candidate;
         return {JournalMutationStatus::accepted, std::move(candidate)};
@@ -310,15 +424,24 @@ public:
         if (next_state == OperationState::submitting &&
             it->second.journal_state != JournalState::dispatching)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if ((next_state == OperationState::reconciling ||
+             next_state == OperationState::ambiguous) &&
+            it->second.operation_state == OperationState::prechecking &&
+            it->second.journal_state < JournalState::dispatching)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
         OperationRecord candidate = it->second;
         candidate.operation_state = next_state;
         candidate.revision += 1;
-        if (!candidate.valid() || !store_.commit(candidate))
-            return {candidate.valid() ? JournalMutationStatus::not_durable
-                                      : JournalMutationStatus::invalid_record,
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
                     std::nullopt};
         it->second = candidate;
         return {JournalMutationStatus::accepted, std::move(candidate)};
@@ -357,6 +480,8 @@ public:
             return next == OperationState::prechecking || next == OperationState::failed;
         case OperationState::prechecking:
             return next == OperationState::submitting ||
+                   next == OperationState::reconciling ||
+                   next == OperationState::ambiguous ||
                    next == OperationState::rejected || next == OperationState::failed;
         case OperationState::submitting:
             return next == OperationState::accepted ||
@@ -409,7 +534,8 @@ public:
 /// \brief Fresh evidence and blockers checked immediately before the barrier.
 struct DispatchAdmissionRequest {
     AccountKey current_account; ///< Account read immediately before admission.
-    EnvironmentConsistencyResult environment; ///< Bounded cross-view decision.
+    std::optional<EnvironmentConsistencyProof>
+        environment_proof; ///< Revision-bound topology proof.
     bool unresolved_operation = false; ///< Another operation is unresolved.
     bool event_gap = false; ///< A hint stream requires a fresh authoritative read.
 };
@@ -426,21 +552,67 @@ enum class DispatchAdmissionStatus {
     unresolved_operation,  ///< A prior operation blocks new dispatch.
     event_gap,             ///< An incomplete event hint stream blocks dispatch.
     lease_not_held,        ///< The fencing lease is absent or has no token.
+    conflict,              ///< A stale owner lost the durable admission race.
     not_durable,           ///< The dispatching barrier could not be committed.
 };
 
 /// \struct DispatchPermit
 /// \brief Non-resendable barrier evidence returned before a future backend call.
 struct DispatchPermit {
-    OperationKey key; ///< Operation protected by this permit.
-    std::uint64_t fencing_token = 0; ///< Token committed with `dispatching`.
-    std::uint64_t journal_revision = 0; ///< Durable revision at the barrier.
+public:
+    DispatchPermit(const DispatchPermit &) = delete;
+    DispatchPermit &operator=(const DispatchPermit &) = delete;
+    /// \brief Transfers the one-shot permit and invalidates the source.
+    /// \param other Permit whose capability is transferred.
+    DispatchPermit(DispatchPermit &&other)
+        : key_(std::move(other.key_)),
+          fencing_token_(std::exchange(other.fencing_token_, 0)),
+          journal_revision_(std::exchange(other.journal_revision_, 0)) {}
+    /// \brief Transfers a one-shot permit and invalidates the source.
+    /// \param other Permit whose capability is transferred.
+    DispatchPermit &operator=(DispatchPermit &&other) {
+        if (this != &other) {
+            key_ = std::move(other.key_);
+            fencing_token_ = std::exchange(other.fencing_token_, 0);
+            journal_revision_ = std::exchange(other.journal_revision_, 0);
+        }
+        return *this;
+    }
 
     /// \brief Tests whether the permit carries usable barrier evidence.
     /// \return True when identity, token, and revision are all present.
     bool valid() const {
-        return key.valid() && fencing_token != 0 && journal_revision != 0;
+        return key_.valid() && fencing_token_ != 0 && journal_revision_ != 0;
     }
+
+    /// \brief Returns the protected operation identity.
+    /// \return Account-scoped operation key.
+    const OperationKey &key() const { return key_; }
+
+    /// \brief Returns the committed fencing token.
+    /// \return Non-zero writer token.
+    std::uint64_t fencing_token() const { return fencing_token_; }
+
+    /// \brief Returns the journal revision at the durable barrier.
+    /// \return Monotonic operation revision.
+    std::uint64_t journal_revision() const { return journal_revision_; }
+
+private:
+    DispatchPermit(OperationKey key, std::uint64_t fencing_token,
+                   std::uint64_t journal_revision)
+        : key_(std::move(key)), fencing_token_(fencing_token),
+          journal_revision_(journal_revision) {}
+
+    static DispatchPermit create(OperationKey key, std::uint64_t fencing_token,
+                                 std::uint64_t journal_revision) {
+        return DispatchPermit(std::move(key), fencing_token, journal_revision);
+    }
+
+    OperationKey key_;
+    std::uint64_t fencing_token_ = 0;
+    std::uint64_t journal_revision_ = 0;
+
+    friend class DispatchAdmissionBarrier;
 };
 
 /// \struct DispatchAdmissionResult
@@ -461,9 +633,11 @@ struct DispatchAdmissionResult {
 /// \brief Opens the durable `dispatching` barrier without invoking `order_send`.
 class DispatchAdmissionBarrier {
 public:
-    /// \brief Binds the barrier to one owner-loop journal.
+    /// \brief Binds the barrier to one owner-loop journal and graph.
     /// \param journal Journal that owns the operation state transitions.
-    explicit DispatchAdmissionBarrier(OperationJournal &journal) : journal_(journal) {}
+    /// \param graph Current graph whose revision must match the proof.
+    DispatchAdmissionBarrier(OperationJournal &journal, const ObservationGraph &graph)
+        : journal_(journal), graph_(graph) {}
 
     /// \brief Verifies all pre-side-effect invariants and commits `dispatching`.
     /// \param key Account-scoped operation to admit.
@@ -480,12 +654,14 @@ public:
             return {DispatchAdmissionStatus::unresolved_operation, std::nullopt};
         if (request.event_gap)
             return {DispatchAdmissionStatus::event_gap, std::nullopt};
-        if (request.current_account != key.account ||
-            !request.environment.account.valid() ||
-            request.environment.account != key.account ||
-            request.environment.state == EnvironmentConsistencyState::account_changed)
+        if (request.current_account != key.account)
             return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
-        if (!request.environment.consistent() || request.environment.observation_count < 2)
+        if (!request.environment_proof || !request.environment_proof->valid())
+            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
+        if (request.environment_proof->account() != key.account)
+            return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
+        if (request.environment_proof->graph_instance_id() != graph_.instance_id() ||
+            request.environment_proof->last_graph_revision() != graph_.revision())
             return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
 
         const auto record = journal_.find(key);
@@ -501,17 +677,20 @@ public:
         const auto committed = journal_.transition_journal(
             key, JournalState::dispatching, *fencing_token);
         if (!committed.accepted())
-            return {committed.status == JournalMutationStatus::not_durable
-                        ? DispatchAdmissionStatus::not_durable
-                        : DispatchAdmissionStatus::invalid_state,
+            return {committed.status == JournalMutationStatus::conflict
+                        ? DispatchAdmissionStatus::conflict
+                        : committed.status == JournalMutationStatus::not_durable
+                              ? DispatchAdmissionStatus::not_durable
+                              : DispatchAdmissionStatus::invalid_state,
                     std::nullopt};
         return {DispatchAdmissionStatus::admitted,
-                DispatchPermit{key, committed.record->fencing_token,
-                               committed.record->revision}};
+                std::optional<DispatchPermit>(DispatchPermit::create(
+                    key, committed.record->fencing_token, committed.record->revision))};
     }
 
 private:
     OperationJournal &journal_;
+    const ObservationGraph &graph_;
 };
 
 } // namespace mt5bridge

@@ -24,14 +24,23 @@ mt5bridge::AccountKey account(std::uint64_t login = 42) {
 
 class MemoryStore final : public mt5bridge::DurableJournalStore {
 public:
-    bool commit(const mt5bridge::OperationRecord &record) override {
+    mt5bridge::StoreCommitStatus commit(
+        const mt5bridge::OperationRecord &record,
+        std::optional<std::uint64_t> expected_revision) override {
+        const auto it = durable.find(record.key);
+        if (expected_revision.has_value()) {
+            if (it == durable.end() || it->second.revision != *expected_revision)
+                return mt5bridge::StoreCommitStatus::conflict;
+        } else if (it != durable.end()) {
+            return mt5bridge::StoreCommitStatus::conflict;
+        }
         if (fail_next) {
             fail_next = false;
-            return false;
+            return mt5bridge::StoreCommitStatus::io_error;
         }
         durable[record.key] = record;
         commits.push_back(record);
-        return true;
+        return mt5bridge::StoreCommitStatus::committed;
     }
 
     std::optional<mt5bridge::OperationRecord> load(
@@ -60,13 +69,61 @@ public:
     bool held = false;
 };
 
-mt5bridge::DispatchAdmissionRequest ready_request(const mt5bridge::AccountKey &key) {
+class FakeObservationProvider final : public mt5bridge::ObservationProvider {
+public:
+    explicit FakeObservationProvider(std::vector<mt5bridge::ObservationBatch> batches)
+        : batches_(std::move(batches)) {}
+
+    mt5bridge::ObservationBatch collect(
+        const mt5bridge::ObservationCollectionRequest &) override {
+        if (next_ == batches_.size())
+            throw std::runtime_error("observation provider exhausted");
+        return std::move(batches_[next_++]);
+    }
+
+private:
+    std::vector<mt5bridge::ObservationBatch> batches_;
+    std::size_t next_ = 0;
+};
+
+Mt5OrderSnapshot active_order() {
+    Mt5OrderSnapshot value{};
+    value.ticket = 20;
+    value.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                         MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
+    return value;
+}
+
+mt5bridge::ObservationBatch active_batch(const mt5bridge::AccountKey &key) {
+    mt5bridge::ObservationBatch batch;
+    batch.account = key;
+    batch.observed_domains = mt5bridge::ObservationDomain::active_orders |
+                             mt5bridge::ObservationDomain::positions;
+    batch.active_orders.push_back(active_order());
+    return batch;
+}
+
+mt5bridge::DispatchAdmissionRequest ready_request(
+    const mt5bridge::AccountKey &key,
+    const mt5bridge::EnvironmentConsistencyProof &proof) {
     mt5bridge::DispatchAdmissionRequest request;
     request.current_account = key;
-    request.environment.account = key;
-    request.environment.state = mt5bridge::EnvironmentConsistencyState::consistent;
-    request.environment.observation_count = 2;
+    request.environment_proof = proof;
     return request;
+}
+
+void prepare_for_admission(mt5bridge::OperationJournal &journal,
+                           const mt5bridge::OperationKey &key) {
+    require(journal.transition_operation(key, mt5bridge::OperationState::prechecking)
+                .accepted(),
+            "prechecking operation state was rejected");
+    require(journal.transition_journal(key, mt5bridge::JournalState::prechecked)
+                .accepted(),
+            "prechecked journal state was rejected");
+    require(journal.transition_journal(
+                key, mt5bridge::JournalState::dispatch_intent_persisted)
+                .accepted(),
+            "dispatch intent was not durably persisted");
 }
 
 } // namespace
@@ -76,6 +133,26 @@ mt5bridge::DispatchAdmissionRequest ready_request(const mt5bridge::AccountKey &k
 int main() {
     try {
         const auto key = mt5bridge::OperationKey{account(), 7, 11};
+
+        FakeObservationProvider provider(
+            {active_batch(key.account), active_batch(key.account), active_batch(key.account)});
+        mt5bridge::ObservationCoordinator coordinator(provider, key.account);
+        mt5bridge::ObservationCollectionRequest collection;
+        const auto first_refresh = coordinator.refresh(collection);
+        const auto second_refresh = coordinator.refresh(collection);
+        const auto third_refresh = coordinator.refresh(collection);
+        require(first_refresh.sample && second_refresh.sample && third_refresh.sample,
+                "observation proof setup did not produce samples");
+        mt5bridge::EnvironmentConsistencyRequest consistency_request;
+        const auto initial_consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {*first_refresh.sample, *second_refresh.sample}, consistency_request);
+        require(initial_consistency.consistent() && initial_consistency.proof.has_value(),
+                "consistent policy result did not carry an opaque proof");
+        const auto fresh_consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {*second_refresh.sample, *third_refresh.sample}, consistency_request);
+        require(fresh_consistency.consistent() && fresh_consistency.proof.has_value(),
+                "fresh consistent policy result did not carry a proof");
+
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
 
@@ -93,48 +170,36 @@ int main() {
         require(journal.transition_journal(key, mt5bridge::JournalState::prechecked).status ==
                     mt5bridge::JournalMutationStatus::invalid_transition,
                 "journal precheck bypassed the operation lifecycle");
-
-        require(journal.transition_operation(key, mt5bridge::OperationState::prechecking)
-                        .accepted(),
-                "prechecking operation state was rejected");
-        require(journal.transition_journal(key, mt5bridge::JournalState::prechecked)
-                        .accepted(),
-                "prechecked journal state was rejected");
-        require(journal.transition_journal(
-                    key, mt5bridge::JournalState::dispatch_intent_persisted)
-                        .accepted(),
-                "dispatch intent was not durably persisted");
+        prepare_for_admission(journal, key);
         require(journal.transition_operation(key, mt5bridge::OperationState::submitting)
                         .status == mt5bridge::JournalMutationStatus::invalid_transition,
                 "submitting bypassed the dispatch barrier");
 
-        mt5bridge::DispatchAdmissionBarrier barrier(journal);
+        mt5bridge::DispatchAdmissionBarrier barrier(journal, coordinator.graph());
         FakeLease lease;
         lease.owned_account = key.account;
         lease.token = 77;
 
-        auto not_ready = ready_request(key.account);
-        not_ready.environment.state =
-            mt5bridge::EnvironmentConsistencyState::awaiting_confirmation;
+        mt5bridge::DispatchAdmissionRequest not_ready;
+        not_ready.current_account = key.account;
         require(barrier.admit(key, not_ready, lease).status ==
                     mt5bridge::DispatchAdmissionStatus::environment_not_ready,
                 "unconfirmed environment opened the barrier");
         require(journal.find(key)->journal_state ==
                     mt5bridge::JournalState::dispatch_intent_persisted,
                 "failed environment check mutated the journal");
-        not_ready.environment.state = mt5bridge::EnvironmentConsistencyState::consistent;
-        not_ready.environment.observation_count = 1;
-        require(barrier.admit(key, not_ready, lease).status ==
-                    mt5bridge::DispatchAdmissionStatus::environment_not_ready,
-                "single observation was treated as a stable environment");
+        require(barrier
+                    .admit(key, ready_request(key.account, *initial_consistency.proof), lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::environment_not_ready,
+                "stale environment proof was replayed after a graph mutation");
 
-        auto foreign_account = ready_request(key.account);
+        auto foreign_account = ready_request(key.account, *fresh_consistency.proof);
         foreign_account.current_account = account(43);
         require(barrier.admit(key, foreign_account, lease).status ==
                     mt5bridge::DispatchAdmissionStatus::account_mismatch,
                 "account mismatch opened the barrier");
 
-        auto blocked = ready_request(key.account);
+        auto blocked = ready_request(key.account, *fresh_consistency.proof);
         blocked.unresolved_operation = true;
         require(barrier.admit(key, blocked, lease).status ==
                     mt5bridge::DispatchAdmissionStatus::unresolved_operation,
@@ -146,18 +211,21 @@ int main() {
                 "event gap did not block admission");
 
         lease.held = false;
-        require(barrier.admit(key, ready_request(key.account), lease).status ==
+        require(barrier.admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
+                        .status ==
                     mt5bridge::DispatchAdmissionStatus::lease_not_held,
                 "missing writer lease opened the barrier");
         lease.held = true;
         lease.token = 0;
-        require(barrier.admit(key, ready_request(key.account), lease).status ==
+        require(barrier.admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
+                        .status ==
                     mt5bridge::DispatchAdmissionStatus::lease_not_held,
                 "zero fencing token opened the barrier");
         lease.token = 77;
 
         store.fail_next = true;
-        require(barrier.admit(key, ready_request(key.account), lease).status ==
+        require(barrier.admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
+                        .status ==
                     mt5bridge::DispatchAdmissionStatus::not_durable,
                 "failed dispatching commit was reported as admitted");
         require(journal.find(key)->journal_state ==
@@ -167,18 +235,18 @@ int main() {
                     mt5bridge::JournalState::dispatch_intent_persisted,
                 "failed dispatching commit changed durable state");
 
-        const auto admitted = barrier.admit(key, ready_request(key.account), lease);
-        require(admitted.admitted() && admitted.permit->fencing_token == 77 &&
+        auto admitted = barrier.admit(
+            key, ready_request(key.account, *fresh_consistency.proof), lease);
+        require(admitted.admitted() && admitted.permit->fencing_token() == 77 &&
                     journal.find(key)->journal_state == mt5bridge::JournalState::dispatching,
                 "valid admission did not commit the non-resendable barrier");
-        require(barrier.admit(key, ready_request(key.account), lease).status ==
+        auto consumed_permit = std::move(*admitted.permit);
+        require(consumed_permit.valid() && !admitted.permit->valid(),
+                "moving a dispatch permit left a second usable capability");
+        require(barrier.admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
+                        .status ==
                     mt5bridge::DispatchAdmissionStatus::invalid_state,
                 "dispatching operation was admitted a second time");
-
-        const auto entered_backend =
-            journal.transition_operation(key, mt5bridge::OperationState::submitting);
-        require(entered_backend.accepted(),
-                "operation could not enter the backend after dispatching");
 
         MemoryStore recovered_store = store;
         mt5bridge::OperationJournal recovered_journal(recovered_store);
@@ -187,10 +255,40 @@ int main() {
                                        mt5bridge::JournalState::dispatching &&
                     recovered.record->fencing_token == 77,
                 "dispatching barrier was not recoverable after restart");
-        mt5bridge::DispatchAdmissionBarrier recovered_barrier(recovered_journal);
-        require(recovered_barrier.admit(key, ready_request(key.account), lease).status ==
-                    mt5bridge::DispatchAdmissionStatus::invalid_state,
+        mt5bridge::DispatchAdmissionBarrier recovered_barrier(recovered_journal,
+                                                               coordinator.graph());
+        require(recovered_barrier
+                    .admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
                 "recovered dispatching operation became resendable");
+        require(recovered_journal
+                    .transition_journal(key, mt5bridge::JournalState::reconciling)
+                    .accepted(),
+                "crash recovery could not enter journal reconciliation");
+        require(recovered_journal.transition_operation(
+                    key, mt5bridge::OperationState::reconciling)
+                    .accepted(),
+                "crash recovery could not enter operation reconciliation");
+
+        const auto entered_backend =
+            journal.transition_operation(key, mt5bridge::OperationState::submitting);
+        require(entered_backend.accepted(),
+                "operation could not enter the backend after dispatching");
+
+        require(journal.transition_journal(key, mt5bridge::JournalState::result_persisted)
+                        .status == mt5bridge::JournalMutationStatus::invalid_transition,
+                "generic result_persisted transition bypassed result payload persistence");
+        require(journal.persist_result(key, {}).status ==
+                    mt5bridge::JournalMutationStatus::invalid_transition,
+                "empty backend result was persisted");
+        require(journal.persist_result(key, {0xA0, 0x01}).accepted(),
+                "backend result payload was not persisted atomically");
+        require(journal.transition_operation(key, mt5bridge::OperationState::reconciling)
+                        .accepted(),
+                "result-bearing operation did not enter reconciliation");
+        require(journal.transition_journal(key, mt5bridge::JournalState::reconciling)
+                        .accepted(),
+                "result journal state did not enter reconciliation");
 
         auto malformed_store = store;
         malformed_store.durable[key].fencing_token = 0;
@@ -198,6 +296,37 @@ int main() {
         require(malformed_journal.recover(key).status ==
                     mt5bridge::JournalMutationStatus::invalid_record,
                 "malformed durable fencing record was recovered");
+        auto malformed_pair_store = store;
+        malformed_pair_store.durable[key].operation_state =
+            mt5bridge::OperationState::queued;
+        mt5bridge::OperationJournal malformed_pair_journal(malformed_pair_store);
+        require(malformed_pair_journal.recover(key).status ==
+                    mt5bridge::JournalMutationStatus::invalid_record,
+                "incompatible journal/operation state pair was recovered");
+
+        const auto stale_key = mt5bridge::OperationKey{account(), 8, 12};
+        MemoryStore stale_store;
+        mt5bridge::OperationJournal owner_a(stale_store);
+        require(owner_a.create(stale_key, {0x04}).accepted(),
+                "stale-writer setup create failed");
+        prepare_for_admission(owner_a, stale_key);
+        mt5bridge::OperationJournal owner_b(stale_store);
+        require(owner_b.recover(stale_key).accepted(),
+                "stale-writer setup recovery failed");
+        mt5bridge::DispatchAdmissionBarrier barrier_a(owner_a, coordinator.graph());
+        mt5bridge::DispatchAdmissionBarrier barrier_b(owner_b, coordinator.graph());
+        const auto admitted_a = barrier_a.admit(
+            stale_key, ready_request(stale_key.account, *fresh_consistency.proof), lease);
+        require(admitted_a.admitted(), "first stale-writer owner was not admitted");
+        lease.token = 78;
+        const auto stale_result = barrier_b.admit(
+            stale_key, ready_request(stale_key.account, *fresh_consistency.proof), lease);
+        require(stale_result.status == mt5bridge::DispatchAdmissionStatus::conflict &&
+                    stale_store.load(stale_key)->fencing_token == 77,
+                "stale owner overwrote a newer dispatching record");
+        require(owner_b.recover(stale_key).record->journal_state ==
+                    mt5bridge::JournalState::dispatching,
+                "stale owner did not observe the durable winner after conflict");
 
         require(mt5bridge::OperationJournal::can_transition_journal(
                     mt5bridge::JournalState::dispatching,

@@ -474,6 +474,18 @@ the barrier but before entering `order_send()`. The system therefore provides
 at-most-once dispatch, not exactly-once delivery. After the call it records
 the raw result before moving to `reconciling`.
 
+The current C++ implementation contains this pre-side-effect slice in
+`mt5bridge/dispatch_journal.hpp`. `OperationJournal` separates the durable
+write-ahead states (`created`, `prechecked`, `dispatch_intent_persisted`,
+`dispatching`, `result_persisted`, `reconciling`) from the canonical
+`OperationState` vocabulary. Every accepted mutation is committed through a
+`DurableJournalStore` before the owner-loop cache changes; a failed commit
+leaves both unchanged. `DispatchAdmissionBarrier` then verifies fresh account
+identity, a `consistent` environment result, unresolved/event-gap blockers,
+and a continuously-held `SingleWriterLease` with a non-zero fencing token
+before durably committing `dispatching`. It returns only a permit for a future
+internal backend call; this slice never calls or exposes `order_send`.
+
 `AccountKey` is immutable for the operation and scopes graph keys as
 `(AccountKey, OrderTicket)`, `(AccountKey, DealTicket)`, and
 `(AccountKey, PositionIdentifier)`. It contains the terminal `server` and

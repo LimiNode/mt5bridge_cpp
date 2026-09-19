@@ -195,14 +195,18 @@ worker process.
    coordinator-created samples with one graph identity and consecutive
    revisions before a future dispatch layer: a deal that becomes visible
    before its history order is `awaiting_confirmation`, direct link conflicts
-   are `cross_view_mismatch`, and changing coherent batches exhaust as
+   are `cross_view_mismatch`, and changing coherent samples exhaust as
    `unstable_environment`. This remains observation-only and has no journal,
    worker, or `order_send` side effect.
-6. Add the durable dispatch journal and reconciliation barrier described in
-   [trade-api.md](trade-api.md); commit `dispatching` before the one internal
-   `order_send` and never resend after that barrier. Admission and the durable
-   dispatch boundary must be designed together.
-7. Add the high-level asynchronous `TradeManager` only after raw observations,
+6. Add the durable dispatch journal and admission barrier described in
+   [ADR-0011](adr/0011-durable-dispatch-admission.md). The current slice
+   persists opaque intent payloads, separates journal state from
+   `OperationState`, verifies AccountKey/environment/fencing evidence, and
+   commits `dispatching` before returning a non-resendable permit. It still
+   performs no backend call and exposes no `order_send`.
+7. Add the internal one-shot backend that consumes that permit and keeps the
+   same writer ownership through the dispatch barrier and call. Then add the
+   high-level asynchronous `TradeManager` only after raw observations,
    journal recovery, and identity rules are covered by fake-runtime tests.
    Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 8. Add timed close obligations, then a separate execution planner for sliced

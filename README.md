@@ -219,6 +219,15 @@ This policy still does not claim an atomic MT5 snapshot and does not call or
 authorize `order_send`; its contract is recorded in
 [`docs/adr/0010-environment-consistency.md`](docs/adr/0010-environment-consistency.md).
 
+This Stage 2 slice adds `mt5bridge::OperationJournal` and
+`mt5bridge::DispatchAdmissionBarrier`. The journal durably records the opaque
+operation intent, AccountKey, managed IDs, and write-ahead states through a
+caller-provided durable store. The barrier requires a consistent environment,
+the same current AccountKey, no unresolved operation or event gap, and a
+non-zero single-writer fencing token before committing `dispatching`. A
+successful admission returns a non-resendable permit; this slice still makes
+no backend call and does not expose or invoke `order_send`.
+
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 
 With a logged-in terminal, run the bounded native market-data smoke check from
@@ -243,7 +252,8 @@ embedded runtime cannot discover it automatically.
   advisory `order_check`, and active/history order, position, and deal POD
   records through `trade.h`; it does not expose an unmanaged `order_send`.
 - The legacy JSON `open_market_buy` convenience method is disabled in ABI 8;
-  durable order dispatch will arrive only with the Stage 2 journal.
+  the Stage 2 journal now defines the pre-side-effect barrier, while the
+  internal backend call remains a later slice.
 - Realtime consumers use `mt5bridge_subscribe_ticks()` and host-driven
   `mt5bridge_process_events()`; overflow is reported as an explicit GAP event.
 - Only 64‑bit Windows builds are supported.

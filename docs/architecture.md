@@ -121,6 +121,12 @@ The observation-only predicate evaluator is specified in
 The synchronous observation coordinator and pre-dispatch consistency gate are
 specified in [ADR-0009](adr/0009-observation-coordinator.md) and exposed by
 `include/mt5bridge/reconciliation_coordinator.hpp`.
+The bounded cross-view environment policy is specified in
+[ADR-0010](adr/0010-environment-consistency.md) and exposed by
+`include/mt5bridge/environment_consistency.hpp`. It checks sequential
+observation batches for account continuity, direct identity-link conflicts,
+and a repeated stable evidence signature; it does not claim that MT5 supplied
+an atomic snapshot.
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -185,22 +191,28 @@ worker process.
    the pure evaluator. The gate may return only evidence-based readiness or an
    explicit unresolved state; this slice still has no `order_send`, journal,
    worker thread, or side effect.
-5. Add the durable dispatch journal and reconciliation barrier described in
+5. Add the bounded environment-consistency policy. Feed it two or more
+   sequential coordinator batches before a future dispatch layer: a deal that
+   becomes visible before its history order is `awaiting_confirmation`, direct
+   link conflicts are `cross_view_mismatch`, and changing coherent batches
+   exhaust as `unstable_environment`. This remains observation-only and has no
+   journal, worker, or `order_send` side effect.
+6. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable
    dispatch boundary must be designed together.
-6. Add the high-level asynchronous `TradeManager` only after raw observations,
+7. Add the high-level asynchronous `TradeManager` only after raw observations,
    journal recovery, and identity rules are covered by fake-runtime tests.
    Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
-7. Add timed close obligations, then a separate execution planner for sliced
+8. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
-8. Add hybrid virtual/broker exit policies and a risk engine only after the
+9. Add hybrid virtual/broker exit policies and a risk engine only after the
    lifecycle and reconciliation invariants are executable.
-9. If startup/reliability requires process isolation, introduce a transport
+10. If startup/reliability requires process isolation, introduce a transport
    implementation behind the same C ABI; do not duplicate business methods.
-10. Add a native or alternate MT5 backend only behind a backend interface after
+11. Add a native or alternate MT5 backend only behind a backend interface after
    measuring lifecycle, error, and compatibility behavior.
-11. After realtime ABI stabilization, ship an external runtime ZIP, split the
+12. After realtime ABI stabilization, ship an external runtime ZIP, split the
    bootstrap/core DLLs, and then produce the self-extracting artifact described
    by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
 

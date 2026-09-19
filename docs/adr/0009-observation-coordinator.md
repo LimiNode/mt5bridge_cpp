@@ -49,9 +49,9 @@ It returns `ready` only when those evidence requirements hold. Other states
 `unresolved_operation`, `account_mismatch`, `graph_mismatch`, `event_gap`, or
 `invalid_request`) are non-authorizing. `ready` is an observation result, not a
 permission to call `order_send`. A request with no active, position, or history
-requirement is invalid rather than vacuously ready. A future
-`EnvironmentConsistencyPolicy` may add stronger cross-view rules without
-changing this observation layer.
+requirement is invalid rather than vacuously ready. The bounded
+`EnvironmentConsistencyPolicy` in ADR-0010 adds stronger cross-view rules
+without changing this observation layer.
 
 ## Consequences
 

@@ -192,11 +192,12 @@ worker process.
    explicit unresolved state; this slice still has no `order_send`, journal,
    worker thread, or side effect.
 5. Add the bounded environment-consistency policy. Feed it two or more
-   sequential coordinator batches before a future dispatch layer: a deal that
-   becomes visible before its history order is `awaiting_confirmation`, direct
-   link conflicts are `cross_view_mismatch`, and changing coherent batches
-   exhaust as `unstable_environment`. This remains observation-only and has no
-   journal, worker, or `order_send` side effect.
+   coordinator-created samples with one graph identity and consecutive
+   revisions before a future dispatch layer: a deal that becomes visible
+   before its history order is `awaiting_confirmation`, direct link conflicts
+   are `cross_view_mismatch`, and changing coherent batches exhaust as
+   `unstable_environment`. This remains observation-only and has no journal,
+   worker, or `order_send` side effect.
 6. Add the durable dispatch journal and reconciliation barrier described in
    [trade-api.md](trade-api.md); commit `dispatching` before the one internal
    `order_send` and never resend after that barrier. Admission and the durable

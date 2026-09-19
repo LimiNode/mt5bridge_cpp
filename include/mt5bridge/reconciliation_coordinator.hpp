@@ -108,6 +108,57 @@ private:
     Client &client_;
 };
 
+/// \class ObservationSample
+/// \brief Provenance-bearing batch accepted by one coordinator graph revision.
+///
+/// The constructor is private so application code cannot manufacture a sample
+/// that was not admitted by `ObservationCoordinator::refresh()`.
+class ObservationSample {
+public:
+    ObservationSample(const ObservationSample &) = default;
+    ObservationSample &operator=(const ObservationSample &) = default;
+    ObservationSample(ObservationSample &&) = default;
+    ObservationSample &operator=(ObservationSample &&) = default;
+
+    /// \brief Returns the accepted observation payload.
+    /// \return Immutable batch collected for this sample.
+    const ObservationBatch &batch() const { return batch_; }
+
+    /// \brief Returns the owning graph's process-local identity.
+    /// \return Graph instance identity captured at admission.
+    std::uint64_t graph_instance_id() const { return graph_instance_id_; }
+
+    /// \brief Returns the graph revision that accepted this batch.
+    /// \return Strictly increasing owner-loop revision.
+    std::uint64_t graph_revision() const { return graph_revision_; }
+
+private:
+    static ObservationSample create(ObservationBatch batch,
+                                    std::uint64_t graph_instance_id,
+                                    std::uint64_t graph_revision) {
+        return ObservationSample(std::move(batch), graph_instance_id, graph_revision);
+    }
+
+    ObservationSample(ObservationBatch batch, std::uint64_t graph_instance_id,
+                      std::uint64_t graph_revision)
+        : batch_(std::move(batch)),
+          graph_instance_id_(graph_instance_id),
+          graph_revision_(graph_revision) {}
+
+    ObservationBatch batch_;
+    std::uint64_t graph_instance_id_ = 0;
+    std::uint64_t graph_revision_ = 0;
+
+    friend class ObservationCoordinator;
+};
+
+/// \struct ObservationRefreshResult
+/// \brief Reports graph admission and its optional accepted sample.
+struct ObservationRefreshResult {
+    ObservationApplyResult apply; ///< Graph admission status and revision.
+    std::optional<ObservationSample> sample; ///< Present only after acceptance.
+};
+
 /// \class ObservationCoordinator
 /// \brief Owns one synchronous graph update loop without runtime side effects.
 class ObservationCoordinator {
@@ -126,14 +177,20 @@ public:
 
     /// \brief Collects one provider batch and atomically applies it to the graph.
     /// \param request Account-wide domains and bounded history windows to collect.
-    /// \return Graph admission status; provider failures propagate as exceptions.
-    ObservationApplyResult refresh(const ObservationCollectionRequest &request) {
+    /// \return Admission plus a provenance-bearing sample after success;
+    /// provider failures propagate as exceptions.
+    ObservationRefreshResult refresh(const ObservationCollectionRequest &request) {
         if (!request.valid())
-            return {ObservationApplyStatus::invalid_evidence, graph_.revision()};
-        const auto batch = provider_.collect(request);
+            return {{ObservationApplyStatus::invalid_evidence, graph_.revision()}, std::nullopt};
+        auto batch = provider_.collect(request);
         if (!matches_request(request, batch))
-            return {ObservationApplyStatus::invalid_evidence, graph_.revision()};
-        return graph_.apply(batch);
+            return {{ObservationApplyStatus::invalid_evidence, graph_.revision()}, std::nullopt};
+        const auto admission = graph_.apply(batch);
+        ObservationRefreshResult result{admission, std::nullopt};
+        if (admission.accepted())
+            result.sample.emplace(ObservationSample::create(
+                std::move(batch), graph_.instance_id(), admission.revision));
+        return result;
     }
 
     /// \brief Captures a baseline owned by this coordinator's graph.

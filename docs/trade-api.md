@@ -241,22 +241,26 @@ journal, WAL, and `order_send` remain a later stage.
 ## Bounded environment consistency
 
 The header [`environment_consistency.hpp`](../include/mt5bridge/environment_consistency.hpp)
-adds the next observation-only layer. `EnvironmentConsistencyPolicy` accepts a
-caller-owned bounded sequence of batches collected for the exact same domains
-and history windows. It verifies account continuity, required known fields,
-unique primary tickets, and identity links visible across the supplied views.
+adds the next observation-only layer. `ObservationCoordinator::refresh()` now
+returns an accepted `ObservationSample` only after the batch has passed shape
+validation and graph admission. `EnvironmentConsistencyPolicy` accepts a
+caller-owned bounded sequence of those samples, requires one graph identity and
+strictly consecutive graph revisions, and verifies exact domains/windows,
+required known fields, unique primary tickets, and identity links visible
+across the supplied views.
 
 Use at least two collections for a normal cycle:
 
 ```cpp
 mt5bridge::EnvironmentConsistencyRequest request;
 auto result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
-    {first_batch, confirmation_batch}, request);
+    {first_sample, confirmation_sample}, request);
 ```
 
 The policy requires two consecutive coherent identity/link signatures for
 `consistent`. A deal that appears before its history order is
-`awaiting_confirmation`, while directly conflicting order/deal links are
+`awaiting_confirmation` only when both active and history order namespaces are
+part of the request; directly conflicting order/deal links are
 `cross_view_mismatch`. An account switch is `account_changed`; changing
 coherent views, or unresolved publication lag after the bounded budget, are
 `unstable_environment`. Missing

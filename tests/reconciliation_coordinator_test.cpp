@@ -111,12 +111,14 @@ int main() {
         mt5bridge::ObservationCollectionRequest empty_collection;
         empty_collection.observe_active_orders = false;
         empty_collection.observe_positions = false;
-        require(coordinator.refresh(empty_collection).status ==
+        require(coordinator.refresh(empty_collection).apply.status ==
                         mt5bridge::ObservationApplyStatus::invalid_evidence &&
-                    provider.calls == 0,
+                        provider.calls == 0,
                 "empty collection request advanced the provider or graph");
         mt5bridge::ObservationCollectionRequest collection;
-        require(coordinator.refresh(collection).accepted() && coordinator.graph().revision() == 1,
+        const auto initial_refresh = coordinator.refresh(collection);
+        require(initial_refresh.apply.accepted() && initial_refresh.sample.has_value() &&
+                    coordinator.graph().revision() == 1,
                 "initial coordinator observation was rejected");
 
         const auto baseline = coordinator.capture_baseline();
@@ -127,7 +129,9 @@ int main() {
         require(gate.state == mt5bridge::DispatchConsistencyState::waiting_for_active_orders,
                 "stale active evidence was admitted before refresh");
 
-        require(coordinator.refresh(collection).accepted() && provider.calls == 2,
+        const auto fresh_refresh = coordinator.refresh(collection);
+        require(fresh_refresh.apply.accepted() && fresh_refresh.sample.has_value() &&
+                    provider.calls == 2,
                 "fresh coordinator observation was rejected");
         gate = mt5bridge::DispatchConsistencyGate::evaluate(coordinator.graph(), gate_request);
         require(gate.ready() && gate.reason == mt5bridge::ReconciliationReason::none,
@@ -142,8 +146,9 @@ int main() {
         require(gate.state == mt5bridge::DispatchConsistencyState::waiting_for_history,
                 "history gate ignored missing post-baseline coverage");
         const auto invalid_batch = coordinator.refresh(collection);
-        require(invalid_batch.status == mt5bridge::ObservationApplyStatus::invalid_evidence &&
-                    invalid_batch.revision == 2 && provider.calls == 3 &&
+        require(invalid_batch.apply.status == mt5bridge::ObservationApplyStatus::invalid_evidence &&
+                    invalid_batch.apply.revision == 2 && !invalid_batch.sample &&
+                    provider.calls == 3 &&
                     coordinator.graph().revision() == 2,
                 "provider returned an unrequested domain and coordinator accepted it");
         gate = mt5bridge::DispatchConsistencyGate::evaluate(coordinator.graph(), history_gate);
@@ -154,7 +159,7 @@ int main() {
         history_collection.observe_active_orders = false;
         history_collection.observe_positions = false;
         history_collection.history_deals_window = *history_gate.history_deals_window;
-        require(coordinator.refresh(history_collection).accepted() && provider.calls == 4 &&
+        require(coordinator.refresh(history_collection).apply.accepted() && provider.calls == 4 &&
                     provider.requests.back().history_deals_window.has_value() &&
                     provider.requests.back().history_deals_window->from_msc ==
                         history_collection.history_deals_window->from_msc &&
@@ -187,8 +192,9 @@ int main() {
             {active_batch({"Other-Server", 42}, {}, {})});
         mt5bridge::ObservationCoordinator account_guard(foreign_provider, key);
         const auto foreign_batch = account_guard.refresh(collection);
-        require(foreign_batch.status == mt5bridge::ObservationApplyStatus::account_mismatch &&
-                    foreign_batch.revision == 0 && account_guard.graph().revision() == 0,
+        require(foreign_batch.apply.status == mt5bridge::ObservationApplyStatus::account_mismatch &&
+                    foreign_batch.apply.revision == 0 && !foreign_batch.sample &&
+                    account_guard.graph().revision() == 0,
                 "foreign account batch crossed the coordinator graph boundary");
 
         mt5bridge::ReconciliationRequest absent_baseline;

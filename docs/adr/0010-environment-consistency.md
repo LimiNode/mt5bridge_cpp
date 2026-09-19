@@ -28,11 +28,16 @@ the broker supplied a single atomic cross-domain snapshot.
 
 `EnvironmentConsistencyPolicy` in
 `include/mt5bridge/environment_consistency.hpp` evaluates a caller-owned
-sequence of `ObservationBatch` values. The caller chooses the exact domains
-and history windows with `EnvironmentConsistencyRequest`; at least two and at
-most eight sequential batches may be supplied for one bounded cycle.
+sequence of `ObservationSample` values returned by
+`ObservationCoordinator::refresh()`. The sample constructor is private to the
+coordinator and carries the accepted batch, graph instance identity, and exact
+graph revision. The policy requires one graph identity and strictly consecutive
+revisions, so copying one sample twice or skipping a graph mutation cannot
+masquerade as sequential evidence. The caller chooses the exact domains and
+history windows with `EnvironmentConsistencyRequest`; at least two and at
+most eight sequential samples may be supplied for one bounded cycle.
 
-Every batch must satisfy all of the following before it can contribute
+Every sample's batch must satisfy all of the following before it can contribute
 evidence:
 
 - the account key is complete and equal to every other batch's `(server,
@@ -48,9 +53,9 @@ The policy then checks the links that can be proved from the supplied views:
 - active orders with a non-zero `ORDER_POSITION_ID` or known non-zero
   `ORDER_POSITION_BY_ID` must have a currently observed matching
   `POSITION_IDENTIFIER` when the positions domain is requested;
-- an observed deal whose `DEAL_ORDER` is not yet present in the requested order
-  view is provisional, not contradictory, because MT5 may publish the deal
-  first;
+- an observed deal whose `DEAL_ORDER` is not yet present while both active and
+  history order namespaces are requested is provisional, not contradictory,
+  because MT5 may publish the deal first;
 - if no active/history order namespace is requested, or the deal timestamp lies
   outside the requested history-order coverage, the order link is
   `insufficient_evidence` rather than an inferred absence;
@@ -116,9 +121,11 @@ operation account, capabilities, writer ownership, and durable dispatch state.
 
 ## Verification
 
-`tests/environment_consistency_test.cpp` covers stable repeated views,
-single-observation waiting, missing active-position links, delayed
-deal-before-order publication, direct order/deal mismatch, account changes,
-bounded instability, closed-position history, malformed known fields, and
-invalid empty requests. The test uses only deterministic POD batches and does
-not load Python or MetaTrader5.
+`tests/environment_consistency_test.cpp` covers coordinator-created provenance
+samples, strict graph identity/revision sequencing, stable repeated views,
+single-observation waiting, copied-sample rejection, missing active-position
+links, delayed deal-before-order publication, direct order/deal mismatch,
+account changes, bounded instability, closed-position history, partial/reversal
+topology, known-zero versus unknown fields, missing timestamp knownness, and
+invalid empty requests. The test uses only a deterministic fake provider and
+POD batches; it does not load Python or MetaTrader5.

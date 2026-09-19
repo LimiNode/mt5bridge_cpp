@@ -3,12 +3,13 @@
 /// \file environment_consistency.hpp
 /// \brief Defines bounded cross-view consistency checks for MT5 observations.
 
-#include "reconciliation.hpp"
+#include "reconciliation_coordinator.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <vector>
@@ -93,15 +94,15 @@ struct EnvironmentConsistencyResult {
 /// It checks account provenance, the requested observation shape, and links that
 /// are visible in the supplied views. Missing links are treated as provisional
 /// when MT5 can legitimately publish the related records at different times.
-/// Callers provide one or more sequential batches and own the retry cadence.
+/// Callers provide one or more sequential samples and own the retry cadence.
 class EnvironmentConsistencyPolicy {
 public:
     /// \brief Evaluates a bounded sequence of observations.
-    /// \param observations Sequential batches collected for one account.
+    /// \param observations Sequential samples accepted by one coordinator graph.
     /// \param request Required domains and confirmation budget.
     /// \return Fail-closed consistency state; no runtime call is made.
     static EnvironmentConsistencyResult evaluate(
-        const std::vector<ObservationBatch> &observations,
+        const std::vector<ObservationSample> &observations,
         const EnvironmentConsistencyRequest &request) {
         EnvironmentConsistencyResult result;
         result.observation_count = observations.size();
@@ -113,15 +114,22 @@ public:
         }
 
         const auto &first = observations.front();
-        if (!first.account.valid()) {
+        if (first.graph_instance_id() == 0 || first.graph_revision() == 0) {
             result.state = EnvironmentConsistencyState::insufficient_evidence;
             return result;
         }
-        result.account = first.account;
+        const auto graph_instance_id = first.graph_instance_id();
+        if (!first.batch().account.valid()) {
+            result.state = EnvironmentConsistencyState::insufficient_evidence;
+            return result;
+        }
+        result.account = first.batch().account;
 
         std::vector<BatchAnalysis> analyses;
         analyses.reserve(observations.size());
-        for (const auto &observation : observations) {
+        std::uint64_t previous_revision = 0;
+        for (const auto &sample : observations) {
+            const auto &observation = sample.batch();
             if (!observation.account.valid()) {
                 result.state = EnvironmentConsistencyState::insufficient_evidence;
                 return result;
@@ -130,6 +138,15 @@ public:
                 result.state = EnvironmentConsistencyState::account_changed;
                 return result;
             }
+            if (sample.graph_instance_id() != graph_instance_id ||
+                sample.graph_revision() == 0 ||
+                (previous_revision != 0 &&
+                 (previous_revision == (std::numeric_limits<std::uint64_t>::max)() ||
+                  sample.graph_revision() != previous_revision + 1))) {
+                result.state = EnvironmentConsistencyState::insufficient_evidence;
+                return result;
+            }
+            previous_revision = sample.graph_revision();
             if (!matches_request(observation, request)) {
                 result.state = EnvironmentConsistencyState::insufficient_evidence;
                 return result;
@@ -180,7 +197,7 @@ public:
     }
 
 private:
-    using SignatureItem = std::array<std::uint64_t, 4>;
+    using SignatureItem = std::array<std::uint64_t, 5>;
 
     struct BatchAnalysis {
         std::vector<SignatureItem> signature;
@@ -237,7 +254,7 @@ private:
         std::map<std::uint64_t, bool> tickets;
         constexpr std::uint64_t required_fields =
             MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
-            MT5BRIDGE_DEAL_KNOWN_POSITION_ID;
+            MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_TIME;
         for (const auto &value : values) {
             if (value.ticket == 0 || !has_field(value.known_fields, required_fields) ||
                 !tickets.emplace(value.ticket, true).second)
@@ -268,9 +285,11 @@ private:
         const bool active_valid =
             !request.require_active_orders || valid_orders(batch.active_orders, order_fields,
                                                             std::nullopt);
+        const auto history_order_fields = order_fields | MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
         const bool history_orders_valid =
             !request.history_orders_window ||
-            valid_orders(batch.history_orders, order_fields, request.history_orders_window);
+            valid_orders(batch.history_orders, history_order_fields,
+                         request.history_orders_window);
         return active_valid &&
                (!request.require_positions || valid_positions(batch.positions)) &&
                history_orders_valid &&
@@ -291,12 +310,14 @@ private:
                                                                          value.ticket);
             if (!inserted.second && inserted.first->second != value.ticket)
                 ++result.contradictory_links;
-            result.signature.push_back({2, value.ticket, value.identifier, 0});
+            result.signature.push_back({2, value.ticket, value.identifier, 0, 0});
         }
         for (const auto &value : batch.active_orders) {
             active_order_positions.emplace(value.ticket, value.position_id);
-            result.signature.push_back({1, value.ticket, value.position_id,
-                                        value.position_by_id});
+            result.signature.push_back(
+                {1, value.ticket, value.position_id, value.position_by_id,
+                 has_field(value.known_fields, MT5BRIDGE_ORDER_KNOWN_POSITION_BY_ID) ? 1u
+                                                                                      : 0u});
             if (request.require_positions && value.position_id != 0 &&
                 position_identifier_to_ticket.find(value.position_id) ==
                     position_identifier_to_ticket.end())
@@ -310,11 +331,11 @@ private:
         }
         for (const auto &value : batch.history_orders) {
             history_order_positions.emplace(value.ticket, value.position_id);
-            result.signature.push_back({3, value.ticket, value.position_id, 0});
+            result.signature.push_back({3, value.ticket, value.position_id, 0, 0});
         }
         for (const auto &value : batch.history_deals) {
             result.signature.push_back({4, value.ticket, value.order_ticket,
-                                        value.position_id});
+                                        value.position_id, 0});
             if (value.order_ticket != 0 &&
                 (observes(batch.observed_domains, ObservationDomain::history_orders) ||
                  observes(batch.observed_domains, ObservationDomain::active_orders))) {
@@ -322,7 +343,8 @@ private:
                 const auto active_order = active_order_positions.find(value.order_ticket);
                 if (history_order == history_order_positions.end() &&
                     active_order == active_order_positions.end() &&
-                    observes(batch.observed_domains, ObservationDomain::history_orders)) {
+                    observes(batch.observed_domains, ObservationDomain::history_orders) &&
+                    observes(batch.observed_domains, ObservationDomain::active_orders)) {
                     if (!batch.history_orders_window || !batch.history_deals_window ||
                         !in_window(value.time_msc, *batch.history_orders_window))
                         ++result.insufficient_links;

@@ -30,9 +30,14 @@ graph unchanged because the apply step has not started.
 
 `ObservationCoordinator` owns one non-copyable `ObservationGraph` and one
 provider reference. `refresh()` is synchronous and caller-driven: it does not
-create a worker thread, retry a failed call, or infer a deadline. The caller
-captures a `ReconciliationBaseline` after an initial observation and retains it
-for subsequent checks on that same coordinator graph.
+create a worker thread, retry a failed call, or infer a deadline. After a
+successful graph apply it returns an `ObservationRefreshResult` containing an
+`ObservationSample` whose constructor is private to the coordinator. The
+sample carries the accepted batch, graph instance identity, and exact graph
+revision, so a later policy cannot treat a copied batch as a new observation or
+silently combine samples from another graph. The caller captures a
+`ReconciliationBaseline` after an initial observation and retains it for
+subsequent checks on that same coordinator graph.
 
 `DispatchConsistencyGate` is a pure observation-readiness predicate, not a
 proof of an atomic MT5 environment snapshot. Its sequential provider calls may
@@ -69,8 +74,8 @@ without changing this observation layer.
 `tests/reconciliation_coordinator_test.cpp` covers empty-request rejection,
 baseline freshness, exact request/batch validation with graph immutability,
 authoritative active/position refresh, bounded history coverage, event gaps,
-unresolved operations, vacuous-gate rejection, account mismatch, and graph
-provenance mismatch. The test uses only a deterministic fake provider; it does
-not load Python or MetaTrader5. The before/after account guard in
-`ClientObservationProvider` is enforced before graph commit and remains
-independent of graph commit atomicity.
+unresolved operations, vacuous-gate rejection, account mismatch, graph
+provenance mismatch, and accepted-sample production. The test uses only a
+deterministic fake provider; it does not load Python or MetaTrader5. The
+before/after account guard in `ClientObservationProvider` is enforced before
+graph commit and remains independent of graph commit atomicity.

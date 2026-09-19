@@ -78,7 +78,7 @@ insufficient_evidence
 invalid_request
 ```
 
-`consistent` requires two consecutive batches with no unresolved links and the
+`consistent` requires two consecutive samples with no unresolved links and the
 same deterministic identity/link signature. A missing counterpart or a deal
 that precedes its history order yields `awaiting_confirmation` while the
 bounded budget remains; if the budget is exhausted without a confirmation it

@@ -18,7 +18,8 @@ constexpr std::uint64_t kPositionFields =
     MT5BRIDGE_POSITION_KNOWN_TICKET | MT5BRIDGE_POSITION_KNOWN_IDENTIFIER;
 constexpr std::uint64_t kDealFields =
     MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
-    MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_TIME;
+    MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
+    MT5BRIDGE_DEAL_KNOWN_TIME;
 
 void require(bool condition, const char *message) {
     if (!condition)
@@ -335,6 +336,22 @@ int main() {
         result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(pending_samples, request);
         require(result.consistent(), "known zero ORDER_POSITION_ID was rejected");
 
+        // A partial fill may leave an active remainder order alongside its
+        // position and the deals already published for the filled volume.
+        auto partial_remainder = order(20, 700);
+        partial_remainder.volume_initial = 1.0;
+        partial_remainder.volume_current = 0.4;
+        partial_remainder.known_fields |= MT5BRIDGE_ORDER_KNOWN_VOLUME_INITIAL |
+                                          MT5BRIDGE_ORDER_KNOWN_VOLUME_CURRENT;
+        const auto partial_fill = complete_batch(
+            key, {partial_remainder}, {position(500, 700)}, {history_order(20, 700)},
+            {deal(30, 20, 700), deal(31, 20, 700)});
+        const auto partial_fill_samples = samples_for({partial_fill, partial_fill}, full_request);
+        result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            partial_fill_samples, full_request);
+        require(result.consistent(),
+                "active partial-fill remainder was treated as a topology conflict");
+
         // Reversal entry changes payload semantics, not identity topology.
         const auto reversal = complete_batch(
             key, {order(20, 700)}, {position(500, 700)}, {history_order(20, 700)},
@@ -346,7 +363,21 @@ int main() {
 
         auto known_zero = order(20, 700);
         known_zero.known_fields |= MT5BRIDGE_ORDER_KNOWN_POSITION_BY_ID;
-        const auto unknown_by_id = active_batch(key, {order(20, 700)}, {position(500, 700)});
+        auto unknown_payload_a = order(20, 700);
+        unknown_payload_a.position_by_id = 123;
+        auto unknown_payload_b = order(20, 700);
+        unknown_payload_b.position_by_id = 456;
+        const auto unknown_payload_samples = samples_for(
+            {active_batch(key, {unknown_payload_a}, {position(500, 700)}),
+             active_batch(key, {unknown_payload_b}, {position(500, 700)})},
+            request);
+        result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            unknown_payload_samples, request);
+        require(result.consistent(),
+                "unknown POSITION_BY_ID payload affected the topology signature");
+
+        const auto unknown_by_id =
+            active_batch(key, {unknown_payload_a}, {position(500, 700)});
         const auto known_zero_by_id = active_batch(key, {known_zero}, {position(500, 700)});
         const auto by_id_samples = samples_for({unknown_by_id, known_zero_by_id}, request);
         result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(by_id_samples, request);

@@ -314,10 +314,12 @@ private:
         }
         for (const auto &value : batch.active_orders) {
             active_order_positions.emplace(value.ticket, value.position_id);
+            const bool has_position_by_id =
+                has_field(value.known_fields, MT5BRIDGE_ORDER_KNOWN_POSITION_BY_ID);
             result.signature.push_back(
-                {1, value.ticket, value.position_id, value.position_by_id,
-                 has_field(value.known_fields, MT5BRIDGE_ORDER_KNOWN_POSITION_BY_ID) ? 1u
-                                                                                      : 0u});
+                {1, value.ticket, value.position_id,
+                 has_position_by_id ? value.position_by_id : 0u,
+                 has_position_by_id ? 1u : 0u});
             if (request.require_positions && value.position_id != 0 &&
                 position_identifier_to_ticket.find(value.position_id) ==
                     position_identifier_to_ticket.end())

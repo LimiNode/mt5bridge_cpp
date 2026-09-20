@@ -36,6 +36,16 @@ target_include_directories(mt5bridge_journal PUBLIC
 add_library(mt5bridge::journal ALIAS mt5bridge_journal)
 set_target_properties(mt5bridge_journal PROPERTIES EXPORT_NAME journal)
 
+# Private execution seam for the future Python/terminal adapter.  It is kept
+# separate from the exported client and journal targets so no unmanaged send
+# function becomes part of the consumer SDK.
+add_library(mt5bridge_one_shot_backend STATIC
+            src/runtime/one_shot_backend.cpp)
+target_include_directories(mt5bridge_one_shot_backend PRIVATE
+                           ${PROJECT_SOURCE_DIR}/include
+                           ${PROJECT_SOURCE_DIR}/src/runtime)
+add_library(mt5bridge::one_shot_backend ALIAS mt5bridge_one_shot_backend)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -68,6 +78,15 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_file_journal_store
              COMMAND mt5bridge_file_journal_store_test)
+    add_executable(mt5bridge_one_shot_backend_test
+                   tests/one_shot_backend_test.cpp)
+    target_include_directories(mt5bridge_one_shot_backend_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/runtime)
+    target_link_libraries(mt5bridge_one_shot_backend_test PRIVATE
+                          mt5bridge::client mt5bridge::journal
+                          mt5bridge::one_shot_backend)
+    add_test(NAME mt5bridge_one_shot_backend
+             COMMAND mt5bridge_one_shot_backend_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)

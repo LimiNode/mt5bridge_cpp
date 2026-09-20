@@ -74,10 +74,12 @@ pass in the same owner loop:
 
 The durable transition returns a move-only, barrier-created `DispatchPermit`
 carrying the operation key, fencing token, and committed journal revision. The
-current slice stops there: it has no backend adapter and no `order_send`. A
-future internal backend must consume the permit while retaining the same
-lease/fencing ownership and revalidate the journal revision before the side
-effect; a recovered `dispatching` record is never automatically resent.
+barrier itself has no terminal adapter and no public `order_send`; the private
+one-shot execution seam is specified separately in
+[ADR-0013](0013-one-shot-backend.md). That seam consumes the permit while
+retaining the same lease/fencing ownership and revalidates the journal revision
+before the side effect; a recovered `dispatching` record is never automatically
+resent.
 
 ## Consequences
 

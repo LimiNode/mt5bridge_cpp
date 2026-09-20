@@ -1,0 +1,276 @@
+/// \file one_shot_backend_test.cpp
+/// \brief Exercises guarded one-shot backend execution and broker rejection.
+
+#include "one_shot_backend.hpp"
+
+#include <mt5bridge.hpp>
+
+#include <cstdlib>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace {
+
+void require(bool condition, const char *message) {
+    if (!condition)
+        throw std::runtime_error(message);
+}
+
+mt5bridge::AccountKey account() { return {"Demo-Trade", 42}; }
+
+mt5bridge::OperationKey key(std::uint64_t trade_id) {
+    return {account(), trade_id, trade_id + 100};
+}
+
+class MemoryStore final : public mt5bridge::DurableJournalStore {
+public:
+    mt5bridge::StoreCommitStatus commit(
+        const mt5bridge::OperationRecord &record,
+        std::optional<std::uint64_t> expected_revision) override {
+        const auto it = durable.find(record.key);
+        if (expected_revision) {
+            if (it == durable.end() || it->second.revision != *expected_revision)
+                return mt5bridge::StoreCommitStatus::conflict;
+        } else if (it != durable.end()) {
+            return mt5bridge::StoreCommitStatus::conflict;
+        }
+        durable[record.key] = record;
+        return mt5bridge::StoreCommitStatus::committed;
+    }
+
+    std::optional<mt5bridge::OperationRecord> load(
+        const mt5bridge::OperationKey &operation_key) const override {
+        const auto it = durable.find(operation_key);
+        return it == durable.end() ? std::nullopt
+                                   : std::optional<mt5bridge::OperationRecord>(it->second);
+    }
+
+private:
+    std::map<mt5bridge::OperationKey, mt5bridge::OperationRecord> durable;
+};
+
+class FakeObservationProvider final : public mt5bridge::ObservationProvider {
+public:
+    explicit FakeObservationProvider(std::vector<mt5bridge::ObservationBatch> batches)
+        : batches_(std::move(batches)) {}
+
+    mt5bridge::ObservationBatch collect(
+        const mt5bridge::ObservationCollectionRequest &) override {
+        if (next_ == batches_.size())
+            throw std::runtime_error("observation provider exhausted");
+        return std::move(batches_[next_++]);
+    }
+
+private:
+    std::vector<mt5bridge::ObservationBatch> batches_;
+    std::size_t next_ = 0;
+};
+
+mt5bridge::ObservationBatch observation_batch(const mt5bridge::AccountKey &key) {
+    mt5bridge::ObservationBatch batch;
+    batch.account = key;
+    batch.observed_domains = mt5bridge::ObservationDomain::active_orders |
+                             mt5bridge::ObservationDomain::positions;
+    Mt5OrderSnapshot order{};
+    order.ticket = 20;
+    order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                         MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
+    batch.active_orders.push_back(order);
+    return batch;
+}
+
+class FakeLease final : public mt5bridge::SingleWriterLease {
+public:
+    explicit FakeLease(mt5bridge::AccountKey account) : owned_account(std::move(account)) {}
+
+    std::optional<std::uint64_t> held_fencing_token(
+        const mt5bridge::AccountKey &requested) const override {
+        ++calls;
+        if (!held || requested != owned_account ||
+            (drop_before_call && calls >= 3))
+            return std::nullopt;
+        return token;
+    }
+
+    mt5bridge::AccountKey owned_account;
+    std::uint64_t token = 77;
+    mutable std::size_t calls = 0;
+    bool held = true;
+    bool drop_before_call = false;
+};
+
+class FakeTransport final : public mt5bridge::runtime::DispatchTransport {
+public:
+    mt5bridge::runtime::BackendCallResult submit_once(
+        const mt5bridge::OperationRecord &record) override {
+        ++calls;
+        last_request = record.request_payload;
+        return next;
+    }
+
+    mt5bridge::runtime::BackendCallResult next{
+        mt5bridge::runtime::BackendCallStatus::broker_result,
+        mt5bridge::runtime::BrokerResultDisposition::reconciling,
+        0,
+        {0xA0, 0x01}};
+    std::size_t calls = 0;
+    std::vector<std::uint8_t> last_request;
+};
+
+void prepare_for_admission(mt5bridge::OperationJournal &journal,
+                           const mt5bridge::OperationKey &operation_key) {
+    require(journal.transition_operation(operation_key,
+                                         mt5bridge::OperationState::prechecking)
+                .accepted(),
+            "prechecking transition failed");
+    require(journal.transition_journal(operation_key, mt5bridge::JournalState::prechecked)
+                .accepted(),
+            "prechecked transition failed");
+    require(journal.transition_journal(
+                operation_key, mt5bridge::JournalState::dispatch_intent_persisted)
+                .accepted(),
+            "dispatch intent transition failed");
+}
+
+std::optional<mt5bridge::DispatchPermit> admit(
+    mt5bridge::OperationJournal &journal, const mt5bridge::ObservationGraph &graph,
+    const mt5bridge::OperationKey &operation_key,
+    const mt5bridge::EnvironmentConsistencyProof &proof, FakeLease &lease) {
+    mt5bridge::EnvironmentConsistencyRequest scope;
+    mt5bridge::DispatchAdmissionBarrier barrier(journal, graph, scope);
+    mt5bridge::DispatchAdmissionRequest request;
+    request.current_account = operation_key.account;
+    request.environment_proof = proof;
+    auto result = barrier.admit(operation_key, request, lease);
+    if (!result.admitted())
+        return std::nullopt;
+    return std::move(result.permit);
+}
+
+} // namespace
+
+/// \brief Runs one-shot backend safety and broker rejection checks.
+/// \return Zero on success; non-zero when an invariant fails.
+int main() {
+    try {
+        const auto operation_account = account();
+        FakeObservationProvider provider(
+            {observation_batch(operation_account), observation_batch(operation_account)});
+        mt5bridge::ObservationCoordinator coordinator(provider, operation_account);
+        mt5bridge::ObservationCollectionRequest collection;
+        const auto first = coordinator.refresh(collection);
+        const auto second = coordinator.refresh(collection);
+        require(first.sample && second.sample, "observation setup failed");
+        mt5bridge::EnvironmentConsistencyRequest consistency_request;
+        const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {*first.sample, *second.sample}, consistency_request);
+        require(consistency.consistent() && consistency.proof,
+                "consistent proof setup failed");
+
+        MemoryStore store;
+        mt5bridge::OperationJournal journal(store);
+        const auto rejected_key = key(7);
+        require(journal.create(rejected_key, {0x01, 0x02}).accepted(),
+                "rejection operation create failed");
+        prepare_for_admission(journal, rejected_key);
+        FakeLease lease{operation_account};
+        auto permit = admit(journal, coordinator.graph(), rejected_key,
+                            *consistency.proof, lease);
+        require(permit.has_value(), "dispatch permit setup failed");
+
+        FakeTransport transport;
+        transport.next.retcode = mt5bridge::runtime::kTradeRetcodeMarketClosed;
+        transport.next.disposition =
+            mt5bridge::runtime::BrokerResultDisposition::rejected;
+        mt5bridge::runtime::OneShotDispatchBackend backend;
+        auto executed = backend.execute(journal, rejected_key, std::move(*permit),
+                                         operation_account, lease, transport);
+        require(executed.completed() && executed.retcode == 10018 &&
+                    executed.record &&
+                    executed.record->operation_state == mt5bridge::OperationState::rejected &&
+                    executed.record->journal_state == mt5bridge::JournalState::result_persisted &&
+                    executed.record->result_payload == std::vector<std::uint8_t>({0xA0, 0x01}) &&
+                    transport.calls == 1,
+                "market-closed broker rejection was not durably classified");
+        auto retry = backend.execute(journal, rejected_key, std::move(*permit),
+                                     operation_account, lease, transport);
+        require(retry.status == mt5bridge::runtime::OneShotExecutionStatus::invalid_permit &&
+                    transport.calls == 1,
+                "consumed permit enabled a second backend call");
+
+        const auto stale_key = key(8);
+        require(journal.create(stale_key, {0x03}).accepted(),
+                "stale-permit operation create failed");
+        prepare_for_admission(journal, stale_key);
+        FakeLease stale_lease{operation_account};
+        auto stale_permit = admit(journal, coordinator.graph(), stale_key,
+                                  *consistency.proof, stale_lease);
+        require(stale_permit.has_value(), "stale-permit setup failed");
+        require(journal.transition_operation(stale_key,
+                                             mt5bridge::OperationState::submitting)
+                    .accepted(),
+                "stale-permit mutation setup failed");
+        FakeTransport stale_transport;
+        const auto stale_result = backend.execute(
+            journal, stale_key, std::move(*stale_permit), operation_account,
+            stale_lease, stale_transport);
+        require(stale_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::stale_permit &&
+                    stale_transport.calls == 0,
+                "stale permit reached the transport");
+
+        const auto lease_key = key(9);
+        require(journal.create(lease_key, {0x03}).accepted(),
+                "lease-loss operation create failed");
+        prepare_for_admission(journal, lease_key);
+        FakeLease dropping_lease{operation_account};
+        dropping_lease.drop_before_call = true;
+        auto lease_permit = admit(journal, coordinator.graph(), lease_key,
+                                  *consistency.proof, dropping_lease);
+        require(lease_permit.has_value(), "lease-loss permit setup failed");
+        FakeTransport lease_transport;
+        const auto lease_result = backend.execute(
+            journal, lease_key, std::move(*lease_permit), operation_account,
+            dropping_lease, lease_transport);
+        require(lease_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::lease_lost &&
+                    lease_transport.calls == 0 &&
+                    journal.find(lease_key)->operation_state ==
+                        mt5bridge::OperationState::submitting,
+                "lease loss before side effect was not fail-closed");
+
+        const auto transport_key = key(10);
+        require(journal.create(transport_key, {0x04}).accepted(),
+                "transport-failure operation create failed");
+        prepare_for_admission(journal, transport_key);
+        FakeLease transport_lease{operation_account};
+        auto transport_permit = admit(journal, coordinator.graph(), transport_key,
+                                      *consistency.proof, transport_lease);
+        require(transport_permit.has_value(), "transport-failure permit setup failed");
+        FakeTransport failing_transport;
+        failing_transport.next.status =
+            mt5bridge::runtime::BackendCallStatus::transport_failure;
+        failing_transport.next.raw_result.clear();
+        const auto transport_result = backend.execute(
+            journal, transport_key, std::move(*transport_permit), operation_account,
+            transport_lease, failing_transport);
+        require(transport_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::transport_failure &&
+                    failing_transport.calls == 1 &&
+                    journal.find(transport_key)->journal_state ==
+                        mt5bridge::JournalState::dispatching &&
+                    journal.find(transport_key)->operation_state ==
+                        mt5bridge::OperationState::submitting,
+                "transport failure reopened or retried the operation");
+
+        std::cout << "one-shot backend checks passed\n";
+        return EXIT_SUCCESS;
+    } catch (const std::exception &error) {
+        std::cerr << "one-shot backend checks failed: " << error.what() << '\n';
+        return EXIT_FAILURE;
+    }
+}

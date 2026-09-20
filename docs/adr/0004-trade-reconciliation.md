@@ -190,6 +190,10 @@ PENDING, CONFIRMED, NOT_OBSERVED, ACCOUNT_MISMATCH, TRADE_EVENT_GAP, AMBIGUOUS
   `PLACED` is success for a pending order, and `DONE_PARTIAL` is not by itself
   a terminal operation; `TIMEOUT`, `REQUOTE`, and `REJECT` have distinct
   outcomes.
+- `TRADE_RETCODE_MARKET_CLOSED` (`10018`) from `order_send` is a deterministic
+  broker rejection even when `order_check` returned `Done`; persist the full
+  result, mark the operation `rejected`, and do not retry or classify it as
+  transport ambiguity.
 - The raw result preserves `retcode`, `retcode_external`, `order`, `deal`, and
   all other fields returned by MT5. No field is promoted to a universal
   position or completion identifier.

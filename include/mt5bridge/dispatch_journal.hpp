@@ -217,6 +217,7 @@ constexpr bool valid_state_pair(JournalState journal_state,
     case JournalState::result_persisted:
         return operation_state == OperationState::submitting ||
                operation_state == OperationState::accepted ||
+               operation_state == OperationState::rejected ||
                operation_state == OperationState::reconciling ||
                operation_state == OperationState::ambiguous;
     case JournalState::reconciling:
@@ -456,6 +457,11 @@ public:
             (!journal_at_least_result_persisted(it->second.journal_state) ||
              it->second.result_payload.empty()))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (next_state == OperationState::rejected &&
+            it->second.operation_state == OperationState::submitting &&
+            (!journal_at_least_result_persisted(it->second.journal_state) ||
+             it->second.result_payload.empty()))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
@@ -512,6 +518,7 @@ public:
                    next == OperationState::rejected || next == OperationState::failed;
         case OperationState::submitting:
             return next == OperationState::accepted ||
+                   next == OperationState::rejected ||
                    next == OperationState::reconciling ||
                    next == OperationState::ambiguous;
         case OperationState::accepted:

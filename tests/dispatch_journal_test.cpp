@@ -349,6 +349,9 @@ int main() {
         require(journal.transition_operation(key, mt5bridge::OperationState::accepted)
                         .status == mt5bridge::JournalMutationStatus::invalid_transition,
                 "accepted operation state bypassed result persistence");
+        require(journal.transition_operation(key, mt5bridge::OperationState::rejected)
+                        .status == mt5bridge::JournalMutationStatus::invalid_transition,
+                "rejected operation state bypassed result persistence");
         const std::vector<std::uint8_t> result_payload{0xA0, 0x01};
         require(journal.persist_result(key, result_payload).accepted(),
                 "backend result payload was not persisted atomically");

@@ -229,10 +229,12 @@ a directory lock. The barrier requires an opaque scope- and
 revision-bound environment proof covering its configured domains/history
 windows, the same current AccountKey and graph revision, no
 unresolved operation or event gap, and a non-zero single-writer fencing token
-before committing `dispatching`. A successful admission returns a move-only
-non-resendable permit; this slice still makes no backend call and does not
-expose or invoke `order_send`. A future backend may enter `accepted` only after
-`persist_result(payload)` has durably recorded its raw result.
+before committing `dispatching`. The private one-shot backend consumes that
+permit only after repeating the account/lease/revision checks, calls its
+injected transport once, and persists the complete raw result before advancing
+the lifecycle. `10018 MARKET_CLOSED` is recorded as deterministic
+`rejected`; transport failures remain unresolved and are never retried. No
+unmanaged public `order_send` is exposed.
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

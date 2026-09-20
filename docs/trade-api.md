@@ -489,10 +489,16 @@ with a non-zero fencing token before durably committing `dispatching`.
 `persist_result(result_payload)`; `accepted` follows only after that payload
 is durable, and stale writers receive a CAS conflict.
 The barrier returns only a move-only permit for a future internal backend call;
-this slice never calls or exposes `order_send`. The Windows-native
+the private `runtime::OneShotDispatchBackend` consumes that permit only after
+repeating the account, journal revision, and lease checks, then invokes its
+injected transport exactly once. It never exposes an unmanaged public
+`order_send`. The Windows-native
 `WindowsFileJournalStore` implements the same seam with a directory lock,
 bounded checksum-validated records, and atomic replacement; it is packaged in
 the Python-free `mt5bridge::journal` target rather than the runtime DLL.
+The full raw result is persisted before lifecycle advancement; broker
+`10018 MARKET_CLOSED` becomes deterministic `rejected`, while transport
+failures remain unresolved and are never retried.
 
 `AccountKey` is immutable for the operation and scopes graph keys as
 `(AccountKey, OrderTicket)`, `(AccountKey, DealTicket)`, and

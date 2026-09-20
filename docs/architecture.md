@@ -100,7 +100,10 @@ src/
 The public journal headers also include `dispatch_journal.hpp` and
 `file_journal_store.hpp`. The latter is implemented by the Python-free
 `src/runtime/file_journal_store.cpp` source in the separate
-`mt5bridge::journal` target; it is not part of the CPython-backed DLL.
+`mt5bridge::journal` target. The private one-shot execution seam lives in
+`src/runtime/one_shot_backend.hpp/.cpp` and is built as
+`mt5bridge::one_shot_backend`; neither target is part of the CPython-backed
+DLL.
 
 Everything below `include/mt5bridge*` is consumer-facing SDK/API. The source
 under `src/runtime/` is implementation owned by the native targets and must
@@ -139,6 +142,9 @@ in [ADR-0011](adr/0011-durable-dispatch-admission.md), while the concrete
 Windows file-backed store is specified in
 [ADR-0012](adr/0012-windows-file-journal-store.md). The store is a separate
 Python-free native target and never adds an unmanaged `order_send` surface.
+The guarded one-shot execution seam and broker rejection handling are specified
+in [ADR-0013](adr/0013-one-shot-backend.md); its terminal adapter remains
+private and must preserve the same account and fencing checks.
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -220,8 +226,11 @@ worker process.
     supplies bounded, checksum-validated, atomically replaced records for this
     seam.
 7. Add the internal one-shot backend that consumes that permit and keeps the
-   same writer ownership through the dispatch barrier and call. Then add the
-   high-level asynchronous `TradeManager` only after raw observations,
+   same writer ownership through the dispatch barrier and call. The backend
+   persists the full raw result before classifying deterministic broker
+   rejections such as `10018 MARKET_CLOSED`; it never infers session state from
+   `trade_mode` or `order_check` and never retries transport failures. Then add
+   the high-level asynchronous `TradeManager` only after raw observations,
    journal recovery, and identity rules are covered by fake-runtime tests.
    Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 8. Add timed close obligations, then a separate execution planner for sliced

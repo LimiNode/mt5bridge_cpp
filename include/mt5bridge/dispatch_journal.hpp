@@ -91,6 +91,32 @@ constexpr bool valid_journal_state(JournalState state) {
     return false;
 }
 
+/// \brief Tests whether a journal state is at or beyond the dispatch barrier.
+/// \param state Candidate journal state.
+/// \return True for `dispatching`, `result_persisted`, or `reconciling`.
+constexpr bool journal_at_least_dispatching(JournalState state) {
+    return state == JournalState::dispatching ||
+           state == JournalState::result_persisted ||
+           state == JournalState::reconciling;
+}
+
+/// \brief Tests whether a journal state follows durable result persistence.
+/// \param state Candidate journal state.
+/// \return True for `result_persisted` or `reconciling`.
+constexpr bool journal_at_least_result_persisted(JournalState state) {
+    return state == JournalState::result_persisted ||
+           state == JournalState::reconciling;
+}
+
+/// \brief Tests whether a journal transition requires prechecking.
+/// \param state Candidate next journal state.
+/// \return True for the prechecking-to-dispatching transition segment.
+constexpr bool journal_requires_prechecking(JournalState state) {
+    return state == JournalState::prechecked ||
+           state == JournalState::dispatch_intent_persisted ||
+           state == JournalState::dispatching;
+}
+
 /// \brief Tests whether journal and operation state form a recoverable pair.
 /// \param journal_state Durable write-ahead state.
 /// \param operation_state Canonical managed-operation state.
@@ -157,13 +183,13 @@ struct OperationRecord {
             return false;
         if (!valid_state_pair(journal_state, operation_state))
             return false;
-        if (journal_state < JournalState::result_persisted && !result_payload.empty())
+        if (!journal_at_least_result_persisted(journal_state) && !result_payload.empty())
             return false;
         if (journal_state == JournalState::result_persisted && result_payload.empty())
             return false;
         if (operation_state == OperationState::accepted && result_payload.empty())
             return false;
-        if (journal_state < JournalState::dispatching)
+        if (!journal_at_least_dispatching(journal_state))
             return fencing_token == 0;
         return fencing_token != 0;
     }
@@ -350,8 +376,7 @@ public:
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (next_state == JournalState::result_persisted)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
-        if (next_state >= JournalState::prechecked &&
-            next_state <= JournalState::dispatching &&
+        if (journal_requires_prechecking(next_state) &&
             it->second.operation_state != OperationState::prechecking)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (next_state == JournalState::dispatching && fencing_token == 0)
@@ -425,10 +450,10 @@ public:
         if ((next_state == OperationState::reconciling ||
              next_state == OperationState::ambiguous) &&
             it->second.operation_state == OperationState::prechecking &&
-            it->second.journal_state < JournalState::dispatching)
+            !journal_at_least_dispatching(it->second.journal_state))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (next_state == OperationState::accepted &&
-            (it->second.journal_state < JournalState::result_persisted ||
+            (!journal_at_least_result_persisted(it->second.journal_state) ||
              it->second.result_payload.empty()))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
@@ -652,6 +677,8 @@ public:
     DispatchAdmissionResult admit(const OperationKey &key,
                                   const DispatchAdmissionRequest &request,
                                   const SingleWriterLease &lease) {
+        if (!required_scope_.valid())
+            return {DispatchAdmissionStatus::invalid_request, std::nullopt};
         if (!key.valid() || !request.current_account.valid())
             return {DispatchAdmissionStatus::invalid_request, std::nullopt};
         if (request.unresolved_operation)

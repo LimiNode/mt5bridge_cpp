@@ -210,6 +210,17 @@ int main() {
         scope_lease.owned_account = scope_key.account;
         scope_lease.token = 79;
         scope_lease.held = true;
+        auto invalid_scope = consistency_request;
+        invalid_scope.require_active_orders = false;
+        invalid_scope.require_positions = false;
+        mt5bridge::DispatchAdmissionBarrier invalid_scope_barrier(
+            scope_journal, positions_coordinator.graph(), invalid_scope);
+        require(invalid_scope_barrier
+                    .admit(scope_key,
+                          ready_request(scope_key.account, *positions_consistency.proof),
+                          scope_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_request,
+                "invalid admission scope was reported as an environment mismatch");
         mt5bridge::DispatchAdmissionBarrier full_scope_barrier(
             scope_journal, positions_coordinator.graph(), consistency_request);
         require(full_scope_barrier

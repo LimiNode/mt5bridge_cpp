@@ -85,6 +85,8 @@ effect; a recovered `dispatching` record is never automatically resent.
 - A failed storage commit cannot make an operation appear dispatched.
 - A stale owner cannot overwrite a newer record because every transition uses
   the expected durable revision.
+- A malformed admission scope is rejected as `invalid_request` before any
+  evidence or journal mutation is considered.
 - Account switches, unresolved operations, event gaps, unstable environment
   evidence, and lease loss fail closed before the barrier.
 - Recovery can distinguish a pre-side-effect intent from a non-resendable

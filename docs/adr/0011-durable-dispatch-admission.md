@@ -91,8 +91,11 @@ effect; a recovered `dispatching` record is never automatically resent.
   evidence, and lease loss fail closed before the barrier.
 - Recovery can distinguish a pre-side-effect intent from a non-resendable
   `dispatching` record without guessing from volatile memory.
-- The persistence and lease implementations remain replaceable seams; this
-  header-only slice does not prescribe a file format or OS primitive.
+- The persistence and lease implementations remain replaceable seams. The
+  default Windows file-backed realization is specified separately in
+  [ADR-0012](0012-windows-file-journal-store.md); callers may provide another
+  store when its compare-and-commit and crash-durability contract is stronger
+  than the barrier requires.
 
 ## Verification
 
@@ -104,5 +107,7 @@ failed `dispatching` commits with no partial mutation, atomic result persistence
 rejection of `accepted` before result persistence and payload-preserving
 recovery, successful fencing admission, second-admission rejection, and
 restart recovery that never reopens a `dispatching` operation. The test uses a
-deterministic in-memory store as a durability contract double and never loads
-Python, contacts MT5, or calls `order_send`.
+deterministic in-memory store as a durability contract double, while
+`tests/file_journal_store_test.cpp` covers the Windows file-backed
+implementation. Neither test loads Python, contacts MT5, or calls
+`order_send`.

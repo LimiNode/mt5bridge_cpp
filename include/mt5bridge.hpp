@@ -17,4 +17,5 @@
 #include <mt5bridge/reconciliation_coordinator.hpp>
 #include <mt5bridge/environment_consistency.hpp>
 #include <mt5bridge/dispatch_journal.hpp>
+#include <mt5bridge/file_journal_store.hpp>
 #include <mt5bridge/client.hpp>

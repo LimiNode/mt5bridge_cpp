@@ -222,7 +222,10 @@ authorize `order_send`; its contract is recorded in
 This Stage 2 slice adds `mt5bridge::OperationJournal` and
 `mt5bridge::DispatchAdmissionBarrier`. The journal durably records the opaque
 operation intent, AccountKey, managed IDs, and write-ahead states through a
-caller-provided durable store. The barrier requires an opaque scope- and
+caller-provided durable store. Windows consumers can use the Python-free
+`mt5bridge::WindowsFileJournalStore` from the separate `mt5bridge::journal`
+target; it uses bounded checksum-validated records and an atomic replace under
+a directory lock. The barrier requires an opaque scope- and
 revision-bound environment proof covering its configured domains/history
 windows, the same current AccountKey and graph revision, no
 unresolved operation or event gap, and a non-zero single-writer fencing token

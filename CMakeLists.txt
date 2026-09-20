@@ -26,6 +26,16 @@ target_include_directories(mt5bridge_client INTERFACE
 add_library(mt5bridge::client ALIAS mt5bridge_client)
 set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 
+# The concrete journal store is Windows-specific but remains independent of
+# the CPython-backed runtime DLL. Consumers that need durable operation
+# persistence link this small native target alongside mt5bridge::client.
+add_library(mt5bridge_journal STATIC src/runtime/file_journal_store.cpp)
+target_include_directories(mt5bridge_journal PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+add_library(mt5bridge::journal ALIAS mt5bridge_journal)
+set_target_properties(mt5bridge_journal PROPERTIES EXPORT_NAME journal)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -48,9 +58,16 @@ if(BUILD_TESTING)
              COMMAND mt5bridge_environment_consistency_test)
     add_executable(mt5bridge_dispatch_journal_test
                    tests/dispatch_journal_test.cpp)
-    target_link_libraries(mt5bridge_dispatch_journal_test PRIVATE mt5bridge::client)
+    target_link_libraries(mt5bridge_dispatch_journal_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_dispatch_journal
              COMMAND mt5bridge_dispatch_journal_test)
+    add_executable(mt5bridge_file_journal_store_test
+                   tests/file_journal_store_test.cpp)
+    target_link_libraries(mt5bridge_file_journal_store_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
+    add_test(NAME mt5bridge_file_journal_store
+             COMMAND mt5bridge_file_journal_store_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)
@@ -156,7 +173,8 @@ if(MT5BRIDGE_BUILD_RUNTIME)
     endif()
 endif()
 
-install(TARGETS mt5bridge_client EXPORT mt5bridgeTargets)
+install(TARGETS mt5bridge_client mt5bridge_journal EXPORT mt5bridgeTargets
+        ARCHIVE DESTINATION lib)
 if(MT5BRIDGE_BUILD_RUNTIME)
     install(TARGETS mt5_bridge RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
 endif()

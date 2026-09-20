@@ -72,10 +72,12 @@ version-independent.
   backend. The selected native Qwen DLL remains a future adapter here; the MT5
   DLL must stay the stable host-facing boundary.
 
-The consumer target is `mt5bridge::client` (INTERFACE); the heavy runtime target
-is `mt5_bridge` and is optional via `MT5BRIDGE_BUILD_RUNTIME=OFF`. This keeps
-`Python3::Python` a PRIVATE build dependency of the DLL rather than a dependency
-of applications that only consume the client header.
+The consumer target is `mt5bridge::client` (INTERFACE); the Python-free
+`mt5bridge::journal` target contains the concrete durable store, while the
+heavy runtime target is `mt5_bridge` and is optional via
+`MT5BRIDGE_BUILD_RUNTIME=OFF`. This keeps `Python3::Python` a PRIVATE build
+dependency of the DLL rather than a dependency of applications that only
+consume the client or journal target.
 
 ## Public and private source layout
 
@@ -95,11 +97,16 @@ src/
     └── mt5_bridge.cpp
 ```
 
-Everything below `include/mt5bridge*` is consumer-facing SDK/API. Everything
-below `src/runtime/` is private implementation owned by the DLL and must not be
-included by applications. When the runtime grows, private `.hpp` and `.cpp`
-files should live side by side in `src/runtime/`; do not create a second
-private include tree merely to mirror the public one. Keep
+The public journal headers also include `dispatch_journal.hpp` and
+`file_journal_store.hpp`. The latter is implemented by the Python-free
+`src/runtime/file_journal_store.cpp` source in the separate
+`mt5bridge::journal` target; it is not part of the CPython-backed DLL.
+
+Everything below `include/mt5bridge*` is consumer-facing SDK/API. The source
+under `src/runtime/` is implementation owned by the native targets and must
+not be included by applications. When the runtime grows, private `.hpp` and
+`.cpp` files should live side by side in `src/runtime/`; do not create a
+second private include tree merely to mirror the public one. Keep
 `src/runtime/mt5_bridge.cpp` as one implementation unit until a real
 responsibility boundary justifies a split; directory shape alone is not a
 reason to add speculative wrappers or adapters.
@@ -127,6 +134,11 @@ The bounded cross-view environment policy is specified in
 observation batches for account continuity, direct identity-link conflicts,
 and a repeated stable evidence signature; it does not claim that MT5 supplied
 an atomic snapshot.
+The durable operation state machine and pre-side-effect barrier are specified
+in [ADR-0011](adr/0011-durable-dispatch-admission.md), while the concrete
+Windows file-backed store is specified in
+[ADR-0012](adr/0012-windows-file-journal-store.md). The store is a separate
+Python-free native target and never adds an unmanaged `order_send` surface.
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -200,10 +212,13 @@ worker process.
    worker, or `order_send` side effect.
 6. Add the durable dispatch journal and admission barrier described in
    [ADR-0011](adr/0011-durable-dispatch-admission.md). The current slice
-   persists opaque intent payloads, separates journal state from
-   `OperationState`, verifies AccountKey/environment/fencing evidence, and
-   commits `dispatching` before returning a non-resendable permit. It still
-   performs no backend call and exposes no `order_send`.
+    persists opaque intent payloads, separates journal state from
+    `OperationState`, verifies AccountKey/environment/fencing evidence, and
+    commits `dispatching` before returning a non-resendable permit. It still
+    performs no backend call and exposes no `order_send`. The concrete
+    `WindowsFileJournalStore` from [ADR-0012](adr/0012-windows-file-journal-store.md)
+    supplies bounded, checksum-validated, atomically replaced records for this
+    seam.
 7. Add the internal one-shot backend that consumes that permit and keeps the
    same writer ownership through the dispatch barrier and call. Then add the
    high-level asynchronous `TradeManager` only after raw observations,

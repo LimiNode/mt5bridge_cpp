@@ -31,7 +31,7 @@ enum class OperationState {
     queued,              ///< Intent exists but has not entered validation.
     prechecking,         ///< Capabilities and order_check are being evaluated.
     submitting,          ///< The side-effect call has entered its backend.
-    accepted,            ///< The backend supplied acceptance evidence.
+    accepted,            ///< Durable result payload contains acceptance evidence.
     reconciling,         ///< Snapshots are being used to resolve the outcome.
     partially_filled,    ///< Reconciliation proved a partial execution.
     filled,              ///< Reconciliation proved the requested execution complete.
@@ -161,6 +161,8 @@ struct OperationRecord {
             return false;
         if (journal_state == JournalState::result_persisted && result_payload.empty())
             return false;
+        if (operation_state == OperationState::accepted && result_payload.empty())
+            return false;
         if (journal_state < JournalState::dispatching)
             return fencing_token == 0;
         return fencing_token != 0;
@@ -184,7 +186,6 @@ constexpr bool valid_state_pair(JournalState journal_state,
     case JournalState::dispatching:
         return operation_state == OperationState::prechecking ||
                operation_state == OperationState::submitting ||
-               operation_state == OperationState::accepted ||
                operation_state == OperationState::reconciling ||
                operation_state == OperationState::ambiguous;
     case JournalState::result_persisted:
@@ -386,10 +387,7 @@ public:
             return {JournalMutationStatus::not_found, std::nullopt};
         if (it->second.journal_state != JournalState::dispatching ||
             result_payload.empty() ||
-            (it->second.operation_state != OperationState::submitting &&
-             it->second.operation_state != OperationState::accepted &&
-             it->second.operation_state != OperationState::reconciling &&
-             it->second.operation_state != OperationState::ambiguous))
+            it->second.operation_state != OperationState::submitting)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
@@ -428,6 +426,10 @@ public:
              next_state == OperationState::ambiguous) &&
             it->second.operation_state == OperationState::prechecking &&
             it->second.journal_state < JournalState::dispatching)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (next_state == OperationState::accepted &&
+            (it->second.journal_state < JournalState::result_persisted ||
+             it->second.result_payload.empty()))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
@@ -633,11 +635,13 @@ struct DispatchAdmissionResult {
 /// \brief Opens the durable `dispatching` barrier without invoking `order_send`.
 class DispatchAdmissionBarrier {
 public:
-    /// \brief Binds the barrier to one owner-loop journal and graph.
+    /// \brief Binds the barrier to one owner-loop journal, graph, and scope.
     /// \param journal Journal that owns the operation state transitions.
     /// \param graph Current graph whose revision must match the proof.
-    DispatchAdmissionBarrier(OperationJournal &journal, const ObservationGraph &graph)
-        : journal_(journal), graph_(graph) {}
+    /// \param required_scope Domains and history range required for admission.
+    DispatchAdmissionBarrier(OperationJournal &journal, const ObservationGraph &graph,
+                             EnvironmentConsistencyRequest required_scope)
+        : journal_(journal), graph_(graph), required_scope_(std::move(required_scope)) {}
 
     /// \brief Verifies all pre-side-effect invariants and commits `dispatching`.
     /// \param key Account-scoped operation to admit.
@@ -660,6 +664,8 @@ public:
             return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
         if (request.environment_proof->account() != key.account)
             return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
+        if (!request.environment_proof->covers(required_scope_))
+            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
         if (request.environment_proof->graph_instance_id() != graph_.instance_id() ||
             request.environment_proof->last_graph_revision() != graph_.revision())
             return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
@@ -691,6 +697,7 @@ public:
 private:
     OperationJournal &journal_;
     const ObservationGraph &graph_;
+    EnvironmentConsistencyRequest required_scope_;
 };
 
 } // namespace mt5bridge

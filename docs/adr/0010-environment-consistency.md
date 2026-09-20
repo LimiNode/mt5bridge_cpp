@@ -68,9 +68,12 @@ The policy then checks the links that can be proved from the supplied views:
 
 When the result is `consistent`, it also carries an opaque
 `EnvironmentConsistencyProof` containing the account, graph instance identity,
-and final graph revision. The proof is created only by the policy and must be
-checked against the current graph before dispatch admission; copying a result
-or replaying it after another graph mutation cannot authorize a side effect.
+final graph revision, observed domains, and the requested history windows. The
+proof is created only by the policy and must be checked both against the
+current graph and against the admission scope; a positions-only proof cannot
+authorize a full active-order/history dispatch. History proof windows may
+cover a wider range than the admission request. Copying a result or replaying
+it after another graph mutation cannot authorize a side effect.
 
 The result has explicit fail-closed states:
 

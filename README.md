@@ -222,12 +222,14 @@ authorize `order_send`; its contract is recorded in
 This Stage 2 slice adds `mt5bridge::OperationJournal` and
 `mt5bridge::DispatchAdmissionBarrier`. The journal durably records the opaque
 operation intent, AccountKey, managed IDs, and write-ahead states through a
-caller-provided durable store. The barrier requires an opaque revision-bound
-environment proof, the same current AccountKey and graph revision, no
+caller-provided durable store. The barrier requires an opaque scope- and
+revision-bound environment proof covering its configured domains/history
+windows, the same current AccountKey and graph revision, no
 unresolved operation or event gap, and a non-zero single-writer fencing token
 before committing `dispatching`. A successful admission returns a move-only
 non-resendable permit; this slice still makes no backend call and does not
-expose or invoke `order_send`.
+expose or invoke `order_send`. A future backend may enter `accepted` only after
+`persist_result(payload)` has durably recorded its raw result.
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).
 

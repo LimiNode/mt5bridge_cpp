@@ -103,6 +103,13 @@ mt5bridge::ObservationBatch active_batch(const mt5bridge::AccountKey &key) {
     return batch;
 }
 
+mt5bridge::ObservationBatch positions_only_batch(const mt5bridge::AccountKey &key) {
+    mt5bridge::ObservationBatch batch;
+    batch.account = key;
+    batch.observed_domains = mt5bridge::ObservationDomain::positions;
+    return batch;
+}
+
 mt5bridge::DispatchAdmissionRequest ready_request(
     const mt5bridge::AccountKey &key,
     const mt5bridge::EnvironmentConsistencyProof &proof) {
@@ -153,6 +160,24 @@ int main() {
         require(fresh_consistency.consistent() && fresh_consistency.proof.has_value(),
                 "fresh consistent policy result did not carry a proof");
 
+        mt5bridge::EnvironmentConsistencyRequest positions_scope;
+        positions_scope.require_active_orders = false;
+        FakeObservationProvider positions_provider(
+            {positions_only_batch(key.account), positions_only_batch(key.account)});
+        mt5bridge::ObservationCoordinator positions_coordinator(positions_provider,
+                                                                 key.account);
+        mt5bridge::ObservationCollectionRequest positions_collection;
+        positions_collection.observe_active_orders = false;
+        const auto positions_first = positions_coordinator.refresh(positions_collection);
+        const auto positions_second = positions_coordinator.refresh(positions_collection);
+        require(positions_first.sample && positions_second.sample,
+                "positions-only proof setup did not produce samples");
+        const auto positions_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*positions_first.sample, *positions_second.sample}, positions_scope);
+        require(positions_consistency.consistent() && positions_consistency.proof.has_value(),
+                "positions-only policy result did not carry a proof");
+
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
 
@@ -175,7 +200,35 @@ int main() {
                         .status == mt5bridge::JournalMutationStatus::invalid_transition,
                 "submitting bypassed the dispatch barrier");
 
-        mt5bridge::DispatchAdmissionBarrier barrier(journal, coordinator.graph());
+        const auto scope_key = mt5bridge::OperationKey{account(), 9, 13};
+        MemoryStore scope_store;
+        mt5bridge::OperationJournal scope_journal(scope_store);
+        require(scope_journal.create(scope_key, {0x05}).accepted(),
+                "scope-bound proof setup create failed");
+        prepare_for_admission(scope_journal, scope_key);
+        FakeLease scope_lease;
+        scope_lease.owned_account = scope_key.account;
+        scope_lease.token = 79;
+        scope_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier full_scope_barrier(
+            scope_journal, positions_coordinator.graph(), consistency_request);
+        require(full_scope_barrier
+                    .admit(scope_key,
+                          ready_request(scope_key.account, *positions_consistency.proof),
+                          scope_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::environment_not_ready,
+                "positions-only proof opened a full-scope admission barrier");
+        mt5bridge::DispatchAdmissionBarrier positions_scope_barrier(
+            scope_journal, positions_coordinator.graph(), positions_scope);
+        require(positions_scope_barrier
+                    .admit(scope_key,
+                          ready_request(scope_key.account, *positions_consistency.proof),
+                          scope_lease)
+                    .admitted(),
+                "proof matching the configured scope was rejected");
+
+        mt5bridge::DispatchAdmissionBarrier barrier(journal, coordinator.graph(),
+                                                    consistency_request);
         FakeLease lease;
         lease.owned_account = key.account;
         lease.token = 77;
@@ -256,7 +309,8 @@ int main() {
                     recovered.record->fencing_token == 77,
                 "dispatching barrier was not recoverable after restart");
         mt5bridge::DispatchAdmissionBarrier recovered_barrier(recovered_journal,
-                                                               coordinator.graph());
+                                                               coordinator.graph(),
+                                                               consistency_request);
         require(recovered_barrier
                     .admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
                     .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
@@ -281,8 +335,21 @@ int main() {
         require(journal.persist_result(key, {}).status ==
                     mt5bridge::JournalMutationStatus::invalid_transition,
                 "empty backend result was persisted");
-        require(journal.persist_result(key, {0xA0, 0x01}).accepted(),
+        require(journal.transition_operation(key, mt5bridge::OperationState::accepted)
+                        .status == mt5bridge::JournalMutationStatus::invalid_transition,
+                "accepted operation state bypassed result persistence");
+        const std::vector<std::uint8_t> result_payload{0xA0, 0x01};
+        require(journal.persist_result(key, result_payload).accepted(),
                 "backend result payload was not persisted atomically");
+        require(journal.transition_operation(key, mt5bridge::OperationState::accepted)
+                        .accepted(),
+                "accepted operation state was rejected after result persistence");
+        mt5bridge::OperationJournal result_recovered_journal(store);
+        const auto result_recovered = result_recovered_journal.recover(key);
+        require(result_recovered.accepted() && result_recovered.record->operation_state ==
+                                             mt5bridge::OperationState::accepted &&
+                    result_recovered.record->result_payload == result_payload,
+                "persisted backend result was not preserved through recovery");
         require(journal.transition_operation(key, mt5bridge::OperationState::reconciling)
                         .accepted(),
                 "result-bearing operation did not enter reconciliation");
@@ -303,6 +370,14 @@ int main() {
         require(malformed_pair_journal.recover(key).status ==
                     mt5bridge::JournalMutationStatus::invalid_record,
                 "incompatible journal/operation state pair was recovered");
+        auto malformed_accepted_store = store;
+        malformed_accepted_store.durable[key].operation_state =
+            mt5bridge::OperationState::accepted;
+        malformed_accepted_store.durable[key].result_payload.clear();
+        mt5bridge::OperationJournal malformed_accepted_journal(malformed_accepted_store);
+        require(malformed_accepted_journal.recover(key).status ==
+                    mt5bridge::JournalMutationStatus::invalid_record,
+                "accepted operation without a durable result was recovered");
 
         const auto stale_key = mt5bridge::OperationKey{account(), 8, 12};
         MemoryStore stale_store;
@@ -313,8 +388,10 @@ int main() {
         mt5bridge::OperationJournal owner_b(stale_store);
         require(owner_b.recover(stale_key).accepted(),
                 "stale-writer setup recovery failed");
-        mt5bridge::DispatchAdmissionBarrier barrier_a(owner_a, coordinator.graph());
-        mt5bridge::DispatchAdmissionBarrier barrier_b(owner_b, coordinator.graph());
+        mt5bridge::DispatchAdmissionBarrier barrier_a(owner_a, coordinator.graph(),
+                                                      consistency_request);
+        mt5bridge::DispatchAdmissionBarrier barrier_b(owner_b, coordinator.graph(),
+                                                      consistency_request);
         const auto admitted_a = barrier_a.admit(
             stale_key, ready_request(stale_key.account, *fresh_consistency.proof), lease);
         require(admitted_a.admitted(), "first stale-writer owner was not admitted");

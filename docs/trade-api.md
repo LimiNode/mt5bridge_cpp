@@ -482,10 +482,12 @@ write-ahead states (`created`, `prechecked`, `dispatch_intent_persisted`,
 `DurableJournalStore` before the owner-loop cache changes; a failed commit
 leaves both unchanged. `DispatchAdmissionBarrier` then verifies fresh account
 identity, an opaque `EnvironmentConsistencyProof` tied to the current graph
-instance/revision, unresolved/event-gap blockers, and a continuously-held
-`SingleWriterLease` with a non-zero fencing token before durably committing
-`dispatching`. `result_persisted` is reachable only through atomic
-`persist_result(result_payload)`, and stale writers receive a CAS conflict.
+instance/revision and covering the configured observation scope,
+unresolved/event-gap blockers, and a continuously-held `SingleWriterLease`
+with a non-zero fencing token before durably committing `dispatching`.
+`result_persisted` is reachable only through atomic
+`persist_result(result_payload)`; `accepted` follows only after that payload
+is durable, and stale writers receive a CAS conflict.
 The barrier returns only a move-only permit for a future internal backend call;
 this slice never calls or exposes `order_send`.
 

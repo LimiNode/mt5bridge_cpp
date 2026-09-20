@@ -265,8 +265,17 @@ int main() {
                 "deal-before-order publication was treated as a contradiction");
         result = mt5bridge::EnvironmentConsistencyPolicy::evaluate(delayed_samples,
                                                                     confirmation_request);
-        require(result.consistent(),
+        require(result.consistent() && result.proof.has_value(),
                 "stable confirmation after delayed history order was not accepted");
+        auto covered_scope = full_request;
+        covered_scope.history_orders_window = mt5bridge::ObservationWindow{1200, 1800};
+        covered_scope.history_deals_window = mt5bridge::ObservationWindow{1200, 1800};
+        require(result.proof->covers(covered_scope),
+                "wider proof windows did not cover the admission scope");
+        auto uncovered_scope = full_request;
+        uncovered_scope.history_orders_window = mt5bridge::ObservationWindow{900, 2000};
+        require(!result.proof->covers(uncovered_scope),
+                "narrower proof window covered an unobserved admission range");
 
         const auto persistent_lag_samples =
             samples_for({deal_before_order, deal_before_order}, full_request);

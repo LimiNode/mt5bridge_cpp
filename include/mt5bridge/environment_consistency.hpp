@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <utility>
 #include <vector>
 
 /// \namespace mt5bridge
@@ -30,12 +31,15 @@ enum class EnvironmentConsistencyState {
     invalid_request,        ///< The policy request itself is malformed.
 };
 
+struct EnvironmentConsistencyRequest;
+
 /// \class EnvironmentConsistencyProof
-/// \brief Opaque revision-bound proof produced only by a consistent policy run.
+/// \brief Opaque scope- and revision-bound proof produced by a consistent policy run.
 ///
 /// A proof is tied to one observation graph instance and its exact latest
-/// revision. Callers may copy the value for a synchronous admission attempt,
-/// but cannot manufacture a valid proof from public fields.
+/// revision and records the domains and history windows that were checked.
+/// Callers may copy the value for a synchronous admission attempt, but cannot
+/// manufacture a valid proof from public fields.
 class EnvironmentConsistencyProof {
 public:
     EnvironmentConsistencyProof(const EnvironmentConsistencyProof &) = default;
@@ -43,10 +47,23 @@ public:
     EnvironmentConsistencyProof(EnvironmentConsistencyProof &&) = default;
     EnvironmentConsistencyProof &operator=(EnvironmentConsistencyProof &&) = default;
 
-    /// \brief Tests whether the proof carries complete provenance.
-    /// \return True only for a valid account, graph identity, and revision.
+    /// \brief Tests whether the proof carries complete provenance and scope.
+    /// \return True only for a valid account, graph identity, revision, and scope.
     bool valid() const {
-        return account_.valid() && graph_instance_id_ != 0 && last_graph_revision_ != 0;
+        constexpr std::uint32_t supported_domains =
+            static_cast<std::uint32_t>(ObservationDomain::active_orders) |
+            static_cast<std::uint32_t>(ObservationDomain::positions) |
+            static_cast<std::uint32_t>(ObservationDomain::history_orders) |
+            static_cast<std::uint32_t>(ObservationDomain::history_deals);
+        const auto domains = static_cast<std::uint32_t>(observed_domains_);
+        return account_.valid() && graph_instance_id_ != 0 && last_graph_revision_ != 0 &&
+               domains != 0 && (domains & ~supported_domains) == 0 &&
+               (observes(observed_domains_, ObservationDomain::history_orders) ==
+                history_orders_window_.has_value()) &&
+               (observes(observed_domains_, ObservationDomain::history_deals) ==
+                history_deals_window_.has_value()) &&
+               (!history_orders_window_ || history_orders_window_->valid()) &&
+               (!history_deals_window_ || history_deals_window_->valid());
     }
 
     /// \brief Returns the account covered by the proof.
@@ -61,22 +78,51 @@ public:
     /// \return Graph revision at the final coherent sample.
     std::uint64_t last_graph_revision() const { return last_graph_revision_; }
 
+    /// \brief Returns the domains covered by the proof.
+    /// \return Immutable observation-domain mask.
+    ObservationDomain observed_domains() const { return observed_domains_; }
+
+    /// \brief Returns the history-order window covered by the proof.
+    /// \return Inclusive window, or empty when history orders were not observed.
+    const std::optional<ObservationWindow> &history_orders_window() const {
+        return history_orders_window_;
+    }
+
+    /// \brief Returns the history-deal window covered by the proof.
+    /// \return Inclusive window, or empty when history deals were not observed.
+    const std::optional<ObservationWindow> &history_deals_window() const {
+        return history_deals_window_;
+    }
+
+    /// \brief Tests whether the proof covers a requested admission scope.
+    /// \param required_scope Domains and history range required by admission.
+    /// \return True when every requested domain and range is covered.
+    bool covers(const EnvironmentConsistencyRequest &required_scope) const;
+
 private:
     EnvironmentConsistencyProof() = default;
 
-    static EnvironmentConsistencyProof create(const AccountKey &account,
-                                              std::uint64_t graph_instance_id,
-                                              std::uint64_t last_graph_revision) {
+    static EnvironmentConsistencyProof create(
+        const AccountKey &account, std::uint64_t graph_instance_id,
+        std::uint64_t last_graph_revision, ObservationDomain observed_domains,
+        std::optional<ObservationWindow> history_orders_window,
+        std::optional<ObservationWindow> history_deals_window) {
         EnvironmentConsistencyProof proof;
         proof.account_ = account;
         proof.graph_instance_id_ = graph_instance_id;
         proof.last_graph_revision_ = last_graph_revision;
+        proof.observed_domains_ = observed_domains;
+        proof.history_orders_window_ = std::move(history_orders_window);
+        proof.history_deals_window_ = std::move(history_deals_window);
         return proof;
     }
 
     AccountKey account_;
     std::uint64_t graph_instance_id_ = 0;
     std::uint64_t last_graph_revision_ = 0;
+    ObservationDomain observed_domains_ = ObservationDomain::none;
+    std::optional<ObservationWindow> history_orders_window_;
+    std::optional<ObservationWindow> history_deals_window_;
 
     friend class EnvironmentConsistencyPolicy;
 };
@@ -120,6 +166,28 @@ struct EnvironmentConsistencyRequest {
         return domains;
     }
 };
+
+inline bool EnvironmentConsistencyProof::covers(
+    const EnvironmentConsistencyRequest &required_scope) const {
+    if (!valid() || !required_scope.valid())
+        return false;
+
+    const auto proof_domains = static_cast<std::uint32_t>(observed_domains_);
+    const auto required_domains =
+        static_cast<std::uint32_t>(required_scope.required_domains());
+    if ((proof_domains & required_domains) != required_domains)
+        return false;
+
+    const auto covers_window = [](const std::optional<ObservationWindow> &proof_window,
+                                  const std::optional<ObservationWindow> &required_window) {
+        if (!required_window)
+            return true;
+        return proof_window && proof_window->from_msc <= required_window->from_msc &&
+               proof_window->to_msc >= required_window->to_msc;
+    };
+    return covers_window(history_orders_window_, required_scope.history_orders_window) &&
+           covers_window(history_deals_window_, required_scope.history_deals_window);
+}
 
 /// \struct EnvironmentConsistencyResult
 /// \brief Reports a bounded environment-consistency decision.
@@ -234,7 +302,9 @@ public:
             if (previous.unresolved_links == 0 && previous.signature == latest.signature) {
                 result.state = EnvironmentConsistencyState::consistent;
                 result.proof = EnvironmentConsistencyProof::create(
-                    result.account, graph_instance_id, observations.back().graph_revision());
+                    result.account, graph_instance_id, observations.back().graph_revision(),
+                    request.required_domains(), request.history_orders_window,
+                    request.history_deals_window);
                 return result;
             }
         }

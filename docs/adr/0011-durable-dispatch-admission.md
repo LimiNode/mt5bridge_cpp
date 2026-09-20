@@ -54,7 +54,8 @@ at `dispatching`, so the lifecycle cannot bypass the durable barrier. A
 recovered `dispatching + prechecking` record may enter `reconciling` or
 `ambiguous` without entering `submitting`; this is the crash-before-backend
 path and is never a resend path. `result_persisted` is reachable only through
-an atomic `persist_result(payload)` operation.
+an atomic `persist_result(payload)` operation, and `accepted` is reachable only
+after that result payload is durable.
 
 `DispatchAdmissionBarrier` opens `dispatching` only when all of these checks
 pass in the same owner loop:
@@ -63,11 +64,12 @@ pass in the same owner loop:
 2. the freshly read current account and the opaque
    `EnvironmentConsistencyProof` account match the operation's immutable
    `AccountKey`;
-3. the proof's graph instance and last revision match the current graph, so a
+3. the proof covers the configured admission domains and history windows;
+4. the proof's graph instance and last revision match the current graph, so a
    proof cannot be replayed after another observation;
-4. there is no unresolved prior operation and no event gap requiring a fresh
+5. there is no unresolved prior operation and no event gap requiring a fresh
    authoritative observation;
-5. a `SingleWriterLease` is continuously held for the account and exposes a
+6. a `SingleWriterLease` is continuously held for the account and exposes a
    non-zero fencing token.
 
 The durable transition returns a move-only, barrier-created `DispatchPermit`
@@ -94,10 +96,11 @@ effect; a recovered `dispatching` record is never automatically resent.
 
 `tests/dispatch_journal_test.cpp` covers invalid/duplicate intents, CAS
 revision sequencing and stale-writer conflicts, separate journal and
-operation states, revision-bound proof replay rejection, blocked submitting
-before the barrier, environment/account/blocker/lease rejection, failed
-`dispatching` commits with no partial mutation, atomic result persistence,
-successful fencing admission, second-admission rejection, and restart recovery
-that never reopens a `dispatching` operation. The test uses a deterministic
-in-memory store as a durability contract double and never loads Python,
-contacts MT5, or calls `order_send`.
+operation states, scope-bound and revision-bound proof rejection, blocked
+submitting before the barrier, environment/account/blocker/lease rejection,
+failed `dispatching` commits with no partial mutation, atomic result persistence,
+rejection of `accepted` before result persistence and payload-preserving
+recovery, successful fencing admission, second-admission rejection, and
+restart recovery that never reopens a `dispatching` operation. The test uses a
+deterministic in-memory store as a durability contract double and never loads
+Python, contacts MT5, or calls `order_send`.

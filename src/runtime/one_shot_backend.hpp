@@ -22,6 +22,7 @@ constexpr std::uint32_t kTradeRetcodeMarketClosed = 10018;
 /// \brief Distinguishes a broker result from a transport/backend failure.
 enum class BackendCallStatus {
     broker_result,      ///< The backend returned a complete raw trade result.
+    account_mismatch,   ///< The live terminal account changed before the call.
     transport_failure,  ///< No trustworthy broker result was returned.
 };
 

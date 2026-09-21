@@ -12,10 +12,12 @@ Run after building the DLL with the same Python version as the test process:
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import sys
 import types
 import unittest
+from collections import namedtuple
 from ctypes import POINTER, Structure, byref, c_char_p, c_double, c_int, c_int32
 from ctypes import c_int64, c_size_t, c_uint32, c_uint64, c_void_p
 
@@ -211,6 +213,8 @@ def fake_module(
     rate_sequence: list[object] | None = None, initialize_result: bool = True,
     histories: dict[str, np.ndarray] | None = None, order_none: bool = False,
     history_sequence: list[object] | None = None,
+    order_response: object | None = None, account_server: str = "Fake-Server",
+    account_login: int = 42,
 ) -> types.ModuleType:
     """Creates a fake MetaTrader5 module consuming a scripted sequence."""
     module = types.ModuleType("MetaTrader5")
@@ -223,6 +227,8 @@ def fake_module(
     module.initialize_calls = 0
     module.shutdown_calls = 0
     module.order_calls = 0
+    module.account_server = account_server
+    module.account_login = account_login
     module.last = (1, "Success")
     module.histories = histories or {}
     module.history_sequence = list(history_sequence or [])
@@ -284,7 +290,12 @@ def fake_module(
             raise order_error
         if order_none:
             return None
+        if order_response is not None:
+            return order_response() if callable(order_response) else order_response
         return {"retcode": 10009}
+
+    def account_info() -> dict[str, object]:
+        return {"server": module.account_server, "login": module.account_login}
 
     def terminal_info() -> dict[str, bool]:
         return {"connected": True}
@@ -306,10 +317,47 @@ def fake_module(
     module.last_error = last_error
     module.copy_ticks_from = copy_ticks_from
     module.order_send = order_send
+    module.account_info = account_info
     module.terminal_info = terminal_info
     if rate_sequence is not None:
         module.copy_rates_range = copy_rates_range
     return module
+
+
+_FAKE_TRADE_RESULT = namedtuple(
+    "FakeTradeResult",
+    [
+        "retcode",
+        "retcode_external",
+        "request_id",
+        "order",
+        "deal",
+        "volume",
+        "price",
+        "bid",
+        "ask",
+        "comment",
+    ],
+)
+
+
+def valid_order_result(
+    retcode: int, *, namedtuple_result: bool = False
+) -> dict[str, object] | object:
+    """Builds the complete MqlTradeResult-shaped payload required by the adapter."""
+    values = {
+        "retcode": retcode,
+        "retcode_external": 0,
+        "request_id": 7,
+        "order": 0,
+        "deal": 0,
+        "volume": 0.01,
+        "price": 1.1,
+        "bid": 1.099,
+        "ask": 1.101,
+        "comment": "Fake result",
+    }
+    return _FAKE_TRADE_RESULT(**values) if namedtuple_result else values
 
 
 class FakeMt5RuntimeTests(unittest.TestCase):
@@ -394,6 +442,99 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         """Returns the bridge diagnostic for an assertion message."""
         value = self.module.mt5bridge_last_error()
         return value.decode("utf-8", errors="replace") if value else ""
+
+    def dispatch(self, fake: types.ModuleType) -> tuple[int, dict[str, object], str]:
+        """Exercises the test-only private Python dispatch adapter hook."""
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        response = c_void_p()
+        status = self.module.mt5bridge_eval_json(
+            json.dumps({"method": "test_dispatch_transport"}).encode("utf-8"),
+            byref(response),
+        )
+        payload: dict[str, object] = {}
+        if response.value:
+            payload = json.loads(ctypes.string_at(response.value).decode("utf-8"))
+            self.module.mt5bridge_free(response)
+        error = self.last_error()
+        self.module.mt5bridge_shutdown()
+        return status, payload, error
+
+    def test_private_dispatch_transport_persists_market_closed_result(self) -> None:
+        """A complete 10018 result is broker evidence and is classified rejected."""
+        fake = fake_module([], order_response=valid_order_result(10018))
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(payload["status"], "broker_result")
+        self.assertEqual(payload["retcode"], 10018)
+        self.assertEqual(payload["disposition"], "rejected")
+        self.assertEqual(payload["raw_result"], valid_order_result(10018))
+
+    def test_private_dispatch_transport_seeds_reconciliation_for_success(self) -> None:
+        """Successful or partial results seed reconciliation instead of final fill."""
+        for retcode in (10009, 10008):
+            with self.subTest(retcode=retcode):
+                fake = fake_module([], order_response=valid_order_result(retcode))
+                status, payload, error = self.dispatch(fake)
+                self.assertEqual(status, 0, error)
+                self.assertEqual(fake.order_calls, 1)
+                self.assertEqual(payload["status"], "broker_result")
+                self.assertEqual(payload["retcode"], retcode)
+                self.assertEqual(payload["disposition"], "reconciling")
+
+    def test_private_dispatch_transport_accepts_namedtuple_result(self) -> None:
+        """The real MetaTrader5 namedtuple result is normalized to JSON fields."""
+        fake = fake_module(
+            [], order_response=valid_order_result(10009, namedtuple_result=True)
+        )
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(payload["status"], "broker_result")
+        self.assertEqual(payload["retcode"], 10009)
+        self.assertEqual(payload["raw_result"], valid_order_result(10009))
+
+    def test_private_dispatch_transport_exception_is_unresolved(self) -> None:
+        """A Python exception after the one call is not broker evidence."""
+        fake = fake_module([], order_error=RuntimeError("send failed"))
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(payload["status"], "transport_failure")
+        self.assertEqual(payload["retcode"], 0)
+        self.assertIsNone(payload["raw_result"])
+
+    def test_private_dispatch_transport_none_result_is_unresolved(self) -> None:
+        """A None return cannot be persisted as a trustworthy broker result."""
+        fake = fake_module([], order_none=True)
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(payload["status"], "transport_failure")
+        self.assertIsNone(payload["raw_result"])
+
+    def test_private_dispatch_transport_malformed_result_is_unresolved(self) -> None:
+        """A partial result shape is rejected before durable serialization."""
+        fake = fake_module([], order_response={"retcode": 10018})
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(payload["status"], "transport_failure")
+        self.assertEqual(payload["retcode"], 0)
+        self.assertIsNone(payload["raw_result"])
+
+    def test_private_dispatch_transport_account_mismatch_skips_send(self) -> None:
+        """The adapter's final account check prevents a send on another account."""
+        fake = fake_module(
+            [], order_response=valid_order_result(10018), account_server="Other-Server"
+        )
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 0)
+        self.assertEqual(payload["status"], "account_mismatch")
+        self.assertEqual(payload["retcode"], 0)
+        self.assertIsNone(payload["raw_result"])
 
     def query(
         self, fake: types.ModuleType

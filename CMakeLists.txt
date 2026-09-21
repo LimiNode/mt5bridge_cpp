@@ -98,8 +98,12 @@ if(MT5BRIDGE_BUILD_RUNTIME)
             "selected ${Python3_VERSION} at ${Python3_EXECUTABLE}")
     endif()
 
-    add_library(mt5_bridge SHARED src/runtime/mt5_bridge.cpp)
-    target_include_directories(mt5_bridge PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    add_library(mt5_bridge SHARED
+                src/runtime/mt5_bridge.cpp
+                src/runtime/python_dispatch_transport.cpp)
+    target_include_directories(mt5_bridge PRIVATE
+                               ${PROJECT_SOURCE_DIR}/include
+                               ${PROJECT_SOURCE_DIR}/src/runtime)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
     target_link_libraries(mt5_bridge PRIVATE Python3::Python)
     get_target_property(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
@@ -117,6 +121,7 @@ if(MT5BRIDGE_BUILD_RUNTIME)
     endif()
 
     if(BUILD_TESTING)
+        target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_INTERNAL_TESTING)
         add_executable(mt5bridge_c_header_compile tests/abi_compile_test.c)
         target_include_directories(mt5bridge_c_header_compile PRIVATE ${PROJECT_SOURCE_DIR}/include)
         add_test(NAME mt5bridge_c_header_compile COMMAND mt5bridge_c_header_compile)

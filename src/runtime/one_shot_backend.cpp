@@ -68,6 +68,8 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
     } catch (...) {
         return {OneShotExecutionStatus::transport_failure, 0, journal.find(key)};
     }
+    if (call.status == BackendCallStatus::account_mismatch)
+        return {OneShotExecutionStatus::account_mismatch, 0, journal.find(key)};
     if (call.status == BackendCallStatus::transport_failure)
         return {OneShotExecutionStatus::transport_failure, 0, journal.find(key)};
     if (call.raw_result.empty())

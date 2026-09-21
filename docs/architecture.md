@@ -102,8 +102,9 @@ The public journal headers also include `dispatch_journal.hpp` and
 `src/runtime/file_journal_store.cpp` source in the separate
 `mt5bridge::journal` target. The private one-shot execution seam lives in
 `src/runtime/one_shot_backend.hpp/.cpp` and is built as
-`mt5bridge::one_shot_backend`; neither target is part of the CPython-backed
-DLL.
+`mt5bridge::one_shot_backend`; the CPython-specific
+`python_dispatch_transport.hpp/.cpp` adapter is compiled only into the DLL.
+Neither private seam is part of the consumer SDK.
 
 Everything below `include/mt5bridge*` is consumer-facing SDK/API. The source
 under `src/runtime/` is implementation owned by the native targets and must
@@ -144,7 +145,9 @@ Windows file-backed store is specified in
 Python-free native target and never adds an unmanaged `order_send` surface.
 The guarded one-shot execution seam and broker rejection handling are specified
 in [ADR-0013](adr/0013-one-shot-backend.md); its terminal adapter remains
-private and must preserve the same account and fencing checks.
+private and must preserve the same account and fencing checks. The embedded
+Python implementation of that seam is specified in
+[ADR-0014](adr/0014-private-python-dispatch-transport.md).
 The bridge never retries a side-effecting order implicitly.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
@@ -232,19 +235,25 @@ worker process.
    `submitting` and immediately before transport, then persists the full raw
    result before classifying deterministic broker rejections such as `10018
    MARKET_CLOSED`; it never infers session state from `trade_mode` or
-   `order_check` and never retries transport failures. Then add
-   the high-level asynchronous `TradeManager` only after raw observations,
-   journal recovery, and identity rules are covered by fake-runtime tests.
-   Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
-8. Add timed close obligations, then a separate execution planner for sliced
+   `order_check` and never retries transport failures. Bind that seam to the
+   private embedded-Python `MetaTrader5.order_send` adapter and cover its
+   complete-result, exception, malformed-result, and account-mismatch paths
+   with a fake runtime. A successful broker result is only a reconciliation
+   seed, not proof of final fill.
+8. Add startup recovery orchestration and the reconciliation worker around the
+   durable journal and observation graph. Only after these owner-loop and
+   identity rules are covered by fake-runtime tests should the high-level
+   asynchronous `TradeManager` be introduced. Side-effecting methods must
+   follow [ADR-0004](adr/0004-trade-reconciliation.md).
+9. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
-9. Add hybrid virtual/broker exit policies and a risk engine only after the
+10. Add hybrid virtual/broker exit policies and a risk engine only after the
    lifecycle and reconciliation invariants are executable.
-10. If startup/reliability requires process isolation, introduce a transport
+11. If startup/reliability requires process isolation, introduce a transport
    implementation behind the same C ABI; do not duplicate business methods.
-11. Add a native or alternate MT5 backend only behind a backend interface after
+12. Add a native or alternate MT5 backend only behind a backend interface after
    measuring lifecycle, error, and compatibility behavior.
-12. After realtime ABI stabilization, ship an external runtime ZIP, split the
+13. After realtime ABI stabilization, ship an external runtime ZIP, split the
    bootstrap/core DLLs, and then produce the self-extracting artifact described
    by [ADR-0002](adr/0002-self-contained-runtime-dll.md).
 

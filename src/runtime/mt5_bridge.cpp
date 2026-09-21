@@ -4,7 +4,11 @@
 #include <mt5bridge/abi.h>
 #include "mt5bridge/data.h"
 #include "mt5bridge/trade.h"
+#include "python_dispatch_transport.hpp"
 
+#ifndef PY_SSIZE_T_CLEAN
+#define PY_SSIZE_T_CLEAN
+#endif
 #include <Python.h>
 
 #include <algorithm>
@@ -2810,6 +2814,84 @@ MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_
             // The old convenience method is rejected before touching MT5;
             // durable journal dispatch belongs to the Stage 2 implementation.
             set_error("open_market_buy is disabled until durable trade dispatch is implemented");
+#if defined(MT5BRIDGE_INTERNAL_TESTING)
+        } else if (std::strcmp(method, "test_dispatch_transport") == 0) {
+            // This branch is test-only: it exercises the private Python adapter
+            // through the existing runtime admission/GIL path without adding a
+            // production C ABI order-send method.
+            constexpr char request_payload[] =
+                "{\"action\":1,\"type\":0,\"symbol\":\"EURUSD\","
+                "\"volume\":0.01}";
+            mt5bridge::OperationRecord record;
+            record.key.account = mt5bridge::AccountKey{"Fake-Server", 42};
+            record.key.trade_id = 1;
+            record.key.operation_id = 1;
+            record.request_payload.assign(
+                reinterpret_cast<const std::uint8_t *>(request_payload),
+                reinterpret_cast<const std::uint8_t *>(request_payload) +
+                    std::strlen(request_payload));
+
+            mt5bridge::runtime::Mt5PythonAccountProbe account_probe(mt5.get());
+            mt5bridge::runtime::Mt5PythonDispatchTransport transport(
+                mt5.get(), account_probe);
+            const auto call = transport.submit_once(record);
+
+            PyRef response(PyDict_New());
+            if (!response) {
+                set_python_error();
+                return -1;
+            }
+            const char *status = "transport_failure";
+            switch (call.status) {
+            case mt5bridge::runtime::BackendCallStatus::broker_result:
+                status = "broker_result";
+                break;
+            case mt5bridge::runtime::BackendCallStatus::account_mismatch:
+                status = "account_mismatch";
+                break;
+            case mt5bridge::runtime::BackendCallStatus::transport_failure:
+                status = "transport_failure";
+                break;
+            }
+            const char *disposition = "reconciling";
+            switch (call.disposition) {
+            case mt5bridge::runtime::BrokerResultDisposition::accepted:
+                disposition = "accepted";
+                break;
+            case mt5bridge::runtime::BrokerResultDisposition::rejected:
+                disposition = "rejected";
+                break;
+            case mt5bridge::runtime::BrokerResultDisposition::reconciling:
+                disposition = "reconciling";
+                break;
+            }
+            PyRef status_value(PyUnicode_FromString(status));
+            PyRef disposition_value(PyUnicode_FromString(disposition));
+            PyRef retcode_value(PyLong_FromUnsignedLong(call.retcode));
+            if (!status_value || !disposition_value || !retcode_value ||
+                PyDict_SetItemString(response.get(), "status", status_value.get()) != 0 ||
+                PyDict_SetItemString(response.get(), "disposition",
+                                     disposition_value.get()) != 0 ||
+                PyDict_SetItemString(response.get(), "retcode", retcode_value.get()) != 0) {
+                set_python_error();
+                return -1;
+            }
+            if (!call.raw_result.empty()) {
+                PyRef raw(PyObject_CallFunction(
+                    loads.get(), "s#", call.raw_result.data(),
+                    static_cast<Py_ssize_t>(call.raw_result.size())));
+                if (!raw || PyDict_SetItemString(response.get(), "raw_result", raw.get()) != 0) {
+                    set_python_error();
+                    return -1;
+                }
+            } else {
+                if (PyDict_SetItemString(response.get(), "raw_result", Py_None) != 0) {
+                    set_python_error();
+                    return -1;
+                }
+            }
+            result = std::move(response);
+#endif
         } else {
             set_error("unknown method");
         }

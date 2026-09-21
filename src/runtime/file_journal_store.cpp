@@ -267,11 +267,16 @@ ReadStatus read_file(const std::filesystem::path &path,
     }
 
     LARGE_INTEGER size{};
-    if (!GetFileSizeEx(handle, &size) || size.QuadPart < 0 ||
-        static_cast<unsigned long long>(size.QuadPart) > kMaxRecordBytes) {
+    if (!GetFileSizeEx(handle, &size)) {
         error = win32_error("GetFileSizeEx");
         CloseHandle(handle);
         return ReadStatus::io_error;
+    }
+    if (size.QuadPart < 0 ||
+        static_cast<unsigned long long>(size.QuadPart) > kMaxRecordBytes) {
+        error = "journal record exceeds storage limits";
+        CloseHandle(handle);
+        return ReadStatus::malformed;
     }
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size.QuadPart));
     std::size_t offset = 0;
@@ -350,11 +355,13 @@ WindowsFileJournalStore::WindowsFileJournalStore(std::filesystem::path directory
             set_error(last_error_, "journal directory is empty");
             return;
         }
-        std::filesystem::create_directories(directory_);
-        if (!std::filesystem::is_directory(directory_)) {
+        const auto absolute_directory = std::filesystem::absolute(directory_);
+        std::filesystem::create_directories(absolute_directory);
+        if (!std::filesystem::is_directory(absolute_directory)) {
             set_error(last_error_, "journal path is not a directory");
             return;
         }
+        directory_ = std::filesystem::weakly_canonical(absolute_directory);
         ready_ = true;
     } catch (const std::filesystem::filesystem_error &error) {
         set_error(last_error_, error.what());
@@ -430,35 +437,107 @@ StoreCommitStatus WindowsFileJournalStore::commit(
 #endif
 }
 
-std::optional<OperationRecord> WindowsFileJournalStore::load(const OperationKey &key) const {
+StoreLoadResult WindowsFileJournalStore::load(const OperationKey &key) const {
 #if defined(_WIN32)
     last_error_.clear();
     if (!ready_ || !key.valid()) {
         set_error(last_error_, ready_ ? "invalid operation key" : "journal store is unavailable");
-        return std::nullopt;
+        return {key.valid() ? StoreLoadStatus::io_error : StoreLoadStatus::invalid_record,
+                std::nullopt};
     }
 
     FileLock lock(directory_ / L".journal.lock");
     if (!lock.acquired()) {
         last_error_ = lock.error();
-        return std::nullopt;
+        return {StoreLoadStatus::io_error, std::nullopt};
     }
     std::optional<OperationRecord> record;
     std::string error;
     const ReadStatus status = read_file(record_path(directory_, key), record, error);
     if (status == ReadStatus::valid && record && record->key == key)
-        return record;
-    if (status == ReadStatus::malformed)
-        set_error(last_error_, "malformed journal record");
-    else if (status == ReadStatus::io_error)
+        return {StoreLoadStatus::found, std::move(record)};
+    if (status == ReadStatus::malformed) {
+        set_error(last_error_, error.empty() ? "malformed journal record" : error);
+        return {StoreLoadStatus::invalid_record, std::nullopt};
+    }
+    if (status == ReadStatus::io_error) {
         set_error(last_error_, error);
-    else if (status == ReadStatus::valid)
+        return {StoreLoadStatus::io_error, std::nullopt};
+    }
+    if (status == ReadStatus::valid) {
         set_error(last_error_, "journal filename collision");
-    return std::nullopt;
+        return {StoreLoadStatus::invalid_record, std::nullopt};
+    }
+    return {StoreLoadStatus::not_found, std::nullopt};
 #else
     (void)key;
     set_error(last_error_, "WindowsFileJournalStore requires Windows");
-    return std::nullopt;
+    return {StoreLoadStatus::io_error, std::nullopt};
+#endif
+}
+
+StoreScanResult WindowsFileJournalStore::scan() const {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "journal store is unavailable");
+        return {StoreScanStatus::io_error, {}};
+    }
+
+    FileLock lock(directory_ / L".journal.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return {StoreScanStatus::io_error, {}};
+    }
+
+    std::vector<OperationRecord> records;
+    try {
+        for (const auto &entry : std::filesystem::directory_iterator(directory_)) {
+            const auto filename = entry.path().filename().wstring();
+            if (entry.path().extension() != L".bin" ||
+                filename.rfind(L"op-", 0) != 0)
+                continue;
+            if (!entry.is_regular_file()) {
+                set_error(last_error_, "journal record is not a regular file");
+                return {StoreScanStatus::invalid_record, {}};
+            }
+            std::optional<OperationRecord> record;
+            std::string error;
+            const auto status = read_file(entry.path(), record, error);
+            if (status == ReadStatus::malformed) {
+                set_error(last_error_, error.empty() ? "malformed journal record" : error);
+                return {StoreScanStatus::invalid_record, {}};
+            }
+            if (status != ReadStatus::valid || !record) {
+                set_error(last_error_, error.empty() ? "could not read journal record" : error);
+                return {StoreScanStatus::io_error, {}};
+            }
+            if (record_path(directory_, record->key).filename() != entry.path().filename() ||
+                !record->valid()) {
+                set_error(last_error_, "journal record identity or metadata mismatch");
+                return {StoreScanStatus::invalid_record, {}};
+            }
+            records.push_back(std::move(*record));
+        }
+    } catch (const std::filesystem::filesystem_error &error) {
+        set_error(last_error_, error.what());
+        return {StoreScanStatus::io_error, {}};
+    }
+
+    std::sort(records.begin(), records.end(),
+              [](const OperationRecord &left, const OperationRecord &right) {
+                  return left.key < right.key;
+              });
+    for (std::size_t index = 1; index < records.size(); ++index) {
+        if (records[index - 1].key == records[index].key) {
+            set_error(last_error_, "duplicate journal operation key");
+            return {StoreScanStatus::invalid_record, {}};
+        }
+    }
+    return {StoreScanStatus::complete, std::move(records)};
+#else
+    set_error(last_error_, "WindowsFileJournalStore requires Windows");
+    return {StoreScanStatus::io_error, {}};
 #endif
 }
 

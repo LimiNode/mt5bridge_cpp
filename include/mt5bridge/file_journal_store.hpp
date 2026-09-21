@@ -41,8 +41,12 @@ public:
 
     /// \brief Loads one record after validating its complete serialized envelope.
     /// \param key Account-scoped operation identity.
-    /// \return A valid record, or empty for absence/corruption/I/O failure.
-    std::optional<OperationRecord> load(const OperationKey &key) const override;
+    /// \return Status-bearing result distinguishing absence from corruption/I/O.
+    StoreLoadResult load(const OperationKey &key) const override;
+
+    /// \brief Enumerates all operation records for process-restart recovery.
+    /// \return An all-or-nothing record set; malformed entries invalidate the scan.
+    StoreScanResult scan() const override;
 
     /// \brief Tests whether the directory was opened successfully.
     /// \return True when subsequent store operations can acquire the directory lock.

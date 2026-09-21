@@ -44,6 +44,7 @@ void prepare(mt5bridge::OperationJournal &journal,
 int main() {
     const auto directory = std::filesystem::temp_directory_path() /
                            "mt5bridge_file_journal_store_test";
+    const auto original_cwd = std::filesystem::current_path();
     std::error_code cleanup_error;
     std::filesystem::remove_all(directory, cleanup_error);
 
@@ -63,9 +64,9 @@ int main() {
 
         mt5bridge::WindowsFileJournalStore recovered_store(directory);
         const auto recovered_record = recovered_store.load(operation_key);
-        require(recovered_record && recovered_record->journal_state ==
+        require(recovered_record.found() && recovered_record.record->journal_state ==
                                        mt5bridge::JournalState::dispatching &&
-                    recovered_record->fencing_token == 77,
+                    recovered_record.record->fencing_token == 77,
                 "dispatching record did not survive store reopen");
 
         mt5bridge::OperationJournal owner_a(store);
@@ -90,10 +91,14 @@ int main() {
 
         mt5bridge::WindowsFileJournalStore result_store(directory);
         const auto result_record = result_store.load(operation_key);
-        require(result_record && result_record->operation_state ==
+        require(result_record.found() && result_record.record->operation_state ==
                                        mt5bridge::OperationState::accepted &&
-                    result_record->result_payload == std::vector<std::uint8_t>({0xA0, 0x01}),
+                    result_record.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        require(result_store.load(key(99, 100)).status ==
+                    mt5bridge::StoreLoadStatus::not_found,
+                "missing operation was not distinguished from storage failure");
 
         const auto duplicate_key = key(8, 12);
         mt5bridge::OperationJournal duplicate_owner(result_store);
@@ -103,6 +108,32 @@ int main() {
         require(second_duplicate_owner.create(duplicate_key, {0x0A}).status ==
                     mt5bridge::JournalMutationStatus::conflict,
                 "create CAS did not reject an existing durable record");
+
+        mt5bridge::OperationJournal restarted(result_store);
+        const auto recovered_all = restarted.recover_all();
+        require(recovered_all.accepted() && recovered_all.records.size() == 2 &&
+                    restarted.find(operation_key) && restarted.find(duplicate_key),
+                "restart enumeration did not recover every durable operation");
+
+        const auto cwd_root = directory / "cwd-regression";
+        const auto cwd_a = cwd_root / "a";
+        const auto cwd_b = cwd_root / "b";
+        std::filesystem::create_directories(cwd_a);
+        std::filesystem::create_directories(cwd_b);
+        std::filesystem::current_path(cwd_a);
+        mt5bridge::WindowsFileJournalStore anchored_store("relative-journal");
+        require(anchored_store.ready() && anchored_store.directory().is_absolute(),
+                "relative journal path was not anchored at construction");
+        const auto anchored_key = key(15, 16);
+        mt5bridge::OperationJournal anchored_journal(anchored_store);
+        require(anchored_journal.create(anchored_key, {0x0B}).accepted(),
+                "relative journal create failed");
+        const auto anchored_directory = anchored_store.directory();
+        std::filesystem::current_path(cwd_b);
+        const auto anchored_load = anchored_store.load(anchored_key);
+        require(anchored_load.found() && anchored_store.directory() == anchored_directory,
+                "journal operations followed a changed process CWD");
+        std::filesystem::current_path(original_cwd);
 
         std::size_t record_count = 0;
         for (const auto &entry : std::filesystem::directory_iterator(directory)) {
@@ -114,13 +145,24 @@ int main() {
             }
         }
         require(record_count == 2, "record files were not created");
-        require(!result_store.load(operation_key),
+        const auto corrupt_load = result_store.load(operation_key);
+        require(corrupt_load.status == mt5bridge::StoreLoadStatus::invalid_record,
                 "corrupt record was accepted during recovery");
         require(!result_store.last_error().empty(),
                 "corrupt record did not produce a diagnostic");
-        auto replacement_candidate = *result_record;
+        require(result_store.scan().status == mt5bridge::StoreScanStatus::invalid_record,
+                "corrupt record did not invalidate complete restart scan");
+        mt5bridge::OperationJournal corrupted_journal(result_store);
+        require(corrupted_journal.recover(operation_key).status ==
+                    mt5bridge::JournalMutationStatus::invalid_record,
+                "corrupt single-record recovery was reported as missing");
+        require(corrupted_journal.recover_all().status ==
+                    mt5bridge::JournalMutationStatus::invalid_record &&
+                    !corrupted_journal.find(operation_key),
+                "corrupt restart scan partially replaced the owner cache");
+        auto replacement_candidate = *result_record.record;
         ++replacement_candidate.revision;
-        require(result_store.commit(replacement_candidate, result_record->revision) ==
+        require(result_store.commit(replacement_candidate, result_record.record->revision) ==
                     mt5bridge::StoreCommitStatus::io_error,
                 "corrupt record was overwritten instead of failing closed");
 
@@ -128,6 +170,7 @@ int main() {
         std::cout << "file journal store checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
+        std::filesystem::current_path(original_cwd);
         std::filesystem::remove_all(directory, cleanup_error);
         std::cerr << "file journal store checks failed: " << error.what() << '\n';
         return EXIT_FAILURE;

@@ -43,14 +43,30 @@ public:
         return mt5bridge::StoreCommitStatus::committed;
     }
 
-    std::optional<mt5bridge::OperationRecord> load(
+    mt5bridge::StoreLoadResult load(
         const mt5bridge::OperationKey &key) const override {
+        if (load_status != mt5bridge::StoreLoadStatus::found)
+            return {load_status, std::nullopt};
         const auto it = durable.find(key);
-        return it == durable.end() ? std::nullopt
-                                   : std::optional<mt5bridge::OperationRecord>(it->second);
+        return it == durable.end()
+                   ? mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::not_found,
+                                                std::nullopt}
+                   : mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::found, it->second};
+    }
+
+    mt5bridge::StoreScanResult scan() const override {
+        mt5bridge::StoreScanResult result;
+        result.status = scan_status;
+        if (scan_status != mt5bridge::StoreScanStatus::complete)
+            return result;
+        for (const auto &entry : durable)
+            result.records.push_back(entry.second);
+        return result;
     }
 
     bool fail_next = false;
+    mt5bridge::StoreLoadStatus load_status = mt5bridge::StoreLoadStatus::found;
+    mt5bridge::StoreScanStatus scan_status = mt5bridge::StoreScanStatus::complete;
     std::map<mt5bridge::OperationKey, mt5bridge::OperationRecord> durable;
     std::vector<mt5bridge::OperationRecord> commits;
 };
@@ -295,7 +311,7 @@ int main() {
         require(journal.find(key)->journal_state ==
                     mt5bridge::JournalState::dispatch_intent_persisted,
                 "failed dispatching commit changed the owner cache");
-        require(store.load(key)->journal_state ==
+        require(store.load(key).found() && store.load(key).record->journal_state ==
                     mt5bridge::JournalState::dispatch_intent_persisted,
                 "failed dispatching commit changed durable state");
 
@@ -413,7 +429,8 @@ int main() {
         const auto stale_result = barrier_b.admit(
             stale_key, ready_request(stale_key.account, *fresh_consistency.proof), lease);
         require(stale_result.status == mt5bridge::DispatchAdmissionStatus::conflict &&
-                    stale_store.load(stale_key)->fencing_token == 77,
+                    stale_store.load(stale_key).found() &&
+                        stale_store.load(stale_key).record->fencing_token == 77,
                 "stale owner overwrote a newer dispatching record");
         require(owner_b.recover(stale_key).record->journal_state ==
                     mt5bridge::JournalState::dispatching,
@@ -427,6 +444,28 @@ int main() {
                     mt5bridge::JournalState::reconciling,
                     mt5bridge::JournalState::dispatching),
                 "reconciling state became resendable");
+
+        const auto recovery_key = mt5bridge::OperationKey{account(), 14, 15};
+        MemoryStore recovery_store;
+        mt5bridge::OperationJournal recovery_journal(recovery_store);
+        require(recovery_journal.create(recovery_key, {0x0C}).accepted(),
+                "recovery-status setup create failed");
+        recovery_store.load_status = mt5bridge::StoreLoadStatus::invalid_record;
+        require(recovery_journal.recover(recovery_key).status ==
+                    mt5bridge::JournalMutationStatus::invalid_record,
+                "malformed load was reported as missing during recovery");
+        recovery_store.load_status = mt5bridge::StoreLoadStatus::io_error;
+        require(recovery_journal.recover(recovery_key).status ==
+                    mt5bridge::JournalMutationStatus::storage_error,
+                "I/O load failure was reported as missing during recovery");
+        recovery_store.load_status = mt5bridge::StoreLoadStatus::found;
+        require(recovery_journal.recover_all().accepted(),
+                "complete recovery scan was rejected");
+        recovery_store.scan_status = mt5bridge::StoreScanStatus::invalid_record;
+        require(recovery_journal.recover_all().status ==
+                    mt5bridge::JournalMutationStatus::invalid_record &&
+                    recovery_journal.find(recovery_key),
+                "failed recovery scan partially replaced the owner cache");
 
         std::cout << "dispatch journal checks passed\n";
         return EXIT_SUCCESS;

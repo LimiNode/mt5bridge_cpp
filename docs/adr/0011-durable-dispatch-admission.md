@@ -107,7 +107,8 @@ operation states, scope-bound and revision-bound proof rejection, blocked
 submitting before the barrier, environment/account/blocker/lease rejection,
 failed `dispatching` commits with no partial mutation, atomic result persistence,
 rejection of `accepted` before result persistence and payload-preserving
-recovery, successful fencing admission, second-admission rejection, and
+recovery, status-preserving single-record recovery, all-or-nothing restart
+enumeration, successful fencing admission, second-admission rejection, and
 restart recovery that never reopens a `dispatching` operation. The test uses a
 deterministic in-memory store as a durability contract double, while
 `tests/file_journal_store_test.cpp` covers the Windows file-backed

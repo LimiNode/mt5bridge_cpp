@@ -115,6 +115,36 @@ int main() {
                     restarted.find(operation_key) && restarted.find(duplicate_key),
                 "restart enumeration did not recover every durable operation");
 
+        const auto crash_key = key(20, 21);
+        {
+            mt5bridge::OperationJournal before_crash(store);
+            require(before_crash.create(crash_key, {0x0D}).accepted(),
+                    "crash-case operation create failed");
+            prepare(before_crash, crash_key);
+            require(before_crash
+                        .transition_journal(crash_key, mt5bridge::JournalState::dispatching,
+                                             88)
+                        .accepted() &&
+                        before_crash
+                            .transition_operation(crash_key,
+                                                   mt5bridge::OperationState::submitting)
+                            .accepted(),
+                    "crash-case submitting state was not committed");
+        }
+        {
+            mt5bridge::WindowsFileJournalStore post_crash_store(directory);
+            mt5bridge::OperationJournal after_crash(post_crash_store);
+            const auto crash_recovered = after_crash.recover_all();
+            const auto crash_record = after_crash.find(crash_key);
+            require(crash_recovered.accepted() && crash_record &&
+                        crash_record->journal_state == mt5bridge::JournalState::dispatching &&
+                        crash_record->operation_state == mt5bridge::OperationState::submitting &&
+                        !mt5bridge::OperationJournal::can_transition_operation(
+                            mt5bridge::OperationState::submitting,
+                            mt5bridge::OperationState::submitting),
+                    "restart did not rediscover unresolved submitting operation");
+        }
+
         const auto cwd_root = directory / "cwd-regression";
         const auto cwd_a = cwd_root / "a";
         const auto cwd_b = cwd_root / "b";
@@ -144,7 +174,7 @@ int main() {
                 ++record_count;
             }
         }
-        require(record_count == 2, "record files were not created");
+        require(record_count == 3, "record files were not created");
         const auto corrupt_load = result_store.load(operation_key);
         require(corrupt_load.status == mt5bridge::StoreLoadStatus::invalid_record,
                 "corrupt record was accepted during recovery");

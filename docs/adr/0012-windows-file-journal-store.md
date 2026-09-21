@@ -72,7 +72,9 @@ interface.
 
 `tests/file_journal_store_test.cpp` covers directory creation, durable create
 and recovery, stale-writer CAS conflicts across two store instances, atomic
-result persistence and reopen, duplicate creation, restart-wide enumeration,
-absolute-path anchoring across a CWD change, and corruption rejection without
-overwrite. The test uses only a private temporary directory and never loads
-Python, contacts MT5, or calls `order_send`.
+result persistence and reopen, duplicate creation, restart-wide enumeration
+after destroying the original owner journal, preservation of an unresolved
+`dispatching + submitting` record, absolute-path anchoring across a CWD change,
+and corruption rejection without overwrite. The test uses only a private
+temporary directory and never loads Python, contacts MT5, or calls
+`order_send`.

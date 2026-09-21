@@ -42,6 +42,17 @@ struct BackendCallResult {
     std::vector<std::uint8_t> raw_result; ///< Complete opaque result payload.
 };
 
+/// \class CurrentAccountProbe
+/// \brief Reads the terminal account at a live execution boundary.
+class CurrentAccountProbe {
+public:
+    virtual ~CurrentAccountProbe() = default;
+
+    /// \brief Reads the currently selected terminal account.
+    /// \return A valid account identity, or empty when it cannot be trusted.
+    virtual std::optional<AccountKey> current_account() = 0;
+};
+
 /// \class DispatchTransport
 /// \brief Private adapter seam for one synchronous broker submission.
 class DispatchTransport {
@@ -94,13 +105,13 @@ public:
     /// \param journal Owner-loop journal containing the admitted operation.
     /// \param key Immutable operation identity covered by the permit.
     /// \param permit Move-only admission evidence; passing it consumes the caller copy.
-    /// \param current_account Account identity read immediately before execution.
+    /// \param account_probe Live account reader used at both execution boundaries.
     /// \param lease Continuously-held writer lease for the operation account.
     /// \param transport Private adapter that performs the single broker call.
     /// \return Guard outcome and the latest durable operation record when available.
     OneShotExecutionResult execute(OperationJournal &journal, const OperationKey &key,
                                    DispatchPermit permit,
-                                   const AccountKey &current_account,
+                                   CurrentAccountProbe &account_probe,
                                    const SingleWriterLease &lease,
                                    DispatchTransport &transport) const;
 };

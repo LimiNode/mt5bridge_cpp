@@ -225,15 +225,20 @@ operation intent, AccountKey, managed IDs, and write-ahead states through a
 caller-provided durable store. Windows consumers can use the Python-free
 `mt5bridge::WindowsFileJournalStore` from the separate `mt5bridge::journal`
 target; it uses bounded checksum-validated records and an atomic replace under
-a directory lock. The barrier requires an opaque scope- and
+a directory lock. The store anchors its directory to an absolute path at
+construction, distinguishes missing records from invalid storage/I/O, and
+enumerates the complete durable operation set for restart recovery. A malformed
+entry invalidates the complete scan rather than producing a partial owner
+cache. The barrier requires an opaque scope- and
 revision-bound environment proof covering its configured domains/history
 windows, the same current AccountKey and graph revision, no
 unresolved operation or event gap, and a non-zero single-writer fencing token
 before committing `dispatching`. The private one-shot backend consumes that
-permit only after repeating the account/lease/revision checks, calls its
-injected transport once, and persists the complete raw result before advancing
-the lifecycle. `10018 MARKET_CLOSED` is recorded as deterministic
-`rejected`; transport failures remain unresolved and are never retried. No
+permit only after live account-probe and lease/revision checks at both execution
+boundaries, calls its injected transport once, and persists the complete raw
+result before advancing the lifecycle. `10018 MARKET_CLOSED` is recorded
+deterministically as `rejected`; transport failures remain unresolved and are
+never retried. No
 unmanaged public `order_send` is exposed.
 
 The complete source is [`examples/trade_observation_example.cpp`](examples/trade_observation_example.cpp).

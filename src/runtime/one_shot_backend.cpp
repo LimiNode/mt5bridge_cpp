@@ -10,11 +10,17 @@ namespace mt5bridge::runtime {
 
 OneShotExecutionResult OneShotDispatchBackend::execute(
     OperationJournal &journal, const OperationKey &key, DispatchPermit permit,
-    const AccountKey &current_account, const SingleWriterLease &lease,
+    CurrentAccountProbe &account_probe, const SingleWriterLease &lease,
     DispatchTransport &transport) const {
     if (!permit.valid() || !key.valid() || permit.key() != key)
         return {OneShotExecutionStatus::invalid_permit, 0, std::nullopt};
-    if (!current_account.valid() || current_account != key.account)
+    std::optional<AccountKey> account_before;
+    try {
+        account_before = account_probe.current_account();
+    } catch (...) {
+        return {OneShotExecutionStatus::account_mismatch, 0, std::nullopt};
+    }
+    if (!account_before || !account_before->valid() || *account_before != key.account)
         return {OneShotExecutionStatus::account_mismatch, 0, std::nullopt};
 
     const auto record = journal.find(key);
@@ -42,7 +48,14 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
         permit.journal_revision() == (std::numeric_limits<std::uint64_t>::max)() ||
         before_call->revision != permit.journal_revision() + 1)
         return {OneShotExecutionStatus::stale_permit, 0, before_call};
-    if (!current_account.valid() || current_account != key.account)
+    std::optional<AccountKey> account_before_call;
+    try {
+        account_before_call = account_probe.current_account();
+    } catch (...) {
+        return {OneShotExecutionStatus::account_mismatch, 0, before_call};
+    }
+    if (!account_before_call || !account_before_call->valid() ||
+        *account_before_call != key.account)
         return {OneShotExecutionStatus::account_mismatch, 0, before_call};
 
     const auto call_token = lease.held_fencing_token(key.account);
@@ -56,8 +69,7 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
         return {OneShotExecutionStatus::transport_failure, 0, journal.find(key)};
     }
     if (call.status == BackendCallStatus::transport_failure)
-        return {OneShotExecutionStatus::transport_failure, call.retcode,
-                journal.find(key)};
+        return {OneShotExecutionStatus::transport_failure, 0, journal.find(key)};
     if (call.raw_result.empty())
         return {OneShotExecutionStatus::result_not_durable, call.retcode,
                 journal.find(key)};

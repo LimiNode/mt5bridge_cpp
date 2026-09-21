@@ -224,12 +224,15 @@ worker process.
     performs no backend call and exposes no `order_send`. The concrete
     `WindowsFileJournalStore` from [ADR-0012](adr/0012-windows-file-journal-store.md)
     supplies bounded, checksum-validated, atomically replaced records for this
-    seam.
+    seam, with status-bearing single-record recovery and complete restart
+    enumeration.
 7. Add the internal one-shot backend that consumes that permit and keeps the
    same writer ownership through the dispatch barrier and call. The backend
-   persists the full raw result before classifying deterministic broker
-   rejections such as `10018 MARKET_CLOSED`; it never infers session state from
-   `trade_mode` or `order_check` and never retries transport failures. Then add
+   re-reads the live account through a `CurrentAccountProbe` after durable
+   `submitting` and immediately before transport, then persists the full raw
+   result before classifying deterministic broker rejections such as `10018
+   MARKET_CLOSED`; it never infers session state from `trade_mode` or
+   `order_check` and never retries transport failures. Then add
    the high-level asynchronous `TradeManager` only after raw observations,
    journal recovery, and identity rules are covered by fake-runtime tests.
    Side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).

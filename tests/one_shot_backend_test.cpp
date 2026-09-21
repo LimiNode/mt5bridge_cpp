@@ -42,11 +42,21 @@ public:
         return mt5bridge::StoreCommitStatus::committed;
     }
 
-    std::optional<mt5bridge::OperationRecord> load(
+    mt5bridge::StoreLoadResult load(
         const mt5bridge::OperationKey &operation_key) const override {
         const auto it = durable.find(operation_key);
-        return it == durable.end() ? std::nullopt
-                                   : std::optional<mt5bridge::OperationRecord>(it->second);
+        return it == durable.end()
+                   ? mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::not_found,
+                                                std::nullopt}
+                   : mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::found, it->second};
+    }
+
+    mt5bridge::StoreScanResult scan() const override {
+        mt5bridge::StoreScanResult result;
+        result.status = mt5bridge::StoreScanStatus::complete;
+        for (const auto &entry : durable)
+            result.records.push_back(entry.second);
+        return result;
     }
 
 private:
@@ -101,6 +111,22 @@ public:
     mutable std::size_t calls = 0;
     bool held = true;
     bool drop_before_call = false;
+};
+
+class FakeAccountProbe final : public mt5bridge::runtime::CurrentAccountProbe {
+public:
+    explicit FakeAccountProbe(std::vector<std::optional<mt5bridge::AccountKey>> readings)
+        : readings_(std::move(readings)) {}
+
+    std::optional<mt5bridge::AccountKey> current_account() override {
+        if (next_ == readings_.size())
+            return std::nullopt;
+        return readings_[next_++];
+    }
+
+private:
+    std::vector<std::optional<mt5bridge::AccountKey>> readings_;
+    std::size_t next_ = 0;
 };
 
 class FakeTransport final : public mt5bridge::runtime::DispatchTransport {
@@ -187,8 +213,9 @@ int main() {
         transport.next.disposition =
             mt5bridge::runtime::BrokerResultDisposition::rejected;
         mt5bridge::runtime::OneShotDispatchBackend backend;
+        FakeAccountProbe rejected_account_probe({operation_account, operation_account});
         auto executed = backend.execute(journal, rejected_key, std::move(*permit),
-                                         operation_account, lease, transport);
+                                         rejected_account_probe, lease, transport);
         require(executed.completed() && executed.retcode == 10018 &&
                     executed.record &&
                     executed.record->operation_state == mt5bridge::OperationState::rejected &&
@@ -197,7 +224,7 @@ int main() {
                     transport.calls == 1,
                 "market-closed broker rejection was not durably classified");
         auto retry = backend.execute(journal, rejected_key, std::move(*permit),
-                                     operation_account, lease, transport);
+                                     rejected_account_probe, lease, transport);
         require(retry.status == mt5bridge::runtime::OneShotExecutionStatus::invalid_permit &&
                     transport.calls == 1,
                 "consumed permit enabled a second backend call");
@@ -215,8 +242,9 @@ int main() {
                     .accepted(),
                 "stale-permit mutation setup failed");
         FakeTransport stale_transport;
+        FakeAccountProbe stale_account_probe({operation_account});
         const auto stale_result = backend.execute(
-            journal, stale_key, std::move(*stale_permit), operation_account,
+            journal, stale_key, std::move(*stale_permit), stale_account_probe,
             stale_lease, stale_transport);
         require(stale_result.status ==
                     mt5bridge::runtime::OneShotExecutionStatus::stale_permit &&
@@ -233,8 +261,9 @@ int main() {
                                   *consistency.proof, dropping_lease);
         require(lease_permit.has_value(), "lease-loss permit setup failed");
         FakeTransport lease_transport;
+        FakeAccountProbe lease_account_probe({operation_account, operation_account});
         const auto lease_result = backend.execute(
-            journal, lease_key, std::move(*lease_permit), operation_account,
+            journal, lease_key, std::move(*lease_permit), lease_account_probe,
             dropping_lease, lease_transport);
         require(lease_result.status ==
                     mt5bridge::runtime::OneShotExecutionStatus::lease_lost &&
@@ -254,18 +283,42 @@ int main() {
         FakeTransport failing_transport;
         failing_transport.next.status =
             mt5bridge::runtime::BackendCallStatus::transport_failure;
+        failing_transport.next.retcode = mt5bridge::runtime::kTradeRetcodeMarketClosed;
         failing_transport.next.raw_result.clear();
+        FakeAccountProbe transport_account_probe({operation_account, operation_account});
         const auto transport_result = backend.execute(
-            journal, transport_key, std::move(*transport_permit), operation_account,
+            journal, transport_key, std::move(*transport_permit), transport_account_probe,
             transport_lease, failing_transport);
         require(transport_result.status ==
                     mt5bridge::runtime::OneShotExecutionStatus::transport_failure &&
+                    transport_result.retcode == 0 &&
                     failing_transport.calls == 1 &&
                     journal.find(transport_key)->journal_state ==
                         mt5bridge::JournalState::dispatching &&
                     journal.find(transport_key)->operation_state ==
                         mt5bridge::OperationState::submitting,
                 "transport failure reopened or retried the operation");
+
+        const auto account_switch_key = key(11);
+        require(journal.create(account_switch_key, {0x05}).accepted(),
+                "account-switch operation create failed");
+        prepare_for_admission(journal, account_switch_key);
+        FakeLease account_switch_lease{operation_account};
+        auto account_switch_permit = admit(journal, coordinator.graph(), account_switch_key,
+                                            *consistency.proof, account_switch_lease);
+        require(account_switch_permit.has_value(), "account-switch permit setup failed");
+        FakeAccountProbe switching_account_probe({operation_account,
+                                                  mt5bridge::AccountKey{"Other-Trade", 43}});
+        FakeTransport account_switch_transport;
+        const auto account_switch_result = backend.execute(
+            journal, account_switch_key, std::move(*account_switch_permit),
+            switching_account_probe, account_switch_lease, account_switch_transport);
+        require(account_switch_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::account_mismatch &&
+                    account_switch_transport.calls == 0 &&
+                    journal.find(account_switch_key)->operation_state ==
+                        mt5bridge::OperationState::submitting,
+                "account switch after durable submitting reached the transport");
 
         std::cout << "one-shot backend checks passed\n";
         return EXIT_SUCCESS;

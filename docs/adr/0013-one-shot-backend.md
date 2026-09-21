@@ -29,12 +29,15 @@ before the call it verifies:
 1. the permit is valid and belongs to the requested `OperationKey`;
 2. the owner-loop record is still `dispatching + prechecking`, with the exact
    permit revision and fencing token;
-3. the current `AccountKey` matches the immutable operation account;
+3. a live `CurrentAccountProbe` reports an `AccountKey` matching the immutable
+   operation account;
 4. the single-writer lease still returns the permit's fencing token.
 
-The journal then durably advances to `submitting`. The lease and account are
-checked once more immediately before the transport call. The transport is
-called exactly once and is never retried by this layer.
+The journal then durably advances to `submitting`. The account probe and lease
+are checked once more after durable `submitting` and immediately before the
+transport call. The transport is called exactly once and is never retried by
+this layer. A terminal-specific adapter may repeat the account check in the
+same critical section as its native send call.
 
 The result contract is:
 
@@ -78,6 +81,7 @@ query may be advisory only; broker retcodes remain authoritative.
 
 `tests/one_shot_backend_test.cpp` covers a real scope-bound permit followed by
 `10018`, durable raw-result persistence, final `rejected` state, permit
-consumption/no retry, lease loss before the call, and transport failure leaving
+consumption/no retry, a live account switch after durable `submitting`, lease
+loss before the call, and transport failure with an untrusted retcode leaving
 the operation unresolved without a second call. The test uses a fake transport
 and never touches Python or MT5.

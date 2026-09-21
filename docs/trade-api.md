@@ -494,8 +494,10 @@ repeating the account, journal revision, and lease checks, then invokes its
 injected transport exactly once. It never exposes an unmanaged public
 `order_send`. The Windows-native
 `WindowsFileJournalStore` implements the same seam with a directory lock,
-bounded checksum-validated records, and atomic replacement; it is packaged in
-the Python-free `mt5bridge::journal` target rather than the runtime DLL.
+bounded checksum-validated records, status-bearing recovery, restart-wide
+all-or-nothing enumeration, and atomic replacement; its directory is anchored
+to an absolute path at construction. It is packaged in the Python-free
+`mt5bridge::journal` target rather than the runtime DLL.
 The full raw result is persisted before lifecycle advancement; broker
 `10018 MARKET_CLOSED` becomes deterministic `rejected`, while transport
 failures remain unresolved and are never retried.

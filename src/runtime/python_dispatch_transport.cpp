@@ -130,6 +130,20 @@ bool read_int32(PyObject *object, const char *name, std::int32_t *value) {
     return true;
 }
 
+/// \brief Reads one unsigned 32-bit integer field.
+/// \param object Borrowed Python result object.
+/// \param name Field name to read.
+/// \param[out] value Receives the converted integer.
+/// \return True when the field is present and representable as uint32.
+bool read_uint32(PyObject *object, const char *name, std::uint32_t *value) {
+    std::uint64_t converted = 0;
+    if (!read_uint64(object, name, &converted) ||
+        converted > (std::numeric_limits<std::uint32_t>::max)())
+        return false;
+    *value = static_cast<std::uint32_t>(converted);
+    return true;
+}
+
 /// \brief Validates one required finite numeric field.
 /// \param object Borrowed Python result object.
 /// \param name Field name to read.
@@ -216,7 +230,6 @@ bool deterministic_rejection(std::uint32_t retcode) {
     case 10020: // TRADE_RETCODE_PRICE_CHANGED
     case 10021: // TRADE_RETCODE_PRICE_OFF
     case 10022: // TRADE_RETCODE_INVALID_EXPIRATION
-    case 10023: // TRADE_RETCODE_ORDER_CHANGED
     case 10024: // TRADE_RETCODE_TOO_MANY_REQUESTS
     case 10025: // TRADE_RETCODE_NO_CHANGES
     case 10026: // TRADE_RETCODE_SERVER_DISABLES_AT
@@ -243,23 +256,36 @@ bool deterministic_rejection(std::uint32_t retcode) {
     }
 }
 
+PyRef json_compatible(PyObject *value);
+
+/// \brief Requires the nested request echo returned by `order_send`.
+/// \param result Borrowed result dictionary or namedtuple.
+/// \return True when `request` normalizes to a JSON object.
+bool validate_request_echo(PyObject *result) {
+    PyRef request(field(result, "request"));
+    if (!request || request.get() == Py_None)
+        return false;
+    PyRef normalized(json_compatible(request.get()));
+    return normalized && PyDict_Check(normalized.get());
+}
+
 /// \brief Validates the durable subset of one `MqlTradeResult`.
 /// \param result Borrowed result dictionary or namedtuple.
 /// \param[out] retcode Receives the validated return code.
 /// \return True only when every required result field is well-typed.
 bool validate_result(PyObject *result, std::uint32_t *retcode) {
-    std::uint64_t converted_retcode = 0;
+    std::uint32_t converted_retcode = 0;
     std::uint64_t ignored = 0;
     std::int32_t ignored_external = 0;
-    if (!read_uint64(result, "retcode", &converted_retcode) ||
-        converted_retcode > (std::numeric_limits<std::uint32_t>::max)() ||
+    std::uint32_t ignored_request_id = 0;
+    if (!read_uint32(result, "retcode", &converted_retcode) ||
         !read_int32(result, "retcode_external", &ignored_external) ||
-        !read_uint64(result, "request_id", &ignored) ||
+        !read_uint32(result, "request_id", &ignored_request_id) ||
         !read_uint64(result, "order", &ignored) ||
         !read_uint64(result, "deal", &ignored) ||
         !read_double(result, "volume") || !read_double(result, "price") ||
         !read_double(result, "bid") || !read_double(result, "ask") ||
-        !read_text(result, "comment"))
+        !read_text(result, "comment") || !validate_request_echo(result))
         return false;
     *retcode = static_cast<std::uint32_t>(converted_retcode);
     return true;
@@ -268,8 +294,6 @@ bool validate_result(PyObject *result, std::uint32_t *retcode) {
 /// \brief Converts a result dictionary or namedtuple to a JSON-ready mapping.
 /// \param result Borrowed result object.
 /// \return Owned dictionary reference, or empty for unsupported results.
-PyRef json_compatible(PyObject *value);
-
 PyRef json_compatible(PyObject *value) {
     PyRef asdict(field(value, "_asdict"));
     if (asdict && PyCallable_Check(asdict.get())) {

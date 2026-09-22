@@ -568,6 +568,14 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "broker_result")
         self.assertEqual(payload["disposition"], "reconciling")
 
+    def test_private_dispatch_transport_keeps_order_changed_reconciling(self) -> None:
+        """An order-state change is not proof that no execution effect occurred."""
+        fake = fake_module([], order_response=valid_order_result(10023))
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(payload["status"], "broker_result")
+        self.assertEqual(payload["disposition"], "reconciling")
+
     def test_private_dispatch_transport_exception_is_unresolved(self) -> None:
         """A Python exception after the one call is not broker evidence."""
         fake = fake_module([], order_error=RuntimeError("send failed"))
@@ -590,6 +598,19 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def test_private_dispatch_transport_malformed_result_is_unresolved(self) -> None:
         """A partial result shape is rejected before durable serialization."""
         fake = fake_module([], order_response={"retcode": 10018})
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(payload["status"], "transport_failure")
+        self.assertEqual(payload["retcode"], 0)
+        self.assertIsNone(payload["raw_result"])
+
+    def test_private_dispatch_transport_missing_request_echo_is_unresolved(self) -> None:
+        """A result without MT5's request echo is not complete broker evidence."""
+        result = valid_order_result(10009)
+        assert isinstance(result, dict)
+        result.pop("request")
+        fake = fake_module([], order_response=result)
         status, payload, error = self.dispatch(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(fake.order_calls, 1)

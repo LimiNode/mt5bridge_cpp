@@ -42,9 +42,9 @@ The adapter never retries. A valid result is returned as broker evidence:
 DONE / DONE_PARTIAL / PLACED             → reconciling seed
 ```
 
-`TRADE_RETCODE_LOCKED` (`10028`) is kept as a reconciliation seed: the server
-reports that the request is locked for processing, not that it was definitively
-rejected.
+`TRADE_RETCODE_LOCKED` (`10028`) and `TRADE_RETCODE_ORDER_CHANGED` (`10023`)
+are kept as reconciliation seeds: the server reports a changed/locked request,
+not that it was definitively rejected.
 
 The successful-result path is not proof that a final fill occurred; later
 observation/reconciliation remains authoritative. Python exceptions, `None`,
@@ -55,6 +55,8 @@ missing fields, malformed types, and serialization failures return
 Namedtuple results are recursively normalized through `_asdict()`, including
 the nested `MqlTradeRequest` echo, so durable JSON retains semantic field names
 rather than reducing the nested request to an array.
+The nested `request` echo is mandatory during validation; a result without it is
+treated as an incomplete transport result.
 
 The test-only `test_dispatch_transport` JSON method is compiled only when
 `BUILD_TESTING` is enabled. It exercises the private adapter through the
@@ -75,7 +77,8 @@ existing runtime admission and GIL path; it is not a production API.
 ## Verification
 
 `tests/test_fake_mt5_runtime.py` drives valid `10018`, `10009`, `10008`, and
-`10028` results, a signed external retcode, a nested namedtuple request,
+`10023` and `10028` results, a signed external retcode, a missing-request
+regression, and a nested namedtuple request,
 Python exceptions, `None`, malformed results, and account mismatch through the
 test-only method. The fake module records the exact number of `order_send`
 calls and the complete JSON result returned by the adapter.

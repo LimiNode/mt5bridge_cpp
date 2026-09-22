@@ -227,6 +227,7 @@ def fake_module(
     module.initialize_calls = 0
     module.shutdown_calls = 0
     module.order_calls = 0
+    module.call_order: list[str] = []
     module.account_server = account_server
     module.account_login = account_login
     module.last = (1, "Success")
@@ -286,6 +287,7 @@ def fake_module(
         if request.get("action") != module.TRADE_ACTION_DEAL or request.get("type") != module.ORDER_TYPE_BUY:
             raise ValueError("invalid market order request")
         module.order_calls += 1
+        module.call_order.append("order_send")
         if order_error is not None:
             raise order_error
         if order_none:
@@ -295,6 +297,7 @@ def fake_module(
         return {"retcode": 10009}
 
     def account_info() -> dict[str, object]:
+        module.call_order.append("account_info")
         return {"server": module.account_server, "login": module.account_login}
 
     def terminal_info() -> dict[str, bool]:
@@ -324,40 +327,91 @@ def fake_module(
     return module
 
 
+_FAKE_TRADE_REQUEST = namedtuple(
+    "FakeTradeRequest",
+    [
+        "action",
+        "magic",
+        "order",
+        "symbol",
+        "volume",
+        "price",
+        "stoplimit",
+        "sl",
+        "tp",
+        "deviation",
+        "type",
+        "type_filling",
+        "type_time",
+        "expiration",
+        "comment",
+        "position",
+        "position_by",
+    ],
+)
+
 _FAKE_TRADE_RESULT = namedtuple(
     "FakeTradeResult",
     [
         "retcode",
-        "retcode_external",
-        "request_id",
-        "order",
         "deal",
+        "order",
         "volume",
         "price",
         "bid",
         "ask",
         "comment",
+        "request_id",
+        "retcode_external",
+        "request",
     ],
 )
 
 
 def valid_order_result(
-    retcode: int, *, namedtuple_result: bool = False
+    retcode: int, *, namedtuple_result: bool = False, retcode_external: int = 0
 ) -> dict[str, object] | object:
     """Builds the complete MqlTradeResult-shaped payload required by the adapter."""
-    values = {
+    values: dict[str, object] = {
         "retcode": retcode,
-        "retcode_external": 0,
-        "request_id": 7,
-        "order": 0,
         "deal": 0,
+        "order": 0,
         "volume": 0.01,
         "price": 1.1,
         "bid": 1.099,
         "ask": 1.101,
         "comment": "Fake result",
+        "request_id": 7,
+        "retcode_external": retcode_external,
+        "request": {
+            "action": 1,
+            "magic": 123,
+            "symbol": "EURUSD",
+            "volume": 0.01,
+        },
     }
-    return _FAKE_TRADE_RESULT(**values) if namedtuple_result else values
+    if namedtuple_result:
+        values["request"] = _FAKE_TRADE_REQUEST(
+            1,
+            123,
+            0,
+            "EURUSD",
+            0.01,
+            1.1,
+            0.0,
+            0.0,
+            0.0,
+            10,
+            0,
+            0,
+            0,
+            0,
+            "",
+            0,
+            0,
+        )
+        return _FAKE_TRADE_RESULT(**values)
+    return values
 
 
 class FakeMt5RuntimeTests(unittest.TestCase):
@@ -466,6 +520,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         status, payload, error = self.dispatch(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(fake.order_calls, 1)
+        self.assertEqual(fake.call_order, ["account_info", "order_send"])
         self.assertEqual(payload["status"], "broker_result")
         self.assertEqual(payload["retcode"], 10018)
         self.assertEqual(payload["disposition"], "rejected")
@@ -493,7 +548,25 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(fake.order_calls, 1)
         self.assertEqual(payload["status"], "broker_result")
         self.assertEqual(payload["retcode"], 10009)
-        self.assertEqual(payload["raw_result"], valid_order_result(10009))
+        self.assertEqual(payload["raw_result"]["request"]["action"], 1)
+        self.assertEqual(payload["raw_result"]["request"]["symbol"], "EURUSD")
+        self.assertEqual(payload["raw_result"]["request"]["position_by"], 0)
+
+    def test_private_dispatch_transport_accepts_signed_external_retcode(self) -> None:
+        """Signed external broker codes remain valid result evidence."""
+        fake = fake_module([], order_response=valid_order_result(10009, retcode_external=-7))
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(payload["status"], "broker_result")
+        self.assertEqual(payload["raw_result"]["retcode_external"], -7)
+
+    def test_private_dispatch_transport_keeps_locked_request_reconciling(self) -> None:
+        """A locked request is not strong enough to become terminal rejected."""
+        fake = fake_module([], order_response=valid_order_result(10028))
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(payload["status"], "broker_result")
+        self.assertEqual(payload["disposition"], "reconciling")
 
     def test_private_dispatch_transport_exception_is_unresolved(self) -> None:
         """A Python exception after the one call is not broker evidence."""
@@ -532,6 +605,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         status, payload, error = self.dispatch(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(fake.order_calls, 0)
+        self.assertEqual(fake.call_order, ["account_info"])
         self.assertEqual(payload["status"], "account_mismatch")
         self.assertEqual(payload["retcode"], 0)
         self.assertIsNone(payload["raw_result"])
@@ -1500,6 +1574,12 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             if not fake.history_sequence:
                 break
             time.sleep(0.01)
+        # Drain events produced by the initial two-page publication before
+        # changing the backing history. Otherwise a queued initial batch can
+        # be delivered after the late update and look like a duplicate tail.
+        for _ in range(10):
+            time.sleep(0.03)
+            self.module.mt5bridge_process_events(64, native_callback, None)
         observed.clear()
         increased = page(base[0], 5)
         increased["time_msc"] = (base[0], base[0], base[0], base[0] + 1, base[0] + 1)

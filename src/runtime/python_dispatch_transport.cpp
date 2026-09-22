@@ -108,6 +108,28 @@ bool read_uint64(PyObject *object, const char *name, std::uint64_t *value) {
     return true;
 }
 
+/// \brief Reads one signed 32-bit integer field.
+/// \param object Borrowed Python result object.
+/// \param name Field name to read.
+/// \param[out] value Receives the converted integer.
+/// \return True when the field is present and representable as int32.
+bool read_int32(PyObject *object, const char *name, std::int32_t *value) {
+    PyRef item(field(object, name));
+    if (!item || item.get() == Py_None || !PyLong_Check(item.get())) {
+        PyErr_Clear();
+        return false;
+    }
+    const long long converted = PyLong_AsLongLong(item.get());
+    if (PyErr_Occurred() ||
+        converted < (std::numeric_limits<std::int32_t>::min)() ||
+        converted > (std::numeric_limits<std::int32_t>::max)()) {
+        PyErr_Clear();
+        return false;
+    }
+    *value = static_cast<std::int32_t>(converted);
+    return true;
+}
+
 /// \brief Validates one required finite numeric field.
 /// \param object Borrowed Python result object.
 /// \param name Field name to read.
@@ -199,7 +221,6 @@ bool deterministic_rejection(std::uint32_t retcode) {
     case 10025: // TRADE_RETCODE_NO_CHANGES
     case 10026: // TRADE_RETCODE_SERVER_DISABLES_AT
     case 10027: // TRADE_RETCODE_CLIENT_DISABLES_AT
-    case 10028: // TRADE_RETCODE_LOCKED
     case 10029: // TRADE_RETCODE_FROZEN
     case 10030: // TRADE_RETCODE_INVALID_FILL
     case 10032: // TRADE_RETCODE_ONLY_REAL
@@ -229,9 +250,10 @@ bool deterministic_rejection(std::uint32_t retcode) {
 bool validate_result(PyObject *result, std::uint32_t *retcode) {
     std::uint64_t converted_retcode = 0;
     std::uint64_t ignored = 0;
+    std::int32_t ignored_external = 0;
     if (!read_uint64(result, "retcode", &converted_retcode) ||
         converted_retcode > (std::numeric_limits<std::uint32_t>::max)() ||
-        !read_uint64(result, "retcode_external", &ignored) ||
+        !read_int32(result, "retcode_external", &ignored_external) ||
         !read_uint64(result, "request_id", &ignored) ||
         !read_uint64(result, "order", &ignored) ||
         !read_uint64(result, "deal", &ignored) ||
@@ -246,16 +268,48 @@ bool validate_result(PyObject *result, std::uint32_t *retcode) {
 /// \brief Converts a result dictionary or namedtuple to a JSON-ready mapping.
 /// \param result Borrowed result object.
 /// \return Owned dictionary reference, or empty for unsupported results.
-PyRef json_compatible(PyObject *result) {
-    PyRef asdict(field(result, "_asdict"));
-    if (asdict && PyCallable_Check(asdict.get()))
-        return PyRef(PyObject_CallObject(asdict.get(), nullptr));
-    if (PyDict_Check(result)) {
-        Py_INCREF(result);
-        return PyRef(result);
+PyRef json_compatible(PyObject *value);
+
+PyRef json_compatible(PyObject *value) {
+    PyRef asdict(field(value, "_asdict"));
+    if (asdict && PyCallable_Check(asdict.get())) {
+        PyRef mapped(PyObject_CallObject(asdict.get(), nullptr));
+        if (!mapped)
+            return PyRef();
+        return json_compatible(mapped.get());
     }
-    PyErr_Clear();
-    return PyRef();
+    if (PyDict_Check(value)) {
+        PyRef normalized(PyDict_New());
+        if (!normalized)
+            return PyRef();
+        PyObject *key = nullptr;
+        PyObject *item = nullptr;
+        Py_ssize_t position = 0;
+        while (PyDict_Next(value, &position, &key, &item)) {
+            PyRef converted(json_compatible(item));
+            if (!converted || PyDict_SetItem(normalized.get(), key, converted.get()) != 0)
+                return PyRef();
+        }
+        return normalized;
+    }
+    if (PyTuple_Check(value) || PyList_Check(value)) {
+        const Py_ssize_t size = PySequence_Size(value);
+        if (size < 0)
+            return PyRef();
+        PyRef normalized(PyList_New(size));
+        if (!normalized)
+            return PyRef();
+        for (Py_ssize_t index = 0; index < size; ++index) {
+            PyObject *item = PySequence_GetItem(value, index);
+            PyRef converted(json_compatible(item));
+            Py_XDECREF(item);
+            if (!converted || PyList_SetItem(normalized.get(), index, converted.release()) != 0)
+                return PyRef();
+        }
+        return normalized;
+    }
+    Py_INCREF(value);
+    return PyRef(value);
 }
 
 /// \brief Serializes the complete validated result as UTF-8 JSON.
@@ -304,10 +358,6 @@ BackendCallResult Mt5PythonDispatchTransport::submit_once(const OperationRecord 
         return transport_failure();
 
     try {
-        const auto current = account_probe_.current_account();
-        if (!current || *current != record.key.account)
-            return account_mismatch();
-
         PyRef json_module(PyImport_ImportModule("json"));
         PyRef loads(json_module ? PyObject_GetAttrString(json_module.get(), "loads") : nullptr);
         if (!json_module || !loads || !PyCallable_Check(loads.get()))
@@ -322,6 +372,11 @@ BackendCallResult Mt5PythonDispatchTransport::submit_once(const OperationRecord 
         PyRef order_send(PyObject_GetAttrString(reinterpret_cast<PyObject *>(mt5_), "order_send"));
         if (!order_send || !PyCallable_Check(order_send.get()))
             return transport_failure();
+
+        const auto current = account_probe_.current_account();
+        if (!current || *current != record.key.account)
+            return account_mismatch();
+
         PyRef result(PyObject_CallFunctionObjArgs(order_send.get(), request.get(), nullptr));
         if (!result || result.get() == Py_None)
             return transport_failure();

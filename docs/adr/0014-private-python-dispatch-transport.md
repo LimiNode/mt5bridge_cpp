@@ -27,11 +27,13 @@ the CPython GIL.
 
 For one `OperationRecord` it performs:
 
-1. a live `account_info()` check against the immutable operation `AccountKey`;
-2. strict UTF-8 JSON decoding of the retained `MqlTradeRequest` payload;
-3. exactly one `MetaTrader5.order_send(request)` call;
-4. strict validation of all durable `MqlTradeResult` fields;
-5. JSON serialization of the complete result as opaque `raw_result` bytes.
+1. strict UTF-8 JSON decoding of the retained `MqlTradeRequest` payload;
+2. resolving the `order_send` callable;
+3. a live `account_info()` check against the immutable operation `AccountKey`;
+4. exactly one `MetaTrader5.order_send(request)` call;
+5. strict validation of all durable `MqlTradeResult` fields, including the
+   signed 32-bit `retcode_external` field;
+6. JSON serialization of the complete result as opaque `raw_result` bytes.
 
 The adapter never retries. A valid result is returned as broker evidence:
 
@@ -40,11 +42,19 @@ The adapter never retries. A valid result is returned as broker evidence:
 DONE / DONE_PARTIAL / PLACED             → reconciling seed
 ```
 
+`TRADE_RETCODE_LOCKED` (`10028`) is kept as a reconciliation seed: the server
+reports that the request is locked for processing, not that it was definitively
+rejected.
+
 The successful-result path is not proof that a final fill occurred; later
 observation/reconciliation remains authoritative. Python exceptions, `None`,
 missing fields, malformed types, and serialization failures return
 `transport_failure` with no retcode or raw result. An account mismatch returns
 `account_mismatch` and does not call `order_send`.
+
+Namedtuple results are recursively normalized through `_asdict()`, including
+the nested `MqlTradeRequest` echo, so durable JSON retains semantic field names
+rather than reducing the nested request to an array.
 
 The test-only `test_dispatch_transport` JSON method is compiled only when
 `BUILD_TESTING` is enabled. It exercises the private adapter through the
@@ -64,7 +74,8 @@ existing runtime admission and GIL path; it is not a production API.
 
 ## Verification
 
-`tests/test_fake_mt5_runtime.py` drives valid `10018`, `10009`, and `10008`
-results, Python exceptions, `None`, malformed results, and account mismatch
-through the test-only method. The fake module records the exact number of
-`order_send` calls and the complete JSON result returned by the adapter.
+`tests/test_fake_mt5_runtime.py` drives valid `10018`, `10009`, `10008`, and
+`10028` results, a signed external retcode, a nested namedtuple request,
+Python exceptions, `None`, malformed results, and account mismatch through the
+test-only method. The fake module records the exact number of `order_send`
+calls and the complete JSON result returned by the adapter.

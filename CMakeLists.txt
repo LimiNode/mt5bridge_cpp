@@ -78,6 +78,12 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_file_journal_store
              COMMAND mt5bridge_file_journal_store_test)
+    add_executable(mt5bridge_header_compatibility_test
+                   tests/header_compatibility_test.cpp)
+    target_link_libraries(mt5bridge_header_compatibility_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
+    add_test(NAME mt5bridge_header_compatibility
+             COMMAND mt5bridge_header_compatibility_test)
     add_executable(mt5bridge_one_shot_backend_test
                    tests/one_shot_backend_test.cpp)
     target_include_directories(mt5bridge_one_shot_backend_test PRIVATE

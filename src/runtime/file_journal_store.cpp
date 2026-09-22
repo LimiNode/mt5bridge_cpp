@@ -16,7 +16,7 @@
 #include <windows.h>
 #endif
 
-#include <mt5bridge/file_journal_store.hpp>
+#include <mt5bridge/dispatch/file_journal_store.hpp>
 
 namespace mt5bridge {
 namespace {

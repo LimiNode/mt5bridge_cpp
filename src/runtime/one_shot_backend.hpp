@@ -7,7 +7,7 @@
 #define NOMINMAX
 #endif
 
-#include <mt5bridge/dispatch_journal.hpp>
+#include <mt5bridge/dispatch/journal.hpp>
 
 #include <cstdint>
 #include <optional>

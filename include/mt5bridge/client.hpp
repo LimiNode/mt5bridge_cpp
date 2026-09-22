@@ -3,8 +3,8 @@
 /// \file client.hpp
 /// \brief Defines the lightweight C++ facade for dynamically loaded mt5_bridge.dll.
 
-#include "data.h"
-#include "trade.h"
+#include <mt5bridge/market/data.h>
+#include <mt5bridge/trade/observation.h>
 
 #if !defined(_WIN32)
 #  error "mt5bridge::Client is only supported on Windows"

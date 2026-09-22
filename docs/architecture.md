@@ -89,16 +89,22 @@ include/
 └── mt5bridge/
     ├── abi.h
     ├── client.hpp
-    ├── data.h
-    └── trade.h
+    ├── market.hpp
+    ├── market/data.h
+    ├── trade.hpp
+    ├── trade/observation.h
+    ├── observation.hpp
+    ├── observation/{graph,coordinator,environment_consistency}.hpp
+    ├── reconciliation/engine.hpp
+    └── dispatch/{journal,file_journal_store}.hpp
 
 src/
 └── runtime/
     └── mt5_bridge.cpp
 ```
 
-The public journal headers also include `dispatch_journal.hpp` and
-`file_journal_store.hpp`. The latter is implemented by the Python-free
+The public dispatch domain is exposed through `dispatch.hpp` and its focused
+headers under `dispatch/`. The latter is implemented by the Python-free
 `src/runtime/file_journal_store.cpp` source in the separate
 `mt5bridge::journal` target. The private one-shot execution seam lives in
 `src/runtime/one_shot_backend.hpp/.cpp` and is built as
@@ -125,16 +131,18 @@ The managed trade identity, close-obligation, scheduling, and exit-policy
 boundaries are specified in [ADR-0006](adr/0006-managed-trade-lifecycle.md).
 The read-only account-scoped evidence graph is specified in
 [ADR-0007](adr/0007-observation-graph.md) and exposed by
-`include/mt5bridge/reconciliation.hpp`.
+`include/mt5bridge/observation/graph.hpp` (with the old path retained as a
+forwarding header).
 The observation-only predicate evaluator is specified in
 [ADR-0008](adr/0008-observation-reconciliation.md) and exposed by
-`include/mt5bridge/reconciliation_engine.hpp`.
+`include/mt5bridge/reconciliation/engine.hpp` (with the old path retained as a
+forwarding header).
 The synchronous observation coordinator and pre-dispatch consistency gate are
 specified in [ADR-0009](adr/0009-observation-coordinator.md) and exposed by
-`include/mt5bridge/reconciliation_coordinator.hpp`.
+`include/mt5bridge/observation/coordinator.hpp`.
 The bounded cross-view environment policy is specified in
 [ADR-0010](adr/0010-environment-consistency.md) and exposed by
-`include/mt5bridge/environment_consistency.hpp`. It checks sequential
+`include/mt5bridge/observation/environment_consistency.hpp`. It checks sequential
 observation batches for account continuity, direct identity-link conflicts,
 and a repeated stable evidence signature; it does not claim that MT5 supplied
 an atomic snapshot.

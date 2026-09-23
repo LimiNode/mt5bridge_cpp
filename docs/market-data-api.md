@@ -32,9 +32,10 @@ Typical C++ usage keeps the POD contract out of application plumbing:
 
 ```cpp
 Mt5FetchDiagnostics diagnostics{};
+Mt5RateCoverage coverage{};
 auto ticks = mt5.copy_ticks_range("EURUSD", from_msc, to_msc, 0, &diagnostics);
 auto rates = mt5.copy_rates_range("EURUSD", /*TIMEFRAME_M1=*/1,
-                                  from_msc, to_msc, &diagnostics);
+                                  from_msc, to_msc, &diagnostics, &coverage);
 ```
 
 Every buffer is owned by the DLL and must be released with its matching
@@ -43,10 +44,18 @@ copy it to application-owned storage if it must outlive the call.
 
 Rates use the same bounded transient-error recovery as ticks. Because
 `copy_rates_range()` has no page-size contract, the bridge confirms two stable
-successive NumPy results (including two stable empty results) before marking a
-rate buffer complete. The transient-failure budget and confirmation-probe
-budget are independent, so a clean result received after recovery still gets
-its confirmation probe.
+successive NumPy results before returning a rate buffer. Stability alone is not
+range completeness: the additive `Mt5RateCoverage` extension reports whether
+the timeframe-aligned requested boundaries were evidenced. A stable suffix or
+stable empty result is returned with `MT5_FETCH_PARTIAL` and
+`MT5_RATE_COVERAGE_UNPROVEN`, never as `MT5_FETCH_COMPLETE`. Rows outside the
+requested millisecond range are filtered locally before they cross the POD
+boundary. Coverage is a boundary claim, not a proof of every interior bar:
+the raw response must reach the floor-aligned start and the filtered response
+must reach the floor-aligned end for the recognized timeframe. The
+transient-failure budget and confirmation-probe budget are
+independent, so a clean result received after recovery still gets its
+confirmation probe.
 
 ## Reliability contract
 
@@ -64,7 +73,7 @@ non-zero to cancel delivery and may call another bridge operation; shutting
 the bridge down from a callback cancels the outer traversal on its next page.
 A request spanning at least thirty days first runs a bounded progressive
 bootstrap. The bridge issues one-row synchronization probes from a recent
-frontier toward the requested start, initially stepping back 366 days and
+search cursor toward the requested start, initially stepping back 366 days and
 halving the step down to a 30-day floor when the oldest observed tick does not
 move. At most sixteen probes are issued; three consecutive stalled probes at
 the minimum step fail closed with a bootstrap diagnostic. The bootstrap also
@@ -73,10 +82,13 @@ probe acquires and releases runtime admission and the GIL independently;
 backoff never holds either serialization scope. Probe rows are discarded and
 are never mixed into the result: the normal inclusive paginator still proves
 exact range coverage, boundary multiplicity, and completion. A target-anchor
-probe must be followed by a clean confirmation of the same oldest available
-tick; merely repeating the current suffix at the requested start is not
-success. The accepted anchor gap is bounded by the 30-day minimum adaptive
-step, so a distant stale suffix remains retry-exhausted instead of claiming a
+probe must be preceded by positive tick evidence and followed by a clean
+confirmation of the same oldest available tick; merely repeating the current
+suffix at the requested start is not success. Clean empty probes only advance
+the bounded search cursor and never establish coverage. If all probes are
+empty, bootstrap remains retry-exhausted instead of claiming a deep range is
+empty. The accepted anchor gap is bounded by the 30-day minimum adaptive step,
+so a distant stale suffix remains retry-exhausted instead of claiming a
 missing prefix is covered. This permits ordinary weekend/holiday gaps without
 turning an unbounded absence of history into evidence.
 A successful probe at the requested anchor is only a synchronization request,

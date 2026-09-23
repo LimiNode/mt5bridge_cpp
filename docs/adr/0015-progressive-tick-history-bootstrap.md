@@ -3,7 +3,8 @@
 ## Status
 
 Accepted. This slice hardens deep tick reads before the controlled trade
-smoke. It does not change the C ABI, synthesize bars, or call any trading API.
+smoke. It preserves the existing ABI-8 records, adds no side-effecting
+trading API, and does not synthesize bars.
 
 ## Context
 
@@ -26,27 +27,33 @@ For tick ranges spanning at least thirty days, `visit_ticks_range()` performs
 one-row synchronization probes before its normal pagination:
 
 ```text
-frontier = min(request.to, current_time)
+search_cursor = min(request.to, current_time)
+confirmed_frontier = empty
 step = 366 days
 
-while frontier > request.from:
-    candidate = max(request.from, frontier - step)
+while probes remain bounded:
+    candidate = max(request.from, search_cursor - step)
     copy_ticks_from(candidate, count=1)
-    if oldest returned tick moved before frontier:
-        frontier = oldest returned tick
+    if a non-empty response moves before search_cursor:
+        search_cursor = oldest returned tick
+        confirmed_frontier = oldest returned tick
         reset stalled counter
         expand step toward 366 days
+    if the response is clean empty:
+        advance only search_cursor; do not establish confirmed_frontier
     else:
         halve step down to 30 days
         increment stalled counter
 ```
 
-Reaching the requested anchor is not inferred from a single suffix. If the
-first available tick is later than `request.from`, the probe at the requested
-anchor must observe that same oldest tick again. Repeatedly returning the old
-frontier without any target progress therefore remains stalled and cannot
-declare bootstrap success. Weekend/holiday gaps are valid once this clean
-confirmation is present.
+Reaching the requested anchor is not inferred from a single suffix or from a
+clean empty response. Empty pages may occur while terminal history is still
+warming, so they only advance the bounded search cursor. A successful
+bootstrap requires positive tick evidence and a target probe at
+`request.from` that observes the same oldest tick again. Repeatedly returning
+the old confirmed frontier without that target progress therefore remains
+stalled and cannot declare bootstrap success. Weekend/holiday gaps are valid
+once this clean confirmation is present.
 To avoid treating a distant stale suffix as a valid gap, the first available
 tick must be no more than the adaptive 30-day minimum step after the requested
 anchor; larger gaps remain retry-exhausted unless a probe reaches the anchor.
@@ -62,10 +69,12 @@ the requested anchor ends the bootstrap only; the normal inclusive paginator
 still filters the requested millisecond range, reconciles same-timestamp
 payload multiplicity, and confirms completion.
 
-Transient/partial probe results are never used to advance the frontier. The
+Transient/partial probe results are never used to advance either frontier. The
 existing retry and IPC reconnect rules remain in force through the shared page
 reader. Probe rows are discarded, so the public result contains no duplicates
-introduced by the bootstrap.
+introduced by the bootstrap. If all bounded probes are empty, the operation
+returns retry-exhausted/coverage-unproven rather than claiming a deep range is
+empty or complete.
 
 This mechanism is intentionally limited to ticks. Bar history has a separate
 MT5 cache and `Max bars in chart` contract; the bridge does not replace native
@@ -77,8 +86,9 @@ M1 bars with midpoint or tick-derived OHLC data.
   instead of replaying one oversized anchor forever.
 - No-progress behavior is bounded and fail-closed; a stalled terminal cannot
   spin indefinitely.
-- The public ABI remains unchanged, including the fixed-size
-  `Mt5FetchDiagnostics` record.
+- The existing ABI-8 records remain unchanged, including the fixed-size
+  `Mt5FetchDiagnostics` record; rates expose coverage through an additive,
+  versioned accessor.
 - Existing pagination, boundary-multiplicity, and callback semantics remain
   authoritative for delivered ticks.
 - Native rates remain independent of tick bootstrap and are never silently
@@ -89,8 +99,10 @@ M1 bars with midpoint or tick-derived OHLC data.
 `tests/test_fake_mt5_runtime.py` verifies that deep probes move through
 successively older years before normal pagination, that every probe requests
 one row, that an unreached target suffix cannot terminate bootstrap, that a
-valid calendar gap receives a clean confirmation, and that a malformed result
-after a transient probe remains a fatal error. A repeated oldest tick exhausts
-a bounded adaptive budget with a retry-exhausted diagnostic. Existing
+valid calendar gap receives a clean confirmation, that empty probes cannot
+complete a deep request before positive evidence arrives, and that an all-empty
+deep request remains retry-exhausted. A malformed result after a transient
+probe remains a fatal error. A repeated oldest tick exhausts a bounded adaptive
+budget with a retry-exhausted diagnostic. Existing
 pagination, transient recovery, realtime, and dispatch tests remain part of
 the full runtime suite.

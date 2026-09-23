@@ -73,7 +73,7 @@ typedef int32_t Mt5FetchStatus;
 #define MT5_FETCH_RETRY_EXHAUSTED ((Mt5FetchStatus)2)
 /// \brief A non-recoverable error stopped the read.
 #define MT5_FETCH_FATAL_ERROR ((Mt5FetchStatus)3)
-/// \brief Data was returned but the terminal could not prove range completeness.
+/// \brief A stable observation was returned but range completeness is unproven.
 #define MT5_FETCH_PARTIAL ((Mt5FetchStatus)4)
 /// \}
 
@@ -89,6 +89,33 @@ typedef struct Mt5FetchDiagnostics {
     uint8_t reserved[2];             ///< Reserved for ABI-compatible extensions; must be zero.
     Mt5FetchStatus status;           ///< Final semantic status of the read.
 } Mt5FetchDiagnostics;
+
+/// \typedef Mt5RateCoverageState
+/// \brief Versioned evidence state for a rate buffer's requested time range.
+typedef int32_t Mt5RateCoverageState;
+
+/// \name Mt5RateCoverageState values
+/// \{
+/// \brief The returned rows do not prove both requested range boundaries.
+#define MT5_RATE_COVERAGE_UNPROVEN ((Mt5RateCoverageState)0)
+/// \brief The returned rows prove the timeframe-aligned requested boundaries.
+#define MT5_RATE_COVERAGE_PROVEN ((Mt5RateCoverageState)1)
+/// \}
+
+/// \brief Version of the additive rate-coverage extension.
+#define MT5BRIDGE_RATE_COVERAGE_VERSION 1u
+
+/// \struct Mt5RateCoverage
+/// \brief Describes range coverage without changing the ABI-8 diagnostics record.
+typedef struct Mt5RateCoverage {
+    uint32_t version;                 ///< Must equal MT5BRIDGE_RATE_COVERAGE_VERSION.
+    Mt5RateCoverageState state;       ///< Proven or unproven coverage state.
+    int64_t requested_from_msc;       ///< Original inclusive request start.
+    int64_t requested_to_msc;         ///< Original inclusive request end.
+    int64_t observed_from_msc;        ///< Earliest raw bar returned, or -1 when none.
+    int64_t observed_to_msc;          ///< Latest raw bar returned, or -1 when none.
+    uint32_t reserved[2];              ///< Reserved; must be zero.
+} Mt5RateCoverage;
 
 /// \struct Mt5TickSourceRequest
 /// \brief Describes one physical symbol source in a subscription group.
@@ -231,6 +258,9 @@ static_assert(sizeof(Mt5FetchDiagnostics) == 24,
               "Mt5FetchDiagnostics ABI size changed");
 static_assert(offsetof(Mt5FetchDiagnostics, status) == 20,
               "Mt5FetchDiagnostics::status ABI offset changed");
+static_assert(sizeof(Mt5RateCoverage) == 48, "Mt5RateCoverage ABI size changed");
+static_assert(offsetof(Mt5RateCoverage, requested_from_msc) == 8,
+              "Mt5RateCoverage::requested_from_msc ABI offset changed");
 static_assert(sizeof(Mt5TickSourceRequest) == 16,
               "Mt5TickSourceRequest ABI size changed");
 static_assert(sizeof(Mt5SubscriptionRequest) == 48,
@@ -258,6 +288,7 @@ _Static_assert(sizeof(Mt5RatesRequest) == 32, "Mt5RatesRequest ABI size changed"
 _Static_assert(sizeof(Mt5FetchStatus) == 4, "Mt5FetchStatus ABI size changed");
 _Static_assert(sizeof(Mt5FetchDiagnostics) == 24,
                "Mt5FetchDiagnostics ABI size changed");
+_Static_assert(sizeof(Mt5RateCoverage) == 48, "Mt5RateCoverage ABI size changed");
 _Static_assert(sizeof(Mt5TickSourceRequest) == 16,
                "Mt5TickSourceRequest ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionRequest) == 48,
@@ -358,6 +389,13 @@ MT5BRIDGE_EXPORT void mt5bridge_rate_buffer_free(Mt5RateBuffer *buffer);
 /// \return Zero on success; non-zero when an argument is NULL.
 MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_diagnostics(const Mt5RateBuffer *buffer,
                                                        Mt5FetchDiagnostics *diagnostics);
+
+/// \brief Copies additive range-coverage evidence for a rate buffer.
+/// \param buffer Buffer returned by mt5bridge_query_rates().
+/// \param[out] coverage Destination for the versioned coverage record.
+/// \return Zero on success; non-zero when an argument is NULL or the extension is unavailable.
+MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_coverage(const Mt5RateBuffer *buffer,
+                                                    Mt5RateCoverage *coverage);
 
 /// \brief Retrieves diagnostics for the most recent market-data call on this thread.
 /// \param[out] diagnostics Destination for the diagnostic snapshot.

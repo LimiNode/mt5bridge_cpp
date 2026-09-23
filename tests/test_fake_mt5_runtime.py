@@ -68,6 +68,20 @@ class Mt5FetchDiagnostics(Structure):
     ]
 
 
+class Mt5RateCoverage(Structure):
+    """Matches the additive versioned rate-coverage extension."""
+
+    _fields_ = [
+        ("version", c_uint32),
+        ("state", c_int32),
+        ("requested_from_msc", c_int64),
+        ("requested_to_msc", c_int64),
+        ("observed_from_msc", c_int64),
+        ("observed_to_msc", c_int64),
+        ("reserved", c_uint32 * 2),
+    ]
+
+
 class Mt5Tick(Structure):
     """Matches the versioned C ABI tick record."""
 
@@ -200,10 +214,10 @@ RATE_DTYPE = np.dtype(
 )
 
 
-def rate_page(count: int) -> np.ndarray:
+def rate_page(count: int, *, start: int = 0, step: int = 60) -> np.ndarray:
     """Builds deterministic OHLC rows for rates recovery tests."""
     values = np.zeros(count, dtype=RATE_DTYPE)
-    values["time"] = np.arange(count, dtype=np.int64)
+    values["time"] = start + np.arange(count, dtype=np.int64) * step
     values["open"] = 1.1
     values["high"] = 1.2
     values["low"] = 1.0
@@ -465,6 +479,11 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             c_void_p,
             POINTER(Mt5FetchDiagnostics),
         ]
+        cls.module.mt5bridge_rate_buffer_coverage.argtypes = [
+            c_void_p,
+            POINTER(Mt5RateCoverage),
+        ]
+        cls.module.mt5bridge_rate_buffer_coverage.restype = c_int
         cls.module.mt5bridge_rate_buffer_free.argtypes = [c_void_p]
         cls.module.mt5bridge_last_fetch_diagnostics.argtypes = [POINTER(Mt5FetchDiagnostics)]
         cls.module.mt5bridge_last_fetch_diagnostics.restype = c_int
@@ -734,6 +753,44 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(fake.calls, 2)
         self.assertEqual(fake.request_counts[:2], [1, 1])
 
+    def test_progressive_bootstrap_empty_probes_do_not_confirm_before_late_data(self) -> None:
+        """Clean empty probes keep searching until positive target evidence arrives."""
+        first_available = epoch_msc(2022, 1, 3)
+        positive = page(first_available, 1)
+        positive["time_msc"] = (first_available,)
+        positive["time"] = positive["time_msc"] // 1000
+        fake = fake_module(
+            [],
+            history_sequence=[
+                page(first_available, 0),
+                page(first_available, 0),
+                positive,
+                positive,
+                positive,
+                positive,
+            ],
+        )
+        status, size, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 1)
+        self.assertTrue(diagnostics.complete)
+        self.assertGreaterEqual(fake.calls, 6)
+        self.assertEqual(fake.request_counts[:2], [1, 1])
+
+    def test_progressive_bootstrap_all_empty_history_is_unproven(self) -> None:
+        """A deep request with only clean empties cannot complete bootstrap."""
+        fake = fake_module([], histories={})
+        status, _, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertNotEqual(status, 0)
+        self.assertIn("bootstrap", error.lower())
+        self.assertEqual(diagnostics.status, 2)
+        self.assertFalse(diagnostics.complete)
+        self.assertTrue(diagnostics.history_warmup_detected)
+
     def test_bootstrap_fatal_after_transient_is_not_retry_exhausted(self) -> None:
         """A later malformed response remains fatal after an earlier transient probe."""
         malformed = np.zeros(1, dtype=[("time_msc", "<i8")])
@@ -749,23 +806,28 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertIn("unsupported", error.lower())
 
     def query_rates(
-        self, fake: types.ModuleType
-    ) -> tuple[int, int, Mt5FetchDiagnostics, str]:
+        self, fake: types.ModuleType, from_msc: int = 0, to_msc: int = 60000,
+        timeframe: int = 1,
+    ) -> tuple[int, int, Mt5FetchDiagnostics, Mt5RateCoverage, str]:
         """Runs one rate query and returns status, size, diagnostics, and error."""
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
-        native_request = Mt5RatesRequest(b"EURUSD", 0, 3000, 1, 0)
+        native_request = Mt5RatesRequest(b"EURUSD", from_msc, to_msc, timeframe, 0)
         result = c_void_p()
         status = self.module.mt5bridge_query_rates(byref(native_request), byref(result))
         diagnostics = Mt5FetchDiagnostics()
+        coverage = Mt5RateCoverage()
         size = 0
         if result.value:
             size = self.module.mt5bridge_rate_buffer_size(result)
             self.module.mt5bridge_rate_buffer_diagnostics(result, byref(diagnostics))
+            self.module.mt5bridge_rate_buffer_coverage(result, byref(coverage))
             self.module.mt5bridge_rate_buffer_free(result)
+        else:
+            self.module.mt5bridge_last_fetch_diagnostics(byref(diagnostics))
         error = self.last_error()
         self.module.mt5bridge_shutdown()
-        return status, size, diagnostics, error
+        return status, size, diagnostics, coverage, error
 
     def test_retry_then_empty_is_success(self) -> None:
         """A transient None followed by an empty page is not a fatal error."""
@@ -1049,11 +1111,12 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             [],
             rate_sequence=[None, rate_page(2), rate_page(2)],
         )
-        status, size, diagnostics, error = self.query_rates(fake)
+        status, size, diagnostics, coverage, error = self.query_rates(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
         self.assertEqual(diagnostics.retries, 2)
         self.assertTrue(diagnostics.history_warmup_detected)
+        self.assertEqual(coverage.state, 1)
 
     def test_rates_recovery_and_confirmation_have_separate_budgets(self) -> None:
         """A clean result after recovery still receives its confirmation probe."""
@@ -1061,12 +1124,88 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             [],
             rate_sequence=[None, None, rate_page(2), rate_page(2)],
         )
-        status, size, diagnostics, error = self.query_rates(fake)
+        status, size, diagnostics, coverage, error = self.query_rates(fake)
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
         self.assertEqual(diagnostics.attempts, 4)
         self.assertEqual(diagnostics.retries, 3)
         self.assertTrue(diagnostics.history_warmup_detected)
+        self.assertEqual(coverage.state, 1)
+
+    def test_rates_filter_out_of_range_rows_and_prove_boundaries(self) -> None:
+        """Rows outside the request never cross the POD boundary."""
+        values = rate_page(4)
+        fake = fake_module([], rate_sequence=[values, values])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, from_msc=60000, to_msc=120000
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(diagnostics.status, 0)
+        self.assertEqual(coverage.state, 1)
+        self.assertEqual(coverage.requested_from_msc, 60000)
+        self.assertEqual(coverage.requested_to_msc, 120000)
+        self.assertEqual(coverage.observed_from_msc, 0)
+        self.assertEqual(coverage.observed_to_msc, 180000)
+
+    def test_rates_stable_suffix_is_coverage_unproven(self) -> None:
+        """A stable current-only suffix cannot masquerade as deep coverage."""
+        suffix = rate_page(1, start=2_000_000_000)
+        fake = fake_module([], rate_sequence=[suffix, suffix])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, from_msc=1_640_995_200_000, to_msc=1_672_531_200_000
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 0)
+        self.assertEqual(diagnostics.status, 4)
+        self.assertFalse(diagnostics.complete)
+        self.assertEqual(coverage.state, 0)
+
+    def test_rates_result_growth_requires_stable_covered_result(self) -> None:
+        """A growing result is retried until a covered suffix is stable."""
+        first = rate_page(1)
+        full = rate_page(2)
+        fake = fake_module([], rate_sequence=[first, full, full])
+        status, size, diagnostics, coverage, error = self.query_rates(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(diagnostics.attempts, 3)
+        self.assertEqual(coverage.state, 1)
+
+    def test_rates_empty_history_is_coverage_unproven(self) -> None:
+        """Stable empty history remains successful to read but not complete."""
+        fake = fake_module([], rate_sequence=[rate_page(0), rate_page(0)])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, from_msc=1_640_995_200_000, to_msc=1_672_531_200_000
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 0)
+        self.assertEqual(diagnostics.status, 4)
+        self.assertFalse(diagnostics.complete)
+        self.assertEqual(coverage.state, 0)
+
+    def test_rates_unknown_timeframe_cannot_claim_coverage(self) -> None:
+        """An unrecognized timeframe fails closed even with stable rows."""
+        values = rate_page(2)
+        fake = fake_module([], rate_sequence=[values, values])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, timeframe=7
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(diagnostics.status, 4)
+        self.assertFalse(diagnostics.complete)
+        self.assertEqual(coverage.state, 0)
+
+    def test_rates_invalid_timestamp_is_fatal(self) -> None:
+        """Malformed rate timestamps are rejected instead of being filtered."""
+        malformed = rate_page(1)
+        malformed["time"] = -1
+        fake = fake_module([], rate_sequence=[malformed])
+        status, _, diagnostics, _, error = self.query_rates(fake)
+        self.assertNotEqual(status, 0)
+        self.assertEqual(diagnostics.status, 3)
+        self.assertIn("invalid rate timestamp", error.lower())
 
     def test_repeated_page_fails_no_progress(self) -> None:
         """A repeated page cannot spin forever."""

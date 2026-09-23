@@ -144,6 +144,7 @@ public:
         rate_size_ = resolve<RateSize>("mt5bridge_rate_buffer_size");
         rate_free_ = resolve<RateFree>("mt5bridge_rate_buffer_free");
         rate_diagnostics_ = resolve<RateDiagnostics>("mt5bridge_rate_buffer_diagnostics");
+        rate_coverage_ = resolve<RateCoverage>("mt5bridge_rate_buffer_coverage");
         last_fetch_diagnostics_ =
             resolve<LastFetchDiagnostics>("mt5bridge_last_fetch_diagnostics");
         subscribe_ticks_ = resolve<SubscribeTicks>("mt5bridge_subscribe_ticks");
@@ -234,6 +235,7 @@ public:
         rate_size_ = nullptr;
         rate_free_ = nullptr;
         rate_diagnostics_ = nullptr;
+        rate_coverage_ = nullptr;
         last_fetch_diagnostics_ = nullptr;
         subscribe_ticks_ = nullptr;
         unsubscribe_ = nullptr;
@@ -525,10 +527,12 @@ public:
     /// \brief Retrieves an inclusive rate range into an application-owned vector.
     /// \param request Symbol, range, and timeframe.
     /// \param[out] diagnostics Optional destination for the runtime diagnostic snapshot.
+    /// \param[out] coverage Optional versioned range-coverage evidence.
     /// \return Rate values copied from the DLL-owned result buffer.
     /// \throws std::runtime_error If the query fails.
     std::vector<Mt5Rate> copy_rates_range(const Mt5RatesRequest &request,
-                                          Mt5FetchDiagnostics *diagnostics = nullptr) {
+                                          Mt5FetchDiagnostics *diagnostics = nullptr,
+                                          Mt5RateCoverage *coverage = nullptr) {
         check_loaded();
         Mt5RateBuffer *buffer = nullptr;
         if (query_rates_(&request, &buffer) != 0)
@@ -536,6 +540,12 @@ public:
         try {
             if (diagnostics)
                 rate_diagnostics_(buffer, diagnostics);
+            if (coverage) {
+                if (!rate_coverage_ || rate_coverage_(buffer, coverage) != 0)
+                    throw std::runtime_error("rate coverage extension unavailable");
+                if (coverage->version != MT5BRIDGE_RATE_COVERAGE_VERSION)
+                    throw std::runtime_error("unsupported rate coverage extension version");
+            }
             const Mt5Rate *data = rate_data_(buffer);
             const auto count = rate_size_(buffer);
             std::vector<Mt5Rate> result;
@@ -555,13 +565,15 @@ public:
     /// \param from_msc Inclusive range start as Unix milliseconds.
     /// \param to_msc Inclusive range end as Unix milliseconds.
     /// \param[out] diagnostics Optional destination for the runtime diagnostic snapshot.
+    /// \param[out] coverage Optional versioned range-coverage evidence.
     /// \return Rate values copied into application-owned storage.
     /// \throws std::runtime_error If the query fails.
     std::vector<Mt5Rate> copy_rates_range(const std::string &symbol, std::int32_t timeframe,
                                           std::int64_t from_msc, std::int64_t to_msc,
-                                          Mt5FetchDiagnostics *diagnostics = nullptr) {
+                                          Mt5FetchDiagnostics *diagnostics = nullptr,
+                                          Mt5RateCoverage *coverage = nullptr) {
         return copy_rates_range(Mt5RatesRequest{symbol.c_str(), from_msc, to_msc, timeframe, 0},
-                                diagnostics);
+                                diagnostics, coverage);
     }
 
     /// \brief Streams an inclusive tick range through bounded callback chunks.
@@ -658,6 +670,7 @@ private:
     using RateSize = std::size_t (*)(const Mt5RateBuffer *);
     using RateFree = void (*)(Mt5RateBuffer *);
     using RateDiagnostics = int (*)(const Mt5RateBuffer *, Mt5FetchDiagnostics *);
+    using RateCoverage = int (*)(const Mt5RateBuffer *, Mt5RateCoverage *);
     using LastFetchDiagnostics = int (*)(Mt5FetchDiagnostics *);
     using SubscribeTicks = int (*)(const Mt5SubscriptionRequest *, Mt5SubscriptionHandle *);
     using Unsubscribe = int (*)(Mt5SubscriptionHandle);
@@ -749,6 +762,7 @@ private:
         rate_size_ = other.rate_size_;
         rate_free_ = other.rate_free_;
         rate_diagnostics_ = other.rate_diagnostics_;
+        rate_coverage_ = other.rate_coverage_;
         last_fetch_diagnostics_ = other.last_fetch_diagnostics_;
         subscribe_ticks_ = other.subscribe_ticks_;
         unsubscribe_ = other.unsubscribe_;
@@ -801,6 +815,7 @@ private:
         other.rate_size_ = nullptr;
         other.rate_free_ = nullptr;
         other.rate_diagnostics_ = nullptr;
+        other.rate_coverage_ = nullptr;
         other.last_fetch_diagnostics_ = nullptr;
         other.subscribe_ticks_ = nullptr;
         other.unsubscribe_ = nullptr;
@@ -850,6 +865,7 @@ private:
     RateSize rate_size_ = nullptr;
     RateFree rate_free_ = nullptr;
     RateDiagnostics rate_diagnostics_ = nullptr;
+    RateCoverage rate_coverage_ = nullptr;
     LastFetchDiagnostics last_fetch_diagnostics_ = nullptr;
     SubscribeTicks subscribe_ticks_ = nullptr;
     Unsubscribe unsubscribe_ = nullptr;

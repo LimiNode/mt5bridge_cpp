@@ -95,7 +95,7 @@ include/
     ├── trade/observation.h
     ├── observation.hpp
     ├── observation/{graph,coordinator,environment_consistency,worker}.hpp
-    ├── reconciliation/engine.hpp
+    ├── reconciliation/{engine,operation_worker}.hpp
     └── dispatch/{journal,file_journal_store}.hpp
 
 src/
@@ -258,6 +258,9 @@ worker process.
    identity rules are covered by fake-runtime tests should the high-level
    asynchronous `TradeManager` be introduced. Side-effecting methods must
    follow [ADR-0004](adr/0004-trade-reconciliation.md).
+   The owner-loop policy is specified in
+   [ADR-0017](adr/0017-operation-recovery-and-reconciliation-worker.md): every
+   recovered post-dispatch record is observation-only and never resendable.
 9. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
 10. Add hybrid virtual/broker exit policies and a risk engine only after the

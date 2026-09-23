@@ -294,6 +294,25 @@ recovery still begins with `OperationJournal::recover_all()`; the recovered
 records and their immutable keys are then supplied to operation-specific
 workers rather than inferred from one broker result.
 
+## Journal-aware recovery and reconciliation
+
+The current owner-loop slice is exposed by
+[`reconciliation/operation_worker.hpp`](../include/mt5bridge/reconciliation/operation_worker.hpp).
+`OperationRecoveryCoordinator::recover()` discovers every durable record after
+a restart and classifies it without sending: pre-dispatch records may resume
+validation, while `dispatching`, `result_persisted`, and `reconciling` records
+are always `reconcile_only`. Already terminal lifecycle states remain terminal.
+
+`OperationReconciliationWorker` combines one such journal record with the
+caller-driven observation worker. It durably normalizes post-dispatch records
+to `reconciling`, then applies only explicit predicates over fresh graph
+evidence. A confirmed predicate set advances to the caller-selected state
+(normally `filled`); contradictory evidence becomes `ambiguous`. `pending`,
+`not_observed`, event gaps, and account mismatch leave the operation unresolved
+and never authorize a resend. A partial fill is selected explicitly as
+`partially_filled`; a later remainder is a new operation decision, not a blind
+retry of the old side effect.
+
 ## Quickstart scenarios
 
 The runnable [`trade_observation_example.cpp`](../examples/trade_observation_example.cpp)

@@ -66,6 +66,12 @@ if(BUILD_TESTING)
     target_link_libraries(mt5bridge_reconciliation_worker_test PRIVATE mt5bridge::client)
     add_test(NAME mt5bridge_reconciliation_worker
              COMMAND mt5bridge_reconciliation_worker_test)
+    add_executable(mt5bridge_operation_reconciliation_worker_test
+                   tests/operation_reconciliation_worker_test.cpp)
+    target_link_libraries(mt5bridge_operation_reconciliation_worker_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
+    add_test(NAME mt5bridge_operation_reconciliation_worker
+             COMMAND mt5bridge_operation_reconciliation_worker_test)
     add_executable(mt5bridge_environment_consistency_test
                    tests/environment_consistency_test.cpp)
     target_link_libraries(mt5bridge_environment_consistency_test PRIVATE mt5bridge::client)
@@ -97,6 +103,7 @@ if(BUILD_TESTING)
                    tests/header_self_containment_reconciliation_engine.cpp
                    tests/header_self_containment_observation_coordinator.cpp
                    tests/header_self_containment_observation_worker.cpp
+                   tests/header_self_containment_operation_worker.cpp
                    tests/header_self_containment_environment_consistency.cpp
                    tests/header_self_containment_dispatch_journal.cpp
                    tests/header_self_containment_file_journal_store.cpp)

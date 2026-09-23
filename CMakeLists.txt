@@ -84,6 +84,20 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_header_compatibility
              COMMAND mt5bridge_header_compatibility_test)
+    add_executable(mt5bridge_header_self_containment_test
+                   tests/header_self_containment_main.cpp
+                   tests/header_self_containment_market_data.c
+                   tests/header_self_containment_trade_observation.c
+                   tests/header_self_containment_observation_graph.cpp
+                   tests/header_self_containment_reconciliation_engine.cpp
+                   tests/header_self_containment_observation_coordinator.cpp
+                   tests/header_self_containment_environment_consistency.cpp
+                   tests/header_self_containment_dispatch_journal.cpp
+                   tests/header_self_containment_file_journal_store.cpp)
+    target_link_libraries(mt5bridge_header_self_containment_test PRIVATE
+                          mt5bridge::client)
+    add_test(NAME mt5bridge_header_self_containment
+             COMMAND mt5bridge_header_self_containment_test)
     add_executable(mt5bridge_one_shot_backend_test
                    tests/one_shot_backend_test.cpp)
     target_include_directories(mt5bridge_one_shot_backend_test PRIVATE

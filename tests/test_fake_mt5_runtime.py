@@ -702,6 +702,52 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(fake.request_counts[0], 1)
         self.assertTrue(all(count == 1 for count in fake.request_counts))
 
+    def test_progressive_bootstrap_does_not_anchor_success_on_unreached_target(self) -> None:
+        """A repeated suffix at the target does not prove the missing prefix exists."""
+        oldest = epoch_msc(2023)
+        values = page(oldest, 1)
+        values["time_msc"] = (oldest,)
+        values["time"] = values["time_msc"] // 1000
+        fake = fake_module([], histories={"EURUSD": values})
+        status, _, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertNotEqual(status, 0)
+        self.assertIn("bootstrap", error.lower())
+        self.assertEqual(diagnostics.status, 2)
+        self.assertGreaterEqual(fake.calls, 5)
+        self.assertTrue(all(count == 1 for count in fake.request_counts))
+
+    def test_progressive_bootstrap_confirms_a_valid_gap_after_target_progress(self) -> None:
+        """A first available tick after a weekend/holiday gap is confirmed cleanly."""
+        first_available = epoch_msc(2022, 1, 3)
+        values = page(first_available, 1)
+        values["time_msc"] = (first_available,)
+        values["time"] = values["time_msc"] // 1000
+        fake = fake_module([], histories={"EURUSD": values})
+        status, size, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 1)
+        self.assertTrue(diagnostics.complete)
+        self.assertGreaterEqual(fake.calls, 2)
+        self.assertEqual(fake.request_counts[:2], [1, 1])
+
+    def test_bootstrap_fatal_after_transient_is_not_retry_exhausted(self) -> None:
+        """A later malformed response remains fatal after an earlier transient probe."""
+        malformed = np.zeros(1, dtype=[("time_msc", "<i8")])
+        fake = fake_module(
+            [],
+            history_sequence=[None, malformed],
+        )
+        status, _, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertNotEqual(status, 0)
+        self.assertEqual(diagnostics.status, 3)
+        self.assertIn("unsupported", error.lower())
+
     def query_rates(
         self, fake: types.ModuleType
     ) -> tuple[int, int, Mt5FetchDiagnostics, str]:

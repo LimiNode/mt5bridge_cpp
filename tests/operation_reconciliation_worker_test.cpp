@@ -91,6 +91,26 @@ mt5bridge::ObservationBatch batch(const mt5bridge::AccountKey &key,
     return result;
 }
 
+mt5bridge::ObservationBatch history_batch(const mt5bridge::AccountKey &key,
+                                          mt5bridge::ObservationWindow window,
+                                          bool include_order) {
+    mt5bridge::ObservationBatch result;
+    result.account = key;
+    result.observed_domains = mt5bridge::ObservationDomain::history_orders;
+    result.history_orders_window = window;
+    if (include_order) {
+        Mt5HistoryOrderSnapshot order{};
+        order.ticket = 100;
+        order.position_id = 700;
+        order.time_done_msc = window.from_msc;
+        order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                             MT5BRIDGE_ORDER_KNOWN_POSITION_ID |
+                             MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
+        result.history_orders.push_back(order);
+    }
+    return result;
+}
+
 void enter_dispatching(mt5bridge::OperationJournal &journal,
                        const mt5bridge::OperationKey &key) {
     require(journal.transition_operation(key, mt5bridge::OperationState::prechecking)
@@ -180,6 +200,129 @@ int main() {
                     not_observed.record->operation_state ==
                         mt5bridge::OperationState::reconciling,
                 "not-observed evidence became a terminal lifecycle state");
+
+        const auto gap_key = mt5bridge::OperationKey{account(), 9, 13};
+        require(journal.create(gap_key, {0x03}).accepted(),
+                "event-gap operation create failed");
+        enter_dispatching(journal, gap_key);
+        const mt5bridge::ObservationWindow gap_window{1000, 2000};
+        FakeProvider gap_provider({history_batch(gap_key.account, gap_window, false),
+                                   history_batch(gap_key.account, gap_window, false),
+                                   history_batch(gap_key.account, gap_window, true)});
+        mt5bridge::ObservationCoordinator gap_coordinator(gap_provider, gap_key.account);
+        mt5bridge::ObservationCollectionRequest gap_collection;
+        gap_collection.observe_active_orders = false;
+        gap_collection.observe_positions = false;
+        gap_collection.history_orders_window = gap_window;
+        require(gap_coordinator.refresh(gap_collection).apply.accepted(),
+                "event-gap baseline refresh failed");
+        mt5bridge::ReconciliationRequest gap_request;
+        gap_request.baseline = gap_coordinator.capture_baseline();
+        gap_request.predicates = {mt5bridge::require_history_order(100)};
+        mt5bridge::OperationReconciliationWorker gap_worker(
+            journal, gap_key, gap_coordinator, gap_collection, gap_request);
+        const auto gap_cycle = gap_worker.step(true, false);
+        require(gap_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::trade_event_gap &&
+                    gap_cycle.record &&
+                    gap_cycle.record->operation_state ==
+                        mt5bridge::OperationState::reconciling,
+                "event gap settled or changed the operation lifecycle");
+        const auto gap_confirmation = gap_worker.step();
+        require(gap_confirmation.status ==
+                    mt5bridge::OperationReconciliationStatus::progressed,
+                "authoritative refresh did not recover from an event gap");
+
+        const auto account_key = mt5bridge::OperationKey{account(), 10, 14};
+        require(journal.create(account_key, {0x04}).accepted(),
+                "account-mismatch operation create failed");
+        enter_dispatching(journal, account_key);
+        FakeProvider account_provider({batch(account_key.account, false),
+                                       batch({"Other-Server", 43}, false)});
+        mt5bridge::ObservationCoordinator account_coordinator(account_provider,
+                                                               account_key.account);
+        mt5bridge::ObservationCollectionRequest account_collection;
+        account_collection.observe_positions = false;
+        require(account_coordinator.refresh(account_collection).apply.accepted(),
+                "account-mismatch baseline refresh failed");
+        mt5bridge::ReconciliationRequest account_request;
+        account_request.baseline = account_coordinator.capture_baseline();
+        account_request.predicates = {mt5bridge::require_active_order(100)};
+        mt5bridge::OperationReconciliationWorker account_worker(
+            journal, account_key, account_coordinator, account_collection, account_request);
+        const auto account_cycle = account_worker.step();
+        require(account_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::account_mismatch &&
+                    account_cycle.record &&
+                    account_cycle.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    account_cycle.record->operation_state ==
+                        mt5bridge::OperationState::reconciling,
+                "account mismatch was not suspended in reconciliation");
+        const auto suspended_cycle = account_worker.step();
+        require(suspended_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::account_mismatch &&
+                    account_provider.calls == 2,
+                "account-mismatched worker resumed observation instead of suspending");
+
+        const auto ambiguous_key = mt5bridge::OperationKey{account(), 11, 15};
+        require(journal.create(ambiguous_key, {0x05}).accepted(),
+                "ambiguous operation create failed");
+        enter_dispatching(journal, ambiguous_key);
+        mt5bridge::ObservationBatch malformed = batch(ambiguous_key.account, false);
+        Mt5OrderSnapshot malformed_order{};
+        malformed_order.ticket = 100;
+        malformed_order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET;
+        malformed.active_orders.push_back(malformed_order);
+        FakeProvider ambiguous_provider({batch(ambiguous_key.account, false),
+                                         std::move(malformed)});
+        mt5bridge::ObservationCoordinator ambiguous_coordinator(ambiguous_provider,
+                                                                  ambiguous_key.account);
+        mt5bridge::ObservationCollectionRequest ambiguous_collection;
+        ambiguous_collection.observe_positions = false;
+        require(ambiguous_coordinator.refresh(ambiguous_collection).apply.accepted(),
+                "ambiguous baseline refresh failed");
+        mt5bridge::ReconciliationRequest ambiguous_request;
+        ambiguous_request.baseline = ambiguous_coordinator.capture_baseline();
+        ambiguous_request.predicates = {mt5bridge::require_active_order(100)};
+        mt5bridge::OperationReconciliationWorker ambiguous_worker(
+            journal, ambiguous_key, ambiguous_coordinator, ambiguous_collection,
+            ambiguous_request);
+        const auto ambiguous_cycle = ambiguous_worker.step();
+        require(ambiguous_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::ambiguous &&
+                    ambiguous_cycle.record &&
+                    ambiguous_cycle.record->operation_state ==
+                        mt5bridge::OperationState::ambiguous &&
+                    ambiguous_cycle.record->journal_state ==
+                        mt5bridge::JournalState::reconciling,
+                "ambiguous evidence was not durably settled as ambiguous");
+
+        const auto partial_key = mt5bridge::OperationKey{account(), 12, 16};
+        require(journal.create(partial_key, {0x06}).accepted(),
+                "partial operation create failed");
+        enter_dispatching(journal, partial_key);
+        FakeProvider partial_provider({batch(partial_key.account, false),
+                                       batch(partial_key.account, true)});
+        mt5bridge::ObservationCoordinator partial_coordinator(partial_provider,
+                                                                partial_key.account);
+        mt5bridge::ObservationCollectionRequest partial_collection;
+        partial_collection.observe_positions = false;
+        require(partial_coordinator.refresh(partial_collection).apply.accepted(),
+                "partial baseline refresh failed");
+        mt5bridge::ReconciliationRequest partial_request;
+        partial_request.baseline = partial_coordinator.capture_baseline();
+        partial_request.predicates = {mt5bridge::require_active_order(100)};
+        mt5bridge::OperationReconciliationWorker partial_worker(
+            journal, partial_key, partial_coordinator, partial_collection,
+            partial_request, mt5bridge::OperationState::partially_filled);
+        const auto partial_cycle = partial_worker.step();
+        require(partial_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::progressed &&
+                    partial_cycle.record &&
+                    partial_cycle.record->operation_state ==
+                        mt5bridge::OperationState::partially_filled,
+                "partial settlement state was not preserved");
 
         MemoryStore restart_store = store;
         mt5bridge::OperationJournal restarted(restart_store);

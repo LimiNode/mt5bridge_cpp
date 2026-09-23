@@ -67,11 +67,22 @@ bootstrap. The bridge issues one-row synchronization probes from a recent
 frontier toward the requested start, initially stepping back 366 days and
 halving the step down to a 30-day floor when the oldest observed tick does not
 move. At most sixteen probes are issued; three consecutive stalled probes at
-the minimum step fail closed with a bootstrap diagnostic. Probe rows are
-discarded and are never mixed into the result: the normal inclusive paginator
-still proves exact range coverage, boundary multiplicity, and completion.
+the minimum step fail closed with a bootstrap diagnostic. The bootstrap also
+has a bounded wall-clock budget and increasing backoff between probes. Every
+probe acquires and releases runtime admission and the GIL independently;
+backoff never holds either serialization scope. Probe rows are discarded and
+are never mixed into the result: the normal inclusive paginator still proves
+exact range coverage, boundary multiplicity, and completion. A target-anchor
+probe must be followed by a clean confirmation of the same oldest available
+tick; merely repeating the current suffix at the requested start is not
+success. The accepted anchor gap is bounded by the 30-day minimum adaptive
+step, so a distant stale suffix remains retry-exhausted instead of claiming a
+missing prefix is covered. This permits ordinary weekend/holiday gaps without
+turning an unbounded absence of history into evidence.
 A successful probe at the requested anchor is only a synchronization request,
-not proof that the entire history is present.
+not proof that the entire history is present. Warm-up diagnostics are emitted
+only after synchronization evidence is observed; a later malformed or other
+non-transient response remains `MT5_FETCH_FATAL_ERROR`.
 A non-empty page accompanied by a transient history status (including 4403) is
 provisional: it is neither delivered nor used to advance the cursor. The next
 attempt replays the same inclusive boundary until a clean page arrives or the

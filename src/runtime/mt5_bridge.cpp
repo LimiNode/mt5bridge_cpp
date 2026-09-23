@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -76,6 +77,7 @@ PyThreadState *g_main_thread_state = nullptr;
 std::thread::id g_owner_thread;
 thread_local std::string g_last_error;
 thread_local Mt5FetchDiagnostics g_last_fetch_diagnostics{};
+thread_local bool g_last_fetch_fatal_error = false;
 
 /// \struct RealtimeBatch
 /// \brief Immutable tick batch retained by a physical source ring.
@@ -144,7 +146,13 @@ bool g_poller_stop = false;
 
 
 /// \brief Clears the calling thread's latest market-data diagnostics.
-void clear_fetch_diagnostics() { g_last_fetch_diagnostics = Mt5FetchDiagnostics{}; }
+void clear_fetch_diagnostics() {
+    g_last_fetch_diagnostics = Mt5FetchDiagnostics{};
+    g_last_fetch_fatal_error = false;
+}
+
+/// \brief Marks the current history request as stopped by a non-recoverable error.
+void mark_fetch_fatal() { g_last_fetch_fatal_error = true; }
 
 /// \brief Saves market-data diagnostics for retrieval after a failed query.
 void save_fetch_diagnostics(const Mt5FetchDiagnostics &diagnostics) {
@@ -1450,6 +1458,14 @@ constexpr int64_t kTickBootstrapTriggerMs = 30LL * 24LL * 60LL * 60LL * 1000LL;
 constexpr int64_t kTickBootstrapInitialStepMs = 366LL * 24LL * 60LL * 60LL * 1000LL;
 /// \brief Smallest backward step used after a probe reports no frontier movement.
 constexpr int64_t kTickBootstrapMinimumStepMs = 30LL * 24LL * 60LL * 60LL * 1000LL;
+/// \brief Maximum unobserved gap accepted when confirming a first available tick.
+///
+/// A target probe can only prove that the terminal exposes a suffix.  Limiting
+/// the gap that may be treated as a clean weekend/holiday boundary prevents a
+/// stale, distant suffix from masquerading as coverage of the requested
+/// frontier.  Larger gaps remain retry-exhausted until a probe actually moves
+/// the frontier to the requested start.
+constexpr int64_t kTickBootstrapMaximumAnchorGapMs = kTickBootstrapMinimumStepMs;
 /// \brief Maximum number of synchronization probes in one historical query.
 constexpr uint32_t kTickBootstrapProbeLimit = 16;
 /// \brief Consecutive stalled probes allowed at the smallest adaptive step.
@@ -1548,14 +1564,19 @@ int invoke_tick_callback(Mt5TickChunkCallback callback, const Mt5Tick *ticks, si
 /// \note Python None is treated as transient because it commonly accompanies history warm-up.
 bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int flags, int count,
                      std::vector<Mt5Tick> *page, Mt5FetchDiagnostics *diagnostics,
-                     bool *partial) {
+                     bool *partial, bool *transient_failure = nullptr,
+                     uint32_t max_attempts = 3) {
     if (partial)
         *partial = false;
-    for (uint32_t attempt = 1; attempt <= 3; ++attempt) {
+    if (transient_failure)
+        *transient_failure = false;
+    max_attempts = std::max<uint32_t>(1, max_attempts);
+    for (uint32_t attempt = 1; attempt <= max_attempts; ++attempt) {
         if (diagnostics)
             ++diagnostics->attempts;
         PyRef from(make_datetime(from_msc));
         if (!from) {
+            mark_fetch_fatal();
             set_python_error();
             return false;
         }
@@ -1563,6 +1584,7 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
                                         count, flags));
         if (ticks && ticks.get() != Py_None) {
             if (!copy_ticks_array(ticks.get(), page)) {
+                mark_fetch_fatal();
                 set_error("MetaTrader5 returned an unsupported tick layout");
                 return false;
             }
@@ -1577,12 +1599,14 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
                     diagnostics->history_warmup_detected = 1;
                 if (is_ipc_error(code) && reinitialize_terminal(mt5) && diagnostics)
                     ++diagnostics->reconnects;
-                if (attempt < 3) {
+                if (attempt < max_attempts) {
                     if (diagnostics)
                         ++diagnostics->retries;
                     std::this_thread::sleep_for(std::chrono::milliseconds(50u << (attempt - 1)));
                     continue;
                 }
+                if (transient_failure)
+                    *transient_failure = true;
             }
             return true;
         }
@@ -1592,24 +1616,31 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
         if (diagnostics && code != 1)
             diagnostics->last_mt5_error = code;
         if (!is_transient_read_error(code)) {
+            mark_fetch_fatal();
+            if (diagnostics)
+                diagnostics->history_warmup_detected = 0;
             set_error("MetaTrader5 tick request failed");
             return false;
         }
-        if (diagnostics)
-            diagnostics->history_warmup_detected = 1;
-        if (attempt < 3) {
+        if (attempt < max_attempts) {
+            if (diagnostics)
+                diagnostics->history_warmup_detected = 1;
             if (is_ipc_error(code) && reinitialize_terminal(mt5) && diagnostics)
                 ++diagnostics->reconnects;
             if (diagnostics)
                 ++diagnostics->retries;
             std::this_thread::sleep_for(std::chrono::milliseconds(50u << (attempt - 1)));
+        } else {
+            if (transient_failure)
+                *transient_failure = true;
+            if (diagnostics)
+                diagnostics->history_warmup_detected = 1;
         }
     }
     return false;
 }
 
 /// \brief Progressively warms a deep tick-history request before pagination.
-/// \param mt5 Borrowed MetaTrader5 module under the Python GIL.
 /// \param request Symbol and inclusive historical range.
 /// \param flags Effective COPY_TICKS_* filter.
 /// \param[in,out] diagnostics Recovery counters to update.
@@ -1618,7 +1649,7 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
 /// authoritative for the returned range and its exact boundary multiplicity.
 /// \warning The bounded probe budget fails closed when the terminal keeps returning the
 /// same oldest observable tick without moving the synchronization frontier.
-bool bootstrap_tick_history(PyObject *mt5, const Mt5TicksRequest *request, int flags,
+bool bootstrap_tick_history(const Mt5TicksRequest *request, int flags,
                             Mt5FetchDiagnostics *diagnostics) {
     if (!request || request->to_msc - request->from_msc < kTickBootstrapTriggerMs)
         return true;
@@ -1632,29 +1663,59 @@ bool bootstrap_tick_history(PyObject *mt5, const Mt5TicksRequest *request, int f
 
     int64_t step = kTickBootstrapInitialStepMs;
     uint32_t stalled = 0;
+    std::optional<int64_t> target_confirmation;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    std::chrono::milliseconds backoff(100);
     for (uint32_t probe_no = 0; probe_no < kTickBootstrapProbeLimit; ++probe_no) {
-        if (frontier <= request->from_msc)
+        if (frontier <= request->from_msc && !target_confirmation)
             return true;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            set_error("MetaTrader tick history bootstrap time budget exhausted");
+            return false;
+        }
         const int64_t distance = frontier - request->from_msc;
         const int64_t effective_step = std::min(step, distance);
         const int64_t candidate = frontier - effective_step;
         std::vector<Mt5Tick> probe;
         bool partial = false;
-        if (diagnostics)
-            diagnostics->history_warmup_detected = 1;
-        if (!copy_ticks_page(mt5, request->symbol_utf8, candidate, flags, 1, &probe,
-                             diagnostics, &partial))
+        bool transient_failure = false;
+        bool probe_ok = false;
+        {
+            RuntimeCallAdmission call;
+            if (!call) {
+                mark_fetch_fatal();
+                return false;
+            }
+            GilScope gil(true);
+            PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+            if (!mt5) {
+                mark_fetch_fatal();
+                set_python_error();
+                return false;
+            }
+            // One physical probe is deliberately scoped to one runtime call.
+            // Backoff and the next probe happen after the admission/GIL scope.
+            probe_ok = copy_ticks_page(mt5.get(), request->symbol_utf8, candidate, flags, 1,
+                                       &probe, diagnostics, &partial, &transient_failure, 1);
+        }
+        if (!probe_ok && !transient_failure)
             return false;
-        if (partial) {
+        if (!probe_ok || partial) {
+            if (diagnostics)
+                diagnostics->history_warmup_detected = 1;
+            target_confirmation.reset();
             ++stalled;
         } else if (probe.empty()) {
-            ++stalled;
-        } else {
-            int64_t oldest = std::numeric_limits<int64_t>::max();
-            for (const auto &tick : probe)
-                oldest = std::min(oldest, tick.time_msc);
-            if (oldest < frontier) {
-                frontier = oldest;
+            // A clean empty response proves that this candidate is newer than
+            // the oldest currently available tick.  Move the synchronization
+            // frontier backward to the candidate instead of repeatedly probing
+            // the same suffix; transient/partial responses above deliberately
+            // do not receive this interpretation.
+            if (diagnostics)
+                diagnostics->history_warmup_detected = 1;
+            target_confirmation.reset();
+            if (candidate < frontier) {
+                frontier = candidate;
                 stalled = 0;
                 if (step < kTickBootstrapInitialStepMs) {
                     const int64_t doubled = step > kTickBootstrapInitialStepMs / 2
@@ -1662,14 +1723,62 @@ bool bootstrap_tick_history(PyObject *mt5, const Mt5TicksRequest *request, int f
                                                 : step * 2;
                     step = std::min(kTickBootstrapInitialStepMs, doubled);
                 }
+                backoff = std::chrono::milliseconds(100);
+            } else {
+                ++stalled;
+            }
+        } else {
+            int64_t oldest = std::numeric_limits<int64_t>::max();
+            for (const auto &tick : probe)
+                oldest = std::min(oldest, tick.time_msc);
+            if (oldest < frontier) {
+                if (diagnostics)
+                    diagnostics->history_warmup_detected = 1;
+                frontier = oldest;
+                stalled = 0;
+                if (oldest <= request->from_msc) {
+                    frontier = request->from_msc;
+                    target_confirmation = oldest;
+                } else if (candidate == request->from_msc) {
+                    // The first available tick may legitimately be later than
+                    // the requested start (weekend/holiday gap).  Confirm
+                    // that same oldest tick at the requested anchor before
+                    // allowing pagination to claim the frontier was reached.
+                    target_confirmation = oldest;
+                } else {
+                    target_confirmation.reset();
+                }
+                if (step < kTickBootstrapInitialStepMs) {
+                    const int64_t doubled = step > kTickBootstrapInitialStepMs / 2
+                                                ? kTickBootstrapInitialStepMs
+                                                : step * 2;
+                    step = std::min(kTickBootstrapInitialStepMs, doubled);
+                }
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    set_error("MetaTrader tick history bootstrap time budget exhausted");
+                    return false;
+                }
+                std::this_thread::sleep_for(backoff);
+                backoff = std::chrono::milliseconds(100);
                 continue;
             }
 
-            // A successful probe at the exact requested anchor is enough to
-            // initiate synchronization there.  The lossless paginator below
-            // still decides whether the range is complete or partial.
-            if (candidate == request->from_msc)
-                return true;
+            if (diagnostics)
+                diagnostics->history_warmup_detected = 1;
+            if (candidate == request->from_msc) {
+                const bool bounded_anchor_gap =
+                    oldest >= request->from_msc &&
+                    oldest - request->from_msc <= kTickBootstrapMaximumAnchorGapMs;
+                if (bounded_anchor_gap) {
+                    if (target_confirmation && *target_confirmation == oldest)
+                        return true;
+                    target_confirmation = oldest;
+                } else {
+                    target_confirmation.reset();
+                }
+            } else {
+                target_confirmation.reset();
+            }
             ++stalled;
         }
 
@@ -1681,7 +1790,12 @@ bool bootstrap_tick_history(PyObject *mt5, const Mt5TicksRequest *request, int f
             set_error("MetaTrader tick history bootstrap made no progress");
             return false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+        if (std::chrono::steady_clock::now() >= deadline) {
+            set_error("MetaTrader tick history bootstrap time budget exhausted");
+            return false;
+        }
+        std::this_thread::sleep_for(backoff);
+        backoff = std::min(std::chrono::milliseconds(1000), backoff * 2);
     }
 
     set_error("MetaTrader tick history bootstrap probe budget exhausted");
@@ -1700,18 +1814,21 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
     int flags = 0;
     {
         RuntimeCallAdmission call;
-        if (!call)
+        if (!call) {
+            mark_fetch_fatal();
             return false;
+        }
         GilScope gil(true);
         PyRef mt5(PyImport_ImportModule("MetaTrader5"));
         if (!mt5) {
+            mark_fetch_fatal();
             set_python_error();
             return false;
         }
         flags = resolve_tick_flags(mt5.get(), request->flags);
-        if (!bootstrap_tick_history(mt5.get(), request, flags, diagnostics))
-            return false;
     }
+    if (!bootstrap_tick_history(request, flags, diagnostics))
+        return false;
 
     int64_t cursor_msc = request->from_msc;
     std::unordered_map<std::string, std::size_t> consumed_boundary;
@@ -1725,17 +1842,21 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         int page_size = kTickPageSize;
         if (consumed_boundary_count >
             static_cast<std::size_t>(std::numeric_limits<int>::max() - kTickPageSize)) {
+            mark_fetch_fatal();
             set_error("too many ticks share one timestamp");
             return false;
         }
         page_size += static_cast<int>(consumed_boundary_count);
         {
             RuntimeCallAdmission call;
-            if (!call)
+            if (!call) {
+                mark_fetch_fatal();
                 return false;
+            }
             GilScope gil(true);
             PyRef mt5(PyImport_ImportModule("MetaTrader5"));
             if (!mt5) {
+                mark_fetch_fatal();
                 set_python_error();
                 return false;
             }
@@ -1805,8 +1926,10 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             deliver.push_back(tick);
         }
         const bool made_progress = !deliver.empty();
-        if (!deliver.empty() && consume(deliver.data(), deliver.size()) != 0)
+        if (!deliver.empty() && consume(deliver.data(), deliver.size()) != 0) {
+            mark_fetch_fatal();
             return false;
+        }
 
         // Confirmation probes prove stability only after a page with no new
         // accepted ticks. Any progress means history may still be warming up.
@@ -1818,6 +1941,7 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
         // tied ticks, while positional skipping would lose reordered ticks.
         const bool short_page = page.size() < static_cast<std::size_t>(page_size);
         if (last_timestamp < cursor_msc) {
+            mark_fetch_fatal();
             set_error("MetaTrader returned ticks before the active cursor");
             return false;
         }
@@ -1829,6 +1953,7 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
                 std::this_thread::sleep_for(std::chrono::milliseconds(50u));
                 continue;
             }
+            mark_fetch_fatal();
             set_error("MetaTrader returned a non-progressing tick page");
             return false;
         }
@@ -3039,10 +3164,13 @@ MT5BRIDGE_EXPORT int mt5bridge_query_ticks(const Mt5TicksRequest *request,
         return 0;
     };
     if (!visit_ticks_range(request, &buffer->diagnostics, append)) {
-        buffer->diagnostics.status = buffer->diagnostics.history_warmup_detected
-                                         ? (buffer->values.empty() ? MT5_FETCH_RETRY_EXHAUSTED
-                                                                    : MT5_FETCH_PARTIAL)
-                                         : MT5_FETCH_FATAL_ERROR;
+        buffer->diagnostics.status = g_last_fetch_fatal_error
+                                         ? MT5_FETCH_FATAL_ERROR
+                                         : (buffer->diagnostics.history_warmup_detected
+                                                ? (buffer->values.empty()
+                                                       ? MT5_FETCH_RETRY_EXHAUSTED
+                                                       : MT5_FETCH_PARTIAL)
+                                                : MT5_FETCH_FATAL_ERROR);
         if (g_last_error.empty()) {
             if (buffer->diagnostics.status != MT5_FETCH_FATAL_ERROR)
                 set_error("MetaTrader5 history is unavailable after retries");
@@ -3113,8 +3241,11 @@ MT5BRIDGE_EXPORT int mt5bridge_copy_ticks_range(const Mt5TicksRequest *request,
         save_fetch_diagnostics(diagnostics);
         return 0;
     }
-    diagnostics.status = diagnostics.history_warmup_detected ? MT5_FETCH_RETRY_EXHAUSTED
-                                                               : MT5_FETCH_FATAL_ERROR;
+    diagnostics.status = g_last_fetch_fatal_error
+                             ? MT5_FETCH_FATAL_ERROR
+                             : (diagnostics.history_warmup_detected
+                                    ? MT5_FETCH_RETRY_EXHAUSTED
+                                    : MT5_FETCH_FATAL_ERROR);
     save_fetch_diagnostics(diagnostics);
     if (g_last_error.empty())
         set_error("MetaTrader5 history is unavailable after retries");

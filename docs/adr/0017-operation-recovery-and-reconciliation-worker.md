@@ -49,7 +49,8 @@ ambiguous       -> durable ambiguous
 pending         -> leave reconciling
 not_observed    -> leave reconciling
 trade_event_gap -> leave reconciling
-account_mismatch-> leave reconciling and suspend owner action
+account_mismatch-> leave reconciling and suspend this worker; the owner creates
+                  a new worker only after the correct account is restored
 ```
 
 Only the `confirmed` and contradictory-evidence paths mutate the lifecycle.
@@ -71,6 +72,8 @@ remainder is proven.
 
 `tests/operation_reconciliation_worker_test.cpp` covers discovery without a
 known key, normalization of a recovered dispatching record, pending evidence,
-durable confirmation, and terminal classification after restart. Existing
-journal, one-shot backend, observation, and header self-containment tests are
-unchanged and remain part of the focused runtime-off suite.
+event gaps, account mismatch suspension, contradictory evidence settling to
+durable `ambiguous`, explicit `partially_filled` settlement, durable
+confirmation, and terminal classification after restart. Existing journal,
+one-shot backend, observation, and header self-containment tests are unchanged
+and remain part of the focused runtime-off suite.

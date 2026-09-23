@@ -41,12 +41,26 @@ while frontier > request.from:
         increment stalled counter
 ```
 
-The bootstrap is bounded by sixteen probes. Three consecutive stalled probes
-at the minimum step return a retry-exhausted failure with an explicit
-`history bootstrap made no progress` diagnostic. A successful probe at the
-requested anchor ends the bootstrap only; the normal inclusive paginator still
-filters the requested millisecond range, reconciles same-timestamp payload
-multiplicity, and confirms completion.
+Reaching the requested anchor is not inferred from a single suffix. If the
+first available tick is later than `request.from`, the probe at the requested
+anchor must observe that same oldest tick again. Repeatedly returning the old
+frontier without any target progress therefore remains stalled and cannot
+declare bootstrap success. Weekend/holiday gaps are valid once this clean
+confirmation is present.
+To avoid treating a distant stale suffix as a valid gap, the first available
+tick must be no more than the adaptive 30-day minimum step after the requested
+anchor; larger gaps remain retry-exhausted unless a probe reaches the anchor.
+
+The bootstrap is bounded by sixteen probes and a five-second wall-clock budget.
+Backoff starts at 100 ms and grows to one second; all sleeps occur after the
+single probe's runtime admission and GIL scopes have been released. Three
+consecutive stalled probes at the smallest step return a retry-exhausted
+failure with an explicit `history bootstrap made no progress` diagnostic. Probe
+warm-up diagnostics are set only after transient/partial, empty, stalled, or
+frontier-moving synchronization evidence is observed. A successful probe at
+the requested anchor ends the bootstrap only; the normal inclusive paginator
+still filters the requested millisecond range, reconciles same-timestamp
+payload multiplicity, and confirms completion.
 
 Transient/partial probe results are never used to advance the frontier. The
 existing retry and IPC reconnect rules remain in force through the shared page
@@ -74,6 +88,9 @@ M1 bars with midpoint or tick-derived OHLC data.
 
 `tests/test_fake_mt5_runtime.py` verifies that deep probes move through
 successively older years before normal pagination, that every probe requests
-one row, and that a repeated oldest tick exhausts a bounded adaptive budget
-with a retry-exhausted diagnostic. Existing pagination, transient recovery,
-realtime, and dispatch tests remain part of the full runtime suite.
+one row, that an unreached target suffix cannot terminate bootstrap, that a
+valid calendar gap receives a clean confirmation, and that a malformed result
+after a transient probe remains a fatal error. A repeated oldest tick exhausts
+a bounded adaptive budget with a retry-exhausted diagnostic. Existing
+pagination, transient recovery, realtime, and dispatch tests remain part of
+the full runtime suite.

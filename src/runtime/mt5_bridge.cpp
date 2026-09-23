@@ -226,6 +226,25 @@ public:
     /// \return True when the in-flight admission and interpreter mutex are held.
     explicit operator bool() const noexcept { return acquired_; }
 
+    /// \brief Temporarily releases the lane and interpreter mutexes.
+    ///
+    /// The in-flight lifecycle count remains held, so shutdown still waits for
+    /// this operation. Callers must release the GIL before suspending.
+    void suspend() {
+        if (!acquired_ || !python_lock_.owns_lock())
+            return;
+        python_lock_.unlock();
+        lane_permit_ = RuntimeLane::Permit{};
+    }
+
+    /// \brief Reacquires the lane and interpreter mutexes after suspension.
+    void resume() {
+        if (!acquired_ || python_lock_.owns_lock())
+            return;
+        lane_permit_ = g_runtime_lane.acquire(lane_);
+        python_lock_.lock();
+    }
+
 private:
     RuntimeCallLane lane_;
     RuntimeLane::Permit lane_permit_;
@@ -346,6 +365,14 @@ public:
         if (acquired_) {
             PyGILState_Release(state_);
             acquired_ = false;
+        }
+    }
+
+    /// \brief Reacquires the GIL after an early release.
+    void acquire() {
+        if (!acquired_) {
+            state_ = PyGILState_Ensure();
+            acquired_ = true;
         }
     }
 
@@ -3405,6 +3432,13 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
     if (!call)
         return -1;
     GilScope gil(true);
+    const auto yield_for = [&](std::chrono::milliseconds delay) {
+        gil.release();
+        call.suspend();
+        std::this_thread::sleep_for(delay);
+        call.resume();
+        gil.acquire();
+    };
     const int status = [&]() {
         PyRef mt5(PyImport_ImportModule("MetaTrader5"));
         if (!mt5) {
@@ -3472,8 +3506,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                     if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
                         ++buffer->diagnostics.reconnects;
                     ++buffer->diagnostics.retries;
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(50u << (recovery_failures - 1)));
+                    yield_for(std::chrono::milliseconds(50u << (recovery_failures - 1)));
                     continue;
                 }
                 saw_values = saw_values || !current_values.empty();
@@ -3484,7 +3517,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                     buffer->coverage = current_coverage;
                     have_candidate = true;
                     ++buffer->diagnostics.retries;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+                    yield_for(std::chrono::milliseconds(50u));
                     continue;
                 }
                 const bool stable = candidate_values.size() == filtered_values.size() &&
@@ -3511,7 +3544,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                 ++confirmation_probes;
                 if (confirmation_probes < kRateConfirmationProbes) {
                     ++buffer->diagnostics.retries;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+                    yield_for(std::chrono::milliseconds(50u));
                 }
                 continue;
             }
@@ -3533,8 +3566,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
             if (is_ipc_error(code) && reinitialize_terminal(mt5.get()))
                 ++buffer->diagnostics.reconnects;
             ++buffer->diagnostics.retries;
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(50u << (recovery_failures - 1)));
+            yield_for(std::chrono::milliseconds(50u << (recovery_failures - 1)));
         }
         buffer->diagnostics.status = saw_values ? MT5_FETCH_PARTIAL : MT5_FETCH_RETRY_EXHAUSTED;
         save_fetch_diagnostics(buffer->diagnostics);

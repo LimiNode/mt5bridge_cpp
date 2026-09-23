@@ -19,7 +19,9 @@ is reserved for the durable Stage 2 journal.
 
 The public types live in [include/mt5bridge/data.h](../include/mt5bridge/data.h)
 and are C-compatible. `mt5bridge::Client` exposes `copy_ticks_range()` and
-`copy_rates_range()` returning ordinary C++ vectors, while the C API exposes
+strict-by-default `copy_rates_range()` returning ordinary C++ vectors. The
+explicit `query_rates_range()` method returns best-effort values with
+diagnostics and coverage, while the C API exposes
 DLL-owned buffers, an optional tick-chunk callback, and
 `mt5bridge_last_fetch_diagnostics()` for failures that do not produce a buffer.
 
@@ -32,10 +34,12 @@ Typical C++ usage keeps the POD contract out of application plumbing:
 
 ```cpp
 Mt5FetchDiagnostics diagnostics{};
-Mt5RateCoverage coverage{};
+Mt5RateCoverageV1 coverage{};
 auto ticks = mt5.copy_ticks_range("EURUSD", from_msc, to_msc, 0, &diagnostics);
 auto rates = mt5.copy_rates_range("EURUSD", /*TIMEFRAME_M1=*/1,
                                   from_msc, to_msc, &diagnostics, &coverage);
+auto best_effort = mt5.query_rates_range("EURUSD", /*TIMEFRAME_M1=*/1,
+                                         from_msc, to_msc);
 ```
 
 Every buffer is owned by the DLL and must be released with its matching
@@ -45,14 +49,21 @@ copy it to application-owned storage if it must outlive the call.
 Rates use the same bounded transient-error recovery as ticks. Because
 `copy_rates_range()` has no page-size contract, the bridge confirms two stable
 successive NumPy results before returning a rate buffer. Stability alone is not
-range completeness: the additive `Mt5RateCoverage` extension reports whether
+range completeness: the additive immutable `Mt5RateCoverageV1` extension reports whether
 the timeframe-aligned requested boundaries were evidenced. A stable suffix or
 stable empty result is returned with `MT5_FETCH_PARTIAL` and
-`MT5_RATE_COVERAGE_UNPROVEN`, never as `MT5_FETCH_COMPLETE`. Rows outside the
-requested millisecond range are filtered locally before they cross the POD
-boundary. Coverage is a boundary claim, not a proof of every interior bar:
-the raw response must reach the floor-aligned start and the filtered response
-must reach the floor-aligned end for the recognized timeframe. The
+`MT5_RATE_COVERAGE_UNPROVEN`, never as `MT5_FETCH_COMPLETE`. The strict C++
+`copy_rates_range()` throws for that partial/unproven result; callers that need
+best-effort rows must use `query_rates_range()` and inspect `complete()`.
+The C accessor is explicitly versioned as
+`mt5bridge_rate_buffer_coverage_v1()`; a future V2 must use a new type and
+symbol rather than writing into a V1 caller's buffer.
+Rows outside the requested millisecond range are filtered locally before they
+cross the POD boundary. Coverage is a boundary claim, not a proof of every
+interior bar: the raw response must reach the ceil-aligned first bar and the
+filtered response must reach the floor-aligned last bar for a fixed intraday
+timeframe. D1/W1/MN1 remain unproven because their calendar/session boundaries
+are not fixed Unix periods. The
 transient-failure budget and confirmation-probe budget are
 independent, so a clean result received after recovery still gets its
 confirmation probe.

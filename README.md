@@ -113,6 +113,9 @@ AI-generated C++ live in [`docs/development-rules.md`](docs/development-rules.md
 High-throughput ticks/rates use the typed POD data plane described in
 [`docs/market-data-api.md`](docs/market-data-api.md); known MT5 recovery cases
 are tracked in [`docs/mt5-quirks.md`](docs/mt5-quirks.md).
+The C++ rate helper is strict by default: incomplete or unproven history throws;
+use `Client::query_rates_range()` when an application explicitly accepts
+best-effort rows and needs the returned diagnostics/coverage evidence.
 Trade submission is deliberately single-shot; the planned bounded,
 ticket/identifier-graph reconciliation flow is documented in
 [`docs/trade-api.md`](docs/trade-api.md) and

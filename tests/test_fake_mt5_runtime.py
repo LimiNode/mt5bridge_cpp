@@ -68,8 +68,8 @@ class Mt5FetchDiagnostics(Structure):
     ]
 
 
-class Mt5RateCoverage(Structure):
-    """Matches the additive versioned rate-coverage extension."""
+class Mt5RateCoverageV1(Structure):
+    """Matches the immutable V1 rate-coverage extension."""
 
     _fields_ = [
         ("version", c_uint32),
@@ -79,6 +79,22 @@ class Mt5RateCoverage(Structure):
         ("observed_from_msc", c_int64),
         ("observed_to_msc", c_int64),
         ("reserved", c_uint32 * 2),
+    ]
+
+
+class Mt5Rate(Structure):
+    """Matches one rate row crossing the C ABI."""
+
+    _fields_ = [
+        ("time", c_int64),
+        ("open", c_double),
+        ("high", c_double),
+        ("low", c_double),
+        ("close", c_double),
+        ("tick_volume", c_int64),
+        ("spread", c_int32),
+        ("reserved", c_int32),
+        ("real_volume", c_int64),
     ]
 
 
@@ -475,15 +491,17 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         cls.module.mt5bridge_query_rates.restype = c_int
         cls.module.mt5bridge_rate_buffer_size.argtypes = [c_void_p]
         cls.module.mt5bridge_rate_buffer_size.restype = c_size_t
+        cls.module.mt5bridge_rate_buffer_data.argtypes = [c_void_p]
+        cls.module.mt5bridge_rate_buffer_data.restype = POINTER(Mt5Rate)
         cls.module.mt5bridge_rate_buffer_diagnostics.argtypes = [
             c_void_p,
             POINTER(Mt5FetchDiagnostics),
         ]
-        cls.module.mt5bridge_rate_buffer_coverage.argtypes = [
+        cls.module.mt5bridge_rate_buffer_coverage_v1.argtypes = [
             c_void_p,
-            POINTER(Mt5RateCoverage),
+            POINTER(Mt5RateCoverageV1),
         ]
-        cls.module.mt5bridge_rate_buffer_coverage.restype = c_int
+        cls.module.mt5bridge_rate_buffer_coverage_v1.restype = c_int
         cls.module.mt5bridge_rate_buffer_free.argtypes = [c_void_p]
         cls.module.mt5bridge_last_fetch_diagnostics.argtypes = [POINTER(Mt5FetchDiagnostics)]
         cls.module.mt5bridge_last_fetch_diagnostics.restype = c_int
@@ -759,15 +777,26 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         positive = page(first_available, 1)
         positive["time_msc"] = (first_available,)
         positive["time"] = positive["time_msc"] // 1000
+
+        def late_positive(symbol: str, when: object, count: int) -> np.ndarray:
+            del symbol, count
+            if int(when.timestamp() * 1000) > first_available:
+                return page(first_available, 0)
+            return positive
+
         fake = fake_module(
             [],
             history_sequence=[
                 page(first_available, 0),
                 page(first_available, 0),
-                positive,
-                positive,
-                positive,
-                positive,
+                late_positive,
+                late_positive,
+                late_positive,
+                late_positive,
+                late_positive,
+                late_positive,
+                late_positive,
+                late_positive,
             ],
         )
         status, size, diagnostics, error = self.query(
@@ -782,6 +811,26 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def test_progressive_bootstrap_all_empty_history_is_unproven(self) -> None:
         """A deep request with only clean empties cannot complete bootstrap."""
         fake = fake_module([], histories={})
+        status, _, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertNotEqual(status, 0)
+        self.assertIn("bootstrap", error.lower())
+        self.assertEqual(diagnostics.status, 2)
+        self.assertFalse(diagnostics.complete)
+        self.assertTrue(diagnostics.history_warmup_detected)
+
+    def test_progressive_bootstrap_ignores_rows_before_probe_anchor(self) -> None:
+        """Pre-anchor rows cannot be mistaken for positive bootstrap evidence."""
+        def pre_anchor_row(symbol: str, when: object, count: int) -> np.ndarray:
+            del symbol, count
+            timestamp = int(when.timestamp() * 1000) - 1
+            values = page(timestamp, 1)
+            values["time_msc"] = (timestamp,)
+            values["time"] = values["time_msc"] // 1000
+            return values
+
+        fake = fake_module([], history_sequence=[pre_anchor_row] * 16)
         status, _, diagnostics, error = self.query(
             fake, epoch_msc(2022), epoch_msc(2026)
         )
@@ -808,7 +857,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
     def query_rates(
         self, fake: types.ModuleType, from_msc: int = 0, to_msc: int = 60000,
         timeframe: int = 1,
-    ) -> tuple[int, int, Mt5FetchDiagnostics, Mt5RateCoverage, str]:
+    ) -> tuple[int, int, Mt5FetchDiagnostics, Mt5RateCoverageV1, str]:
         """Runs one rate query and returns status, size, diagnostics, and error."""
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
@@ -816,12 +865,16 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         result = c_void_p()
         status = self.module.mt5bridge_query_rates(byref(native_request), byref(result))
         diagnostics = Mt5FetchDiagnostics()
-        coverage = Mt5RateCoverage()
+        coverage = Mt5RateCoverageV1()
+        self.last_rate_times = []
         size = 0
         if result.value:
             size = self.module.mt5bridge_rate_buffer_size(result)
+            data = self.module.mt5bridge_rate_buffer_data(result)
+            if size:
+                self.last_rate_times = [data[index].time for index in range(size)]
             self.module.mt5bridge_rate_buffer_diagnostics(result, byref(diagnostics))
-            self.module.mt5bridge_rate_buffer_coverage(result, byref(coverage))
+            self.module.mt5bridge_rate_buffer_coverage_v1(result, byref(coverage))
             self.module.mt5bridge_rate_buffer_free(result)
         else:
             self.module.mt5bridge_last_fetch_diagnostics(byref(diagnostics))
@@ -1141,12 +1194,69 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(status, 0, error)
         self.assertEqual(size, 2)
+        self.assertEqual(self.last_rate_times, [60, 120])
         self.assertEqual(diagnostics.status, 0)
         self.assertEqual(coverage.state, 1)
         self.assertEqual(coverage.requested_from_msc, 60000)
         self.assertEqual(coverage.requested_to_msc, 120000)
         self.assertEqual(coverage.observed_from_msc, 0)
         self.assertEqual(coverage.observed_to_msc, 180000)
+
+    def test_rates_arbitrary_millisecond_range_requires_exact_aligned_first_bar(self) -> None:
+        """A floor-aligned predecessor cannot prove an arbitrary-time request."""
+        values = rate_page(2, start=60, step=120)
+        fake = fake_module([], rate_sequence=[values, values])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, from_msc=60_500, to_msc=180_500
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 1)
+        self.assertEqual(diagnostics.status, 4)
+        self.assertFalse(diagnostics.complete)
+        self.assertEqual(coverage.state, 0)
+
+    def test_rates_arbitrary_millisecond_range_proves_ceil_and_floor_boundaries(self) -> None:
+        """A valid arbitrary-time M1 request proves its ceil/floor bar boundaries."""
+        values = rate_page(2, start=120, step=60)
+        fake = fake_module([], rate_sequence=[values, values])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, from_msc=60_500, to_msc=180_500
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(self.last_rate_times, [120, 180])
+        self.assertEqual(diagnostics.status, 0)
+        self.assertTrue(diagnostics.complete)
+        self.assertEqual(coverage.state, 1)
+
+    def test_rates_calendar_timeframes_remain_coverage_unproven(self) -> None:
+        """D1, W1, and MN1 are not modeled as fixed Unix periods."""
+        values = rate_page(2)
+        for timeframe in (16408, 32769, 49153):
+            with self.subTest(timeframe=timeframe):
+                fake = fake_module([], rate_sequence=[values, values])
+                status, size, diagnostics, coverage, error = self.query_rates(
+                    fake, timeframe=timeframe
+                )
+                self.assertEqual(status, 0, error)
+                self.assertEqual(size, 2)
+                self.assertEqual(diagnostics.status, 4)
+                self.assertFalse(diagnostics.complete)
+                self.assertEqual(coverage.state, 0)
+
+    def test_rates_coverage_evidence_must_stabilize_with_values(self) -> None:
+        """Equal filtered rows with changing raw envelopes need another confirmation."""
+        first = rate_page(3, start=0)
+        second = rate_page(4, start=0)
+        fake = fake_module([], rate_sequence=[first, second, second])
+        status, size, diagnostics, coverage, error = self.query_rates(
+            fake, from_msc=60_000, to_msc=120_000
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, 2)
+        self.assertEqual(diagnostics.attempts, 3)
+        self.assertEqual(diagnostics.status, 0)
+        self.assertEqual(coverage.state, 1)
 
     def test_rates_stable_suffix_is_coverage_unproven(self) -> None:
         """A stable current-only suffix cannot masquerade as deep coverage."""
@@ -1531,7 +1641,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             values["time"] = values["time_msc"] // 1000
             return values
 
-        fake = fake_module([], history_sequence=[make_values, make_values])
+        fake = fake_module([], history_sequence=[make_values] * 64)
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
         source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
@@ -1539,11 +1649,15 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         handle = Mt5SubscriptionHandle()
         self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
         observed = []
+        gap_events = []
         def on_event(event: POINTER(Mt5SubscriptionEvent), user_data: int) -> int:
             del user_data
-            if event.contents.type == 0 and event.contents.count:
-                ticks = ctypes.cast(event.contents.ticks, POINTER(Mt5Tick))
-                observed.extend(ticks[i].volume for i in range(event.contents.count))
+            value = event.contents
+            if value.type == MT5_SUBSCRIPTION_GAP:
+                gap_events.append(value.gap_reason)
+            elif value.type == 0 and value.count:
+                ticks = ctypes.cast(value.ticks, POINTER(Mt5Tick))
+                observed.extend(ticks[i].volume for i in range(value.count))
             return 0
         callback = self.event_callback_type(on_event)
         for _ in range(30):
@@ -1551,13 +1665,15 @@ class FakeMt5RuntimeTests(unittest.TestCase):
             self.module.mt5bridge_process_events(128, callback, None)
             if len(observed) >= 32:
                 break
-        self.assertGreater(fake.calls, 3)
         self.assertEqual(len(observed), 32)
         self.assertEqual(len(set(observed)), 32)
+        self.assertEqual(gap_events, [])
         diagnostics = Mt5SubscriptionDiagnostics()
         self.assertEqual(
             self.module.mt5bridge_subscription_source_diagnostics(handle, 0, byref(diagnostics)), 0
         )
+        self.assertEqual(diagnostics.status, 1)
+        self.assertEqual(diagnostics.gap_reason, 0)
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
 

@@ -2,6 +2,7 @@
 /// \brief Runs a bounded native live check against an attached MetaTrader 5 terminal.
 
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -70,14 +71,17 @@ int main(int argc, char **argv) {
         std::cout << "ticks_count=" << ticks.size() << '\n';
         require_complete("ticks", ticks.size(), tick_diagnostics);
 
-        Mt5FetchDiagnostics rate_diagnostics{};
-        const auto rates = bridge.copy_rates_range(symbol, 1, now_msc -
-                                                       std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                           kRateLookback).count(), now_msc,
-                                                   &rate_diagnostics);
-        print_diagnostics("rates", rate_diagnostics);
-        std::cout << "rates_count=" << rates.size() << '\n';
-        require_complete("rates", rates.size(), rate_diagnostics);
+        const auto rate_period_msc = std::int64_t{60} * 1000;
+        const auto rate_to_msc = (now_msc / rate_period_msc) * rate_period_msc;
+        const auto rate_from_msc =
+            ((rate_to_msc - std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  kRateLookback).count()) /
+             rate_period_msc) *
+            rate_period_msc;
+        const auto rates = bridge.query_rates_range(symbol, 1, rate_from_msc, rate_to_msc);
+        print_diagnostics("rates", rates.diagnostics);
+        std::cout << "rates_count=" << rates.values.size() << '\n';
+        require_complete("rates", rates.values.size(), rates.diagnostics);
 
         bridge.shutdown();
         return 0;

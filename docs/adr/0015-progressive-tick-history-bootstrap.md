@@ -34,6 +34,7 @@ step = 366 days
 while probes remain bounded:
     candidate = max(request.from, search_cursor - step)
     copy_ticks_from(candidate, count=1)
+    discard rows with time_msc < candidate
     if a non-empty response moves before search_cursor:
         search_cursor = oldest returned tick
         confirmed_frontier = oldest returned tick
@@ -54,6 +55,9 @@ bootstrap requires positive tick evidence and a target probe at
 the old confirmed frontier without that target progress therefore remains
 stalled and cannot declare bootstrap success. Weekend/holiday gaps are valid
 once this clean confirmation is present.
+`CopyTicksFrom` can return rows older than its requested anchor; a probe whose
+rows are all pre-anchor is treated exactly like a clean empty response and
+cannot move `confirmed_frontier`.
 To avoid treating a distant stale suffix as a valid gap, the first available
 tick must be no more than the adaptive 30-day minimum step after the requested
 anchor; larger gaps remain retry-exhausted unless a probe reaches the anchor.
@@ -87,8 +91,8 @@ M1 bars with midpoint or tick-derived OHLC data.
 - No-progress behavior is bounded and fail-closed; a stalled terminal cannot
   spin indefinitely.
 - The existing ABI-8 records remain unchanged, including the fixed-size
-  `Mt5FetchDiagnostics` record; rates expose coverage through an additive,
-  versioned accessor.
+  `Mt5FetchDiagnostics` record; rates expose immutable V1 coverage through an
+  additive V1 accessor.
 - Existing pagination, boundary-multiplicity, and callback semantics remain
   authoritative for delivered ticks.
 - Native rates remain independent of tick bootstrap and are never silently
@@ -105,4 +109,5 @@ deep request remains retry-exhausted. A malformed result after a transient
 probe remains a fatal error. A repeated oldest tick exhausts a bounded adaptive
 budget with a retry-exhausted diagnostic. Existing
 pagination, transient recovery, realtime, and dispatch tests remain part of
-the full runtime suite.
+the full runtime suite. A pre-anchor probe regression confirms that stale rows
+cannot terminate bootstrap as positive evidence.

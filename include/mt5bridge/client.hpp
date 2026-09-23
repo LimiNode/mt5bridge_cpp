@@ -26,6 +26,22 @@
 /// \brief Contains the lightweight C++ consumer API.
 namespace mt5bridge {
 
+/// \struct RateQueryResult
+/// \brief Owns a best-effort rate result together with completeness evidence.
+struct RateQueryResult {
+    std::vector<Mt5Rate> values;       ///< Rows copied from the DLL-owned buffer.
+    Mt5FetchDiagnostics diagnostics{}; ///< Recovery and semantic status.
+    Mt5RateCoverageV1 coverage{};      ///< Immutable V1 range-coverage evidence.
+
+    /// \brief Reports whether the requested range is safe to consume as complete.
+    /// \return True only when both diagnostics and coverage prove completion.
+    bool complete() const noexcept {
+        return diagnostics.status == MT5_FETCH_COMPLETE && diagnostics.complete != 0 &&
+               coverage.version == MT5BRIDGE_RATE_COVERAGE_V1_VERSION &&
+               coverage.state == MT5_RATE_COVERAGE_PROVEN;
+    }
+};
+
 /// \class Client
 /// \brief Owns a dynamically loaded bridge runtime and exposes RAII C++ operations.
 ///
@@ -144,7 +160,7 @@ public:
         rate_size_ = resolve<RateSize>("mt5bridge_rate_buffer_size");
         rate_free_ = resolve<RateFree>("mt5bridge_rate_buffer_free");
         rate_diagnostics_ = resolve<RateDiagnostics>("mt5bridge_rate_buffer_diagnostics");
-        rate_coverage_ = resolve<RateCoverage>("mt5bridge_rate_buffer_coverage");
+        rate_coverage_ = resolve<RateCoverage>("mt5bridge_rate_buffer_coverage_v1");
         last_fetch_diagnostics_ =
             resolve<LastFetchDiagnostics>("mt5bridge_last_fetch_diagnostics");
         subscribe_ticks_ = resolve<SubscribeTicks>("mt5bridge_subscribe_ticks");
@@ -178,7 +194,7 @@ public:
         if (!abi_version_ || !trade_api_version_ || !initialize_ || !shutdown_ || !eval_json_ || !free_ ||
             !last_error_ || !query_ticks_ || !tick_data_ || !tick_size_ || !tick_free_ ||
             !tick_diagnostics_ || !query_rates_ || !rate_data_ || !rate_size_ ||
-            !rate_free_ || !rate_diagnostics_ || !last_fetch_diagnostics_ ||
+            !rate_free_ || !rate_diagnostics_ || !rate_coverage_ || !last_fetch_diagnostics_ ||
             !copy_ticks_chunks_ || !subscribe_ticks_ || !unsubscribe_ || !unsubscribe_all_ ||
             !process_events_ || !subscription_diagnostics_ || !subscription_source_diagnostics_ ||
             !account_info_ || !symbol_capabilities_ || !order_check_ ||
@@ -524,6 +540,44 @@ public:
                                 diagnostics);
     }
 
+    /// \brief Retrieves a best-effort inclusive rate range and its evidence.
+    /// \param request Symbol, range, and timeframe.
+    /// \return Values and diagnostics; partial/unproven history is returned explicitly.
+    /// \throws std::runtime_error If the query fails or the V1 coverage extension is absent.
+    RateQueryResult query_rates_range(const Mt5RatesRequest &request) {
+        check_loaded();
+        Mt5RateBuffer *buffer = nullptr;
+        if (query_rates_(&request, &buffer) != 0)
+            throw std::runtime_error(error_message());
+        try {
+            RateQueryResult result;
+            if (rate_diagnostics_(buffer, &result.diagnostics) != 0 ||
+                rate_coverage_(buffer, &result.coverage) != 0 ||
+                result.coverage.version != MT5BRIDGE_RATE_COVERAGE_V1_VERSION)
+                throw std::runtime_error("rate coverage V1 extension unavailable");
+            const Mt5Rate *data = rate_data_(buffer);
+            const auto count = rate_size_(buffer);
+            if (count)
+                result.values.assign(data, data + count);
+            rate_free_(buffer);
+            return result;
+        } catch (...) {
+            rate_free_(buffer);
+            throw;
+        }
+    }
+
+    /// \brief Retrieves a best-effort rate range using individual arguments.
+    /// \param symbol MetaTrader symbol encoded as UTF-8.
+    /// \param timeframe MetaTrader 5 TIMEFRAME_* numeric value.
+    /// \param from_msc Inclusive range start as Unix milliseconds.
+    /// \param to_msc Inclusive range end as Unix milliseconds.
+    /// \return Values and diagnostics; partial/unproven history is returned explicitly.
+    RateQueryResult query_rates_range(const std::string &symbol, std::int32_t timeframe,
+                                      std::int64_t from_msc, std::int64_t to_msc) {
+        return query_rates_range(Mt5RatesRequest{symbol.c_str(), from_msc, to_msc, timeframe, 0});
+    }
+
     /// \brief Retrieves an inclusive rate range into an application-owned vector.
     /// \param request Symbol, range, and timeframe.
     /// \param[out] diagnostics Optional destination for the runtime diagnostic snapshot.
@@ -532,31 +586,17 @@ public:
     /// \throws std::runtime_error If the query fails.
     std::vector<Mt5Rate> copy_rates_range(const Mt5RatesRequest &request,
                                           Mt5FetchDiagnostics *diagnostics = nullptr,
-                                          Mt5RateCoverage *coverage = nullptr) {
-        check_loaded();
-        Mt5RateBuffer *buffer = nullptr;
-        if (query_rates_(&request, &buffer) != 0)
-            throw std::runtime_error(error_message());
-        try {
-            if (diagnostics)
-                rate_diagnostics_(buffer, diagnostics);
-            if (coverage) {
-                if (!rate_coverage_ || rate_coverage_(buffer, coverage) != 0)
-                    throw std::runtime_error("rate coverage extension unavailable");
-                if (coverage->version != MT5BRIDGE_RATE_COVERAGE_VERSION)
-                    throw std::runtime_error("unsupported rate coverage extension version");
-            }
-            const Mt5Rate *data = rate_data_(buffer);
-            const auto count = rate_size_(buffer);
-            std::vector<Mt5Rate> result;
-            if (count)
-                result.assign(data, data + count);
-            rate_free_(buffer);
-            return result;
-        } catch (...) {
-            rate_free_(buffer);
-            throw;
-        }
+                                          Mt5RateCoverageV1 *coverage = nullptr) {
+        const RateQueryResult result = query_rates_range(request);
+        if (diagnostics)
+            *diagnostics = result.diagnostics;
+        if (coverage)
+            *coverage = result.coverage;
+        if (!result.complete())
+            throw std::runtime_error(
+                "rate range is partial or coverage is unproven; use query_rates_range() "
+                "for best-effort data");
+        return result.values;
     }
 
     /// \brief Retrieves an inclusive rate range using individual query arguments.
@@ -571,7 +611,7 @@ public:
     std::vector<Mt5Rate> copy_rates_range(const std::string &symbol, std::int32_t timeframe,
                                           std::int64_t from_msc, std::int64_t to_msc,
                                           Mt5FetchDiagnostics *diagnostics = nullptr,
-                                          Mt5RateCoverage *coverage = nullptr) {
+                                          Mt5RateCoverageV1 *coverage = nullptr) {
         return copy_rates_range(Mt5RatesRequest{symbol.c_str(), from_msc, to_msc, timeframe, 0},
                                 diagnostics, coverage);
     }
@@ -670,7 +710,7 @@ private:
     using RateSize = std::size_t (*)(const Mt5RateBuffer *);
     using RateFree = void (*)(Mt5RateBuffer *);
     using RateDiagnostics = int (*)(const Mt5RateBuffer *, Mt5FetchDiagnostics *);
-    using RateCoverage = int (*)(const Mt5RateBuffer *, Mt5RateCoverage *);
+    using RateCoverage = int (*)(const Mt5RateBuffer *, Mt5RateCoverageV1 *);
     using LastFetchDiagnostics = int (*)(Mt5FetchDiagnostics *);
     using SubscribeTicks = int (*)(const Mt5SubscriptionRequest *, Mt5SubscriptionHandle *);
     using Unsubscribe = int (*)(Mt5SubscriptionHandle);

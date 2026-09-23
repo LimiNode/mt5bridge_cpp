@@ -102,20 +102,20 @@ typedef int32_t Mt5RateCoverageState;
 #define MT5_RATE_COVERAGE_PROVEN ((Mt5RateCoverageState)1)
 /// \}
 
-/// \brief Version of the additive rate-coverage extension.
-#define MT5BRIDGE_RATE_COVERAGE_VERSION 1u
+/// \brief Version of the immutable rate-coverage V1 extension.
+#define MT5BRIDGE_RATE_COVERAGE_V1_VERSION 1u
 
-/// \struct Mt5RateCoverage
+/// \struct Mt5RateCoverageV1
 /// \brief Describes range coverage without changing the ABI-8 diagnostics record.
-typedef struct Mt5RateCoverage {
-    uint32_t version;                 ///< Must equal MT5BRIDGE_RATE_COVERAGE_VERSION.
+typedef struct Mt5RateCoverageV1 {
+    uint32_t version;                 ///< Must equal MT5BRIDGE_RATE_COVERAGE_V1_VERSION.
     Mt5RateCoverageState state;       ///< Proven or unproven coverage state.
     int64_t requested_from_msc;       ///< Original inclusive request start.
     int64_t requested_to_msc;         ///< Original inclusive request end.
     int64_t observed_from_msc;        ///< Earliest raw bar returned, or -1 when none.
     int64_t observed_to_msc;          ///< Latest raw bar returned, or -1 when none.
     uint32_t reserved[2];              ///< Reserved; must be zero.
-} Mt5RateCoverage;
+} Mt5RateCoverageV1;
 
 /// \struct Mt5TickSourceRequest
 /// \brief Describes one physical symbol source in a subscription group.
@@ -258,9 +258,9 @@ static_assert(sizeof(Mt5FetchDiagnostics) == 24,
               "Mt5FetchDiagnostics ABI size changed");
 static_assert(offsetof(Mt5FetchDiagnostics, status) == 20,
               "Mt5FetchDiagnostics::status ABI offset changed");
-static_assert(sizeof(Mt5RateCoverage) == 48, "Mt5RateCoverage ABI size changed");
-static_assert(offsetof(Mt5RateCoverage, requested_from_msc) == 8,
-              "Mt5RateCoverage::requested_from_msc ABI offset changed");
+static_assert(sizeof(Mt5RateCoverageV1) == 48, "Mt5RateCoverageV1 ABI size changed");
+static_assert(offsetof(Mt5RateCoverageV1, requested_from_msc) == 8,
+              "Mt5RateCoverageV1::requested_from_msc ABI offset changed");
 static_assert(sizeof(Mt5TickSourceRequest) == 16,
               "Mt5TickSourceRequest ABI size changed");
 static_assert(sizeof(Mt5SubscriptionRequest) == 48,
@@ -288,7 +288,7 @@ _Static_assert(sizeof(Mt5RatesRequest) == 32, "Mt5RatesRequest ABI size changed"
 _Static_assert(sizeof(Mt5FetchStatus) == 4, "Mt5FetchStatus ABI size changed");
 _Static_assert(sizeof(Mt5FetchDiagnostics) == 24,
                "Mt5FetchDiagnostics ABI size changed");
-_Static_assert(sizeof(Mt5RateCoverage) == 48, "Mt5RateCoverage ABI size changed");
+_Static_assert(sizeof(Mt5RateCoverageV1) == 48, "Mt5RateCoverageV1 ABI size changed");
 _Static_assert(sizeof(Mt5TickSourceRequest) == 16,
                "Mt5TickSourceRequest ABI size changed");
 _Static_assert(sizeof(Mt5SubscriptionRequest) == 48,
@@ -394,8 +394,8 @@ MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_diagnostics(const Mt5RateBuffer *buff
 /// \param buffer Buffer returned by mt5bridge_query_rates().
 /// \param[out] coverage Destination for the versioned coverage record.
 /// \return Zero on success; non-zero when an argument is NULL or the extension is unavailable.
-MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_coverage(const Mt5RateBuffer *buffer,
-                                                    Mt5RateCoverage *coverage);
+MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_coverage_v1(const Mt5RateBuffer *buffer,
+                                                       Mt5RateCoverageV1 *coverage);
 
 /// \brief Retrieves diagnostics for the most recent market-data call on this thread.
 /// \param[out] diagnostics Destination for the diagnostic snapshot.

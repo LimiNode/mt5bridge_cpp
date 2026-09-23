@@ -41,7 +41,7 @@ struct Mt5TickBuffer {
 struct Mt5RateBuffer {
     std::vector<Mt5Rate> values;       ///< Rate values exposed through the C accessors.
     Mt5FetchDiagnostics diagnostics{}; ///< Recovery diagnostics for the completed query.
-    Mt5RateCoverage coverage{};        ///< Versioned range-coverage evidence.
+    Mt5RateCoverageV1 coverage{};      ///< Immutable V1 range-coverage evidence.
 };
 
 /// \struct Mt5OrderBuffer
@@ -1392,9 +1392,12 @@ int64_t timeframe_period_seconds(int32_t timeframe) {
     case 16390: return 6LL * 60 * 60;
     case 16392: return 8LL * 60 * 60;
     case 16396: return 12LL * 60 * 60;
-    case 16408: return 24LL * 60 * 60;
-    case 32769: return 7LL * 24 * 60 * 60;
-    case 49153: return 30LL * 24 * 60 * 60;
+    // D1/W1/MN1 use broker/session calendar boundaries rather than fixed
+    // Unix periods.  Leave them unproven until a calendar-aware contract exists.
+    case 16408:
+    case 32769:
+    case 49153:
+        return 0;
     default: return 0;
     }
 }
@@ -1408,7 +1411,7 @@ int64_t timeframe_period_seconds(int32_t timeframe) {
 bool prepare_rate_observation(const std::vector<Mt5Rate> &values,
                               const Mt5RatesRequest *request,
                               std::vector<Mt5Rate> *filtered,
-                              Mt5RateCoverage *coverage) {
+                              Mt5RateCoverageV1 *coverage) {
     if (!request || !filtered || !coverage)
         return false;
     filtered->clear();
@@ -1440,7 +1443,7 @@ bool prepare_rate_observation(const std::vector<Mt5Rate> &values,
 /// \return True only when both aligned boundaries are evidenced.
 bool rate_coverage_proven(const Mt5RatesRequest *request,
                            const std::vector<Mt5Rate> &values,
-                           const Mt5RateCoverage &coverage) {
+                           const Mt5RateCoverageV1 &coverage) {
     if (!request || values.empty() || coverage.observed_from_msc < 0 ||
         coverage.observed_to_msc < 0)
         return false;
@@ -1448,14 +1451,36 @@ bool rate_coverage_proven(const Mt5RatesRequest *request,
     if (period_seconds <= 0)
         return false;
     const int64_t period_msc = period_seconds * 1000;
-    const int64_t expected_from = (request->from_msc / period_msc) * period_msc;
+    const int64_t from_remainder = request->from_msc % period_msc;
+    const int64_t first_index = request->from_msc / period_msc +
+        (from_remainder ? 1 : 0);
+    if (first_index > std::numeric_limits<int64_t>::max() / period_msc)
+        return false;
+    const int64_t expected_from = first_index * period_msc;
     const int64_t expected_to = (request->to_msc / period_msc) * period_msc;
-    int64_t filtered_to = std::numeric_limits<int64_t>::min();
+    if (expected_from > expected_to)
+        return false;
+    bool has_expected_from = false;
+    bool has_expected_to = false;
     for (const auto &value : values) {
         const int64_t time_msc = value.time * 1000;
-        filtered_to = std::max(filtered_to, time_msc);
+        has_expected_from = has_expected_from || time_msc == expected_from;
+        has_expected_to = has_expected_to || time_msc == expected_to;
     }
-    return coverage.observed_from_msc <= expected_from && filtered_to >= expected_to;
+    return coverage.observed_from_msc <= expected_from &&
+           coverage.observed_to_msc >= expected_to && has_expected_from && has_expected_to;
+}
+
+/// \brief Compares the stable range evidence used by two rate observations.
+/// \param left First observation coverage.
+/// \param right Second observation coverage.
+/// \return True when both observations have the same immutable V1 evidence.
+bool same_rate_coverage(const Mt5RateCoverageV1 &left, const Mt5RateCoverageV1 &right) {
+    return left.version == right.version && left.state == right.state &&
+           left.requested_from_msc == right.requested_from_msc &&
+           left.requested_to_msc == right.requested_to_msc &&
+           left.observed_from_msc == right.observed_from_msc &&
+           left.observed_to_msc == right.observed_to_msc;
 }
 
 /// \brief Creates a UTC Python datetime from a Unix millisecond timestamp.
@@ -1793,12 +1818,20 @@ bool bootstrap_tick_history(const Mt5TicksRequest *request, int flags,
         }
         if (!probe_ok && !transient_failure)
             return false;
+        // CopyTicksFrom may return rows older than the requested anchor.  Such
+        // rows are not positive evidence that this probe reached its candidate.
+        std::vector<Mt5Tick> valid_probe;
+        valid_probe.reserve(probe.size());
+        for (const auto &tick : probe) {
+            if (tick.time_msc >= candidate)
+                valid_probe.push_back(tick);
+        }
         if (!probe_ok || partial) {
             if (diagnostics)
                 diagnostics->history_warmup_detected = 1;
             target_confirmation.reset();
             ++stalled;
-        } else if (probe.empty()) {
+        } else if (valid_probe.empty()) {
             // A clean empty response may move only the bounded search cursor.
             // It does not prove that the candidate is covered: MT5 can return
             // an empty page while its local history is still warming up.
@@ -1820,7 +1853,7 @@ bool bootstrap_tick_history(const Mt5TicksRequest *request, int flags,
             }
         } else {
             int64_t oldest = std::numeric_limits<int64_t>::max();
-            for (const auto &tick : probe)
+            for (const auto &tick : valid_probe)
                 oldest = std::min(oldest, tick.time_msc);
             confirmed_frontier = confirmed_frontier
                                      ? std::min(*confirmed_frontier, oldest)
@@ -3373,7 +3406,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
             return -1;
         }
         auto buffer = std::make_unique<Mt5RateBuffer>();
-        buffer->coverage.version = MT5BRIDGE_RATE_COVERAGE_VERSION;
+        buffer->coverage.version = MT5BRIDGE_RATE_COVERAGE_V1_VERSION;
         buffer->coverage.state = MT5_RATE_COVERAGE_UNPROVEN;
         buffer->coverage.requested_from_msc = request->from_msc;
         buffer->coverage.requested_to_msc = request->to_msc;
@@ -3382,6 +3415,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
         constexpr uint32_t kRateRecoveryFailures = 3;
         constexpr uint32_t kRateConfirmationProbes = 2;
         std::vector<Mt5Rate> candidate_values;
+        Mt5RateCoverageV1 candidate_coverage{};
         bool have_candidate = false;
         bool saw_values = false;
         uint32_t recovery_failures = 0;
@@ -3410,7 +3444,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                     return -1;
                 }
                 std::vector<Mt5Rate> filtered_values;
-                Mt5RateCoverage current_coverage = buffer->coverage;
+                Mt5RateCoverageV1 current_coverage = buffer->coverage;
                 if (!prepare_rate_observation(current_values, request, &filtered_values,
                                               &current_coverage)) {
                     buffer->diagnostics.status = MT5_FETCH_FATAL_ERROR;
@@ -3436,6 +3470,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                 saw_values = saw_values || !current_values.empty();
                 if (!have_candidate) {
                     candidate_values = std::move(filtered_values);
+                    candidate_coverage = current_coverage;
                     buffer->values = candidate_values;
                     buffer->coverage = current_coverage;
                     have_candidate = true;
@@ -3444,6 +3479,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                     continue;
                 }
                 const bool stable = candidate_values.size() == filtered_values.size() &&
+                    same_rate_coverage(candidate_coverage, current_coverage) &&
                     (filtered_values.empty() ||
                      std::memcmp(candidate_values.data(), filtered_values.data(),
                                  filtered_values.size() * sizeof(Mt5Rate)) == 0);
@@ -3462,6 +3498,7 @@ MT5BRIDGE_EXPORT int mt5bridge_query_rates(const Mt5RatesRequest *request,
                     return 0;
                 }
                 candidate_values = buffer->values;
+                candidate_coverage = buffer->coverage;
                 ++confirmation_probes;
                 if (confirmation_probes < kRateConfirmationProbes) {
                     ++buffer->diagnostics.retries;
@@ -3519,8 +3556,8 @@ MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_diagnostics(const Mt5RateBuffer *buff
     return 0;
 }
 
-MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_coverage(const Mt5RateBuffer *buffer,
-                                                    Mt5RateCoverage *coverage) {
+MT5BRIDGE_EXPORT int mt5bridge_rate_buffer_coverage_v1(const Mt5RateBuffer *buffer,
+                                                       Mt5RateCoverageV1 *coverage) {
     if (!buffer || !coverage)
         return -1;
     *coverage = buffer->coverage;

@@ -123,6 +123,9 @@ reason to add speculative wrappers or adapters.
 
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
+The rate data-plane extension is immutable V1 (`Mt5RateCoverageV1` and
+`mt5bridge_rate_buffer_coverage_v1`); strict C++ callers must opt into
+`Client::query_rates_range()` when they need explicitly best-effort rows.
 Trade identity, raw access, and reconciliation stages are specified in
 [trade-api.md](trade-api.md) and [ADR-0004](adr/0004-trade-reconciliation.md).
 The runtime-call admission and shutdown barrier are specified in

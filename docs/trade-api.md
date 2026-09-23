@@ -275,6 +275,25 @@ observation result for a later journal/admission layer; it does not call or
 authorize `order_send`. The full contract is recorded in
 [`docs/adr/0010-environment-consistency.md`](adr/0010-environment-consistency.md).
 
+## Caller-driven reconciliation worker
+
+`observation/worker.hpp` adds a small owner-loop seam above the coordinator.
+`ReconciliationWorker::step()` performs exactly one authoritative refresh and
+then evaluates the caller-supplied baseline and predicates. It returns both
+the accepted `ObservationSample` provenance and the pure
+`ReconciliationResult`, so a TradeManager can retain the graph revision that
+actually fed a decision. The worker does not create a thread, call Python
+outside the provider, invoke `order_send`, or retry a transport operation.
+
+`pending` and `not_observed` remain unresolved and can be followed by another
+owner-selected step; `confirmed`, `account_mismatch`, and `ambiguous` settle
+the worker and cause later `step()` calls to return the last cycle without a
+second refresh. This preserves the journal rule that a deadline is an
+observation result, not permission to resend an unresolved operation. Startup
+recovery still begins with `OperationJournal::recover_all()`; the recovered
+records and their immutable keys are then supplied to operation-specific
+workers rather than inferred from one broker result.
+
 ## Quickstart scenarios
 
 The runnable [`trade_observation_example.cpp`](../examples/trade_observation_example.cpp)

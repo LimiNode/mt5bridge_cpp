@@ -94,7 +94,7 @@ include/
     ├── trade.hpp
     ├── trade/observation.h
     ├── observation.hpp
-    ├── observation/{graph,coordinator,environment_consistency}.hpp
+    ├── observation/{graph,coordinator,environment_consistency,worker}.hpp
     ├── reconciliation/engine.hpp
     └── dispatch/{journal,file_journal_store}.hpp
 
@@ -146,6 +146,11 @@ The bounded cross-view environment policy is specified in
 observation batches for account continuity, direct identity-link conflicts,
 and a repeated stable evidence signature; it does not claim that MT5 supplied
 an atomic snapshot.
+Progressive deep tick synchronization is specified in
+[ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
+does not alter the fixed C data-plane ABI. The caller-driven reconciliation
+worker is specified in [ADR-0016](adr/0016-caller-driven-reconciliation-worker.md)
+and keeps operation recovery outside the runtime thread and side-effect API.
 The durable operation state machine and pre-side-effect barrier are specified
 in [ADR-0011](adr/0011-durable-dispatch-admission.md), while the concrete
 Windows file-backed store is specified in

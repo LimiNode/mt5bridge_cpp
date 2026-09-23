@@ -130,6 +130,10 @@ Trade identity, raw access, and reconciliation stages are specified in
 [trade-api.md](trade-api.md) and [ADR-0004](adr/0004-trade-reconciliation.md).
 The runtime-call admission and shutdown barrier are specified in
 [ADR-0005](adr/0005-runtime-call-admission.md).
+The private execution-lane scheduler is specified in
+[ADR-0018](adr/0018-execution-lane-fairness.md): trade-critical calls receive
+bounded priority over queued bulk market-data work without changing the public
+ABI or preempting an in-flight Python operation.
 The managed trade identity, close-obligation, scheduling, and exit-policy
 boundaries are specified in [ADR-0006](adr/0006-managed-trade-lifecycle.md).
 The read-only account-scoped evidence graph is specified in

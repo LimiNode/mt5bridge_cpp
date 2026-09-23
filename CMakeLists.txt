@@ -46,6 +46,13 @@ target_include_directories(mt5bridge_one_shot_backend PRIVATE
                            ${PROJECT_SOURCE_DIR}/src/runtime)
 add_library(mt5bridge::one_shot_backend ALIAS mt5bridge_one_shot_backend)
 
+# Private runtime admission lanes keep trade-critical calls from waiting
+# behind an unbounded queue of market-data work without changing the public ABI.
+add_library(mt5bridge_runtime_lane STATIC src/runtime/runtime_lane.cpp)
+target_include_directories(mt5bridge_runtime_lane PRIVATE
+                           ${PROJECT_SOURCE_DIR}/src/runtime)
+add_library(mt5bridge::runtime_lane ALIAS mt5bridge_runtime_lane)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -120,6 +127,13 @@ if(BUILD_TESTING)
                           mt5bridge::one_shot_backend)
     add_test(NAME mt5bridge_one_shot_backend
              COMMAND mt5bridge_one_shot_backend_test)
+    add_executable(mt5bridge_runtime_lane_test
+                   tests/runtime_lane_test.cpp)
+    target_include_directories(mt5bridge_runtime_lane_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/runtime)
+    target_link_libraries(mt5bridge_runtime_lane_test PRIVATE mt5bridge::runtime_lane)
+    add_test(NAME mt5bridge_runtime_lane
+             COMMAND mt5bridge_runtime_lane_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)
@@ -138,7 +152,7 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                                ${PROJECT_SOURCE_DIR}/include
                                ${PROJECT_SOURCE_DIR}/src/runtime)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
-    target_link_libraries(mt5_bridge PRIVATE Python3::Python)
+    target_link_libraries(mt5_bridge PRIVATE Python3::Python mt5bridge::runtime_lane)
     get_target_property(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
                         Python3::Python IMPORTED_LOCATION_RELEASE)
     if(NOT MT5BRIDGE_PYTHON_RUNTIME_RELEASE)

@@ -5,6 +5,7 @@
 #include <mt5bridge/market/data.h>
 #include <mt5bridge/trade/observation.h>
 #include "python_dispatch_transport.hpp"
+#include "runtime_lane.hpp"
 
 #ifndef PY_SSIZE_T_CLEAN
 #define PY_SSIZE_T_CLEAN
@@ -62,10 +63,14 @@ struct Mt5DealBuffer { std::vector<Mt5DealSnapshot> values; };
 
 namespace {
 
+using mt5bridge::runtime::RuntimeCallLane;
+using mt5bridge::runtime::RuntimeLane;
+
 std::mutex g_mutex;
 // Serializes calls into the embedded interpreter without extending the state mutex
 // across potentially slow MT5 IPC operations.
 std::mutex g_python_mutex;
+RuntimeLane g_runtime_lane;
 // Tracks admitted calls so shutdown can wait for them without extending the
 // lifecycle mutex across potentially slow MT5 IPC operations.
 std::size_t g_active_runtime_calls = 0;
@@ -176,7 +181,8 @@ void clear_error() { g_last_error.clear(); }
 /// reach zero before finalization.
 class RuntimeCallAdmission {
 public:
-    RuntimeCallAdmission() : python_lock_(g_python_mutex, std::defer_lock) {
+    explicit RuntimeCallAdmission(RuntimeCallLane lane = RuntimeCallLane::market_data)
+        : lane_(lane), python_lock_(g_python_mutex, std::defer_lock) {
         {
             std::unique_lock<std::mutex> state_lock(g_mutex);
             if (g_runtime_state != RuntimeState::running) {
@@ -189,6 +195,7 @@ public:
             counted_ = true;
         }
         try {
+            lane_permit_ = g_runtime_lane.acquire(lane_);
             python_lock_.lock();
             acquired_ = true;
         } catch (...) {
@@ -220,6 +227,8 @@ public:
     explicit operator bool() const noexcept { return acquired_; }
 
 private:
+    RuntimeCallLane lane_;
+    RuntimeLane::Permit lane_permit_;
     std::unique_lock<std::mutex> python_lock_;
     bool counted_ = false;
     bool acquired_ = false;
@@ -2593,7 +2602,7 @@ MT5BRIDGE_API int mt5bridge_account_info(Mt5AccountInfo *info) try {
         return -1;
     }
     *info = Mt5AccountInfo{};
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);
@@ -2627,7 +2636,7 @@ MT5BRIDGE_API int mt5bridge_symbol_capabilities(
         set_error("symbol request reserved fields must be zero");
         return -1;
     }
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);
@@ -2665,7 +2674,7 @@ MT5BRIDGE_API int mt5bridge_order_check(const Mt5OrderCheckRequest *request,
         set_error("valid order_check request and result are required");
         return -1;
     }
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);
@@ -2705,7 +2714,7 @@ MT5BRIDGE_API int mt5bridge_query_orders(const Mt5OrdersRequest *request,
     if (!valid_active_selector(request->symbol_utf8, request->group_utf8, request->ticket,
                                "orders_get"))
         return -1;
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);
@@ -2756,7 +2765,7 @@ MT5BRIDGE_API int mt5bridge_query_positions(const Mt5PositionsRequest *request,
     if (!valid_active_selector(request->symbol_utf8, request->group_utf8, request->ticket,
                                "positions_get"))
         return -1;
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);
@@ -2816,7 +2825,7 @@ MT5BRIDGE_API int mt5bridge_query_history_orders(const Mt5HistoryOrdersRequest *
     HistoryQueryRange query_range;
     if (!make_history_query_range(request->from_msc, request->to_msc, &query_range))
         return -1;
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);
@@ -2885,7 +2894,7 @@ MT5BRIDGE_API int mt5bridge_query_history_deals(const Mt5HistoryDealsRequest *re
     HistoryQueryRange query_range;
     if (!make_history_query_range(request->from_msc, request->to_msc, &query_range))
         return -1;
-    RuntimeCallAdmission call;
+    RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
     if (!call)
         return -1;
     GilScope gil(true);

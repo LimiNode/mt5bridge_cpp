@@ -78,10 +78,32 @@ int main(int argc, char **argv) {
                                   kRateLookback).count()) /
              rate_period_msc) *
             rate_period_msc;
-        const auto rates = bridge.query_rates_range(symbol, 1, rate_from_msc, rate_to_msc);
-        print_diagnostics("rates", rates.diagnostics);
-        std::cout << "rates_count=" << rates.values.size() << '\n';
-        require_complete("rates", rates.values.size(), rates.diagnostics);
+        const auto rate_probe = bridge.query_rates_range(symbol, 1, rate_from_msc, rate_to_msc);
+        print_diagnostics("rates_probe", rate_probe.diagnostics);
+        if (rate_probe.values.empty())
+            throw std::runtime_error("rates probe returned no available bars");
+
+        // A weekend/holiday may leave the requested wall-clock endpoint
+        // between sessions.  First discover the actual available bar span,
+        // then apply the strict completeness contract to that observed span.
+        std::int64_t actual_from_msc = rate_probe.values.front().time * 1000;
+        std::int64_t actual_to_msc = actual_from_msc;
+        for (const auto &rate : rate_probe.values) {
+            const auto time_msc = rate.time * 1000;
+            if (time_msc < actual_from_msc)
+                actual_from_msc = time_msc;
+            if (time_msc > actual_to_msc)
+                actual_to_msc = time_msc;
+        }
+        Mt5FetchDiagnostics rate_diagnostics{};
+        Mt5RateCoverageV1 rate_coverage{};
+        const auto rates = bridge.copy_rates_range(symbol, 1, actual_from_msc, actual_to_msc,
+                                                   &rate_diagnostics, &rate_coverage);
+        print_diagnostics("rates", rate_diagnostics);
+        std::cout << "rates_count=" << rates.size()
+                  << " from_msc=" << actual_from_msc
+                  << " to_msc=" << actual_to_msc << '\n';
+        require_complete("rates", rates.size(), rate_diagnostics);
 
         bridge.shutdown();
         return 0;

@@ -1444,6 +1444,16 @@ constexpr int kTickPageSize = 65536;
 constexpr uint32_t kShortPageProbes = 2;
 /// \brief Maximum number of partial pages accepted while recovering history.
 constexpr uint32_t kPartialPageLimit = 3;
+/// \brief Minimum requested range that activates progressive history bootstrap.
+constexpr int64_t kTickBootstrapTriggerMs = 30LL * 24LL * 60LL * 60LL * 1000LL;
+/// \brief Initial backward step used by progressive history synchronization probes.
+constexpr int64_t kTickBootstrapInitialStepMs = 366LL * 24LL * 60LL * 60LL * 1000LL;
+/// \brief Smallest backward step used after a probe reports no frontier movement.
+constexpr int64_t kTickBootstrapMinimumStepMs = 30LL * 24LL * 60LL * 60LL * 1000LL;
+/// \brief Maximum number of synchronization probes in one historical query.
+constexpr uint32_t kTickBootstrapProbeLimit = 16;
+/// \brief Consecutive stalled probes allowed at the smallest adaptive step.
+constexpr uint32_t kTickBootstrapNoProgressLimit = 3;
 /// \brief Hard per-epoch tick budget preventing unbounded realtime catch-up allocations.
 constexpr std::size_t kRealtimeEpochTickLimit = 1000000;
 constexpr std::size_t kRealtimeMaxRetainedTicks = 1000000;
@@ -1598,6 +1608,86 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
     return false;
 }
 
+/// \brief Progressively warms a deep tick-history request before pagination.
+/// \param mt5 Borrowed MetaTrader5 module under the Python GIL.
+/// \param request Symbol and inclusive historical range.
+/// \param flags Effective COPY_TICKS_* filter.
+/// \param[in,out] diagnostics Recovery counters to update.
+/// \return True when the requested frontier was probed or no bootstrap is needed.
+/// \note Probe rows are deliberately discarded; the normal lossless paginator remains
+/// authoritative for the returned range and its exact boundary multiplicity.
+/// \warning The bounded probe budget fails closed when the terminal keeps returning the
+/// same oldest observable tick without moving the synchronization frontier.
+bool bootstrap_tick_history(PyObject *mt5, const Mt5TicksRequest *request, int flags,
+                            Mt5FetchDiagnostics *diagnostics) {
+    if (!request || request->to_msc - request->from_msc < kTickBootstrapTriggerMs)
+        return true;
+
+    const auto now = std::chrono::system_clock::now();
+    const auto now_msc = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+    int64_t frontier = std::min(request->to_msc, static_cast<int64_t>(now_msc));
+    if (frontier <= request->from_msc)
+        return true;
+
+    int64_t step = kTickBootstrapInitialStepMs;
+    uint32_t stalled = 0;
+    for (uint32_t probe_no = 0; probe_no < kTickBootstrapProbeLimit; ++probe_no) {
+        if (frontier <= request->from_msc)
+            return true;
+        const int64_t distance = frontier - request->from_msc;
+        const int64_t effective_step = std::min(step, distance);
+        const int64_t candidate = frontier - effective_step;
+        std::vector<Mt5Tick> probe;
+        bool partial = false;
+        if (diagnostics)
+            diagnostics->history_warmup_detected = 1;
+        if (!copy_ticks_page(mt5, request->symbol_utf8, candidate, flags, 1, &probe,
+                             diagnostics, &partial))
+            return false;
+        if (partial) {
+            ++stalled;
+        } else if (probe.empty()) {
+            ++stalled;
+        } else {
+            int64_t oldest = std::numeric_limits<int64_t>::max();
+            for (const auto &tick : probe)
+                oldest = std::min(oldest, tick.time_msc);
+            if (oldest < frontier) {
+                frontier = oldest;
+                stalled = 0;
+                if (step < kTickBootstrapInitialStepMs) {
+                    const int64_t doubled = step > kTickBootstrapInitialStepMs / 2
+                                                ? kTickBootstrapInitialStepMs
+                                                : step * 2;
+                    step = std::min(kTickBootstrapInitialStepMs, doubled);
+                }
+                continue;
+            }
+
+            // A successful probe at the exact requested anchor is enough to
+            // initiate synchronization there.  The lossless paginator below
+            // still decides whether the range is complete or partial.
+            if (candidate == request->from_msc)
+                return true;
+            ++stalled;
+        }
+
+        if (step > kTickBootstrapMinimumStepMs) {
+            step = std::max(kTickBootstrapMinimumStepMs, step / 2);
+            stalled = 0;
+        }
+        if (step == kTickBootstrapMinimumStepMs && stalled >= kTickBootstrapNoProgressLimit) {
+            set_error("MetaTrader tick history bootstrap made no progress");
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50u));
+    }
+
+    set_error("MetaTrader tick history bootstrap probe budget exhausted");
+    return false;
+}
+
 /// \brief Visits an inclusive tick range using lossless, bounded pagination.
 /// \tparam Consumer Callable accepting `(const Mt5Tick*, size_t)` and returning int.
 /// \param request Symbol, inclusive range, and tick flags.
@@ -1619,6 +1709,8 @@ bool visit_ticks_range(const Mt5TicksRequest *request, Mt5FetchDiagnostics *diag
             return false;
         }
         flags = resolve_tick_flags(mt5.get(), request->flags);
+        if (!bootstrap_tick_history(mt5.get(), request, flags, diagnostics))
+            return false;
     }
 
     int64_t cursor_msc = request->from_msc;

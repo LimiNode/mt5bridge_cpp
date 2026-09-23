@@ -62,6 +62,16 @@ the Python/GIL and runtime-mutex critical sections, so a consumer does not need
 to retain a year-sized NumPy allocation in the DLL. Callbacks may return
 non-zero to cancel delivery and may call another bridge operation; shutting
 the bridge down from a callback cancels the outer traversal on its next page.
+A request spanning at least thirty days first runs a bounded progressive
+bootstrap. The bridge issues one-row synchronization probes from a recent
+frontier toward the requested start, initially stepping back 366 days and
+halving the step down to a 30-day floor when the oldest observed tick does not
+move. At most sixteen probes are issued; three consecutive stalled probes at
+the minimum step fail closed with a bootstrap diagnostic. Probe rows are
+discarded and are never mixed into the result: the normal inclusive paginator
+still proves exact range coverage, boundary multiplicity, and completion.
+A successful probe at the requested anchor is only a synchronization request,
+not proof that the entire history is present.
 A non-empty page accompanied by a transient history status (including 4403) is
 provisional: it is neither delivered nor used to advance the cursor. The next
 attempt replays the same inclusive boundary until a clean page arrives or the

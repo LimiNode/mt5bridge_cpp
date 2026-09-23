@@ -20,6 +20,7 @@ import unittest
 from collections import namedtuple
 from ctypes import POINTER, Structure, byref, c_char_p, c_double, c_int, c_int32
 from ctypes import c_int64, c_size_t, c_uint32, c_uint64, c_void_p
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -170,6 +171,11 @@ def page(start: int, count: int) -> np.ndarray:
     values["volume_real"] = values["volume"] / 10.0
     values["flags"] = 1
     return values
+
+
+def epoch_msc(year: int, month: int = 1, day: int = 1) -> int:
+    """Returns a UTC date as Unix milliseconds for deep-history scenarios."""
+    return int(datetime(year, month, day, tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def page_with_tail() -> np.ndarray:
@@ -632,12 +638,12 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertIsNone(payload["raw_result"])
 
     def query(
-        self, fake: types.ModuleType
+        self, fake: types.ModuleType, from_msc: int = 1000, to_msc: int = 3000
     ) -> tuple[int, int, Mt5FetchDiagnostics, str]:
         """Runs one tick query and returns status, size, diagnostics, and error."""
         sys.modules["MetaTrader5"] = fake
         self.assertEqual(self.module.mt5bridge_initialize(None), 0)
-        request = Mt5TicksRequest(b"EURUSD", 1000, 3000, 0)
+        request = Mt5TicksRequest(b"EURUSD", from_msc, to_msc, 0)
         result = c_void_p()
         status = self.module.mt5bridge_query_ticks(byref(request), byref(result))
         diagnostics = Mt5FetchDiagnostics()
@@ -651,6 +657,50 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         error = self.last_error()
         self.module.mt5bridge_shutdown()
         return status, size, diagnostics, error
+
+    def test_progressive_bootstrap_moves_frontier_before_pagination(self) -> None:
+        """Deep history is warmed in bounded backward probes before one full read."""
+        years = [
+            epoch_msc(2022),
+            epoch_msc(2023),
+            epoch_msc(2024),
+            epoch_msc(2025),
+        ]
+        values = page(years[0], len(years))
+        values["time_msc"] = years
+        values["time"] = values["time_msc"] // 1000
+        fake = fake_module([], histories={"EURUSD": values})
+        status, size, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertEqual(status, 0, error)
+        self.assertEqual(size, len(years))
+        self.assertTrue(diagnostics.history_warmup_detected)
+        self.assertGreater(fake.request_starts[0], years[2])
+        self.assertLess(fake.request_starts[0], years[3])
+        self.assertEqual(fake.request_starts[1], years[2])
+        self.assertGreater(fake.request_starts[2], years[0])
+        self.assertLess(fake.request_starts[2], years[1])
+        self.assertEqual(fake.request_starts[3], years[0])
+        self.assertEqual(fake.request_counts[:4], [1, 1, 1, 1])
+
+    def test_progressive_bootstrap_fails_closed_on_stalled_frontier(self) -> None:
+        """Repeatedly observing the same oldest tick exhausts a bounded budget."""
+        oldest = epoch_msc(2025)
+        values = page(oldest, 1)
+        values["time_msc"] = (oldest,)
+        values["time"] = values["time_msc"] // 1000
+        fake = fake_module([], histories={"EURUSD": values})
+        status, _, diagnostics, error = self.query(
+            fake, epoch_msc(2022), epoch_msc(2026)
+        )
+        self.assertNotEqual(status, 0)
+        self.assertIn("bootstrap", error.lower())
+        self.assertEqual(diagnostics.status, 2)
+        self.assertTrue(diagnostics.history_warmup_detected)
+        self.assertLessEqual(fake.calls, 8)
+        self.assertEqual(fake.request_counts[0], 1)
+        self.assertTrue(all(count == 1 for count in fake.request_counts))
 
     def query_rates(
         self, fake: types.ModuleType

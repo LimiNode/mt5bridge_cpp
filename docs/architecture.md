@@ -198,6 +198,15 @@ a live terminal. If that test is unstable, the supported contract becomes one
 embedded-runtime lifetime per process, or the runtime moves to a restartable
 worker process.
 
+## Maintenance backlog
+
+- **Windows handle RAII cleanup:** add one private `UniqueHandle` wrapper for
+  `INVALID_HANDLE_VALUE`-based `HANDLE` ownership, then use it in
+  `WindowsFileJournalStore` lock, read, and write paths. Preserve the current
+  status-bearing errors and atomic replacement behavior; add focused failure
+  tests for open/read/write cleanup. This is an implementation cleanup only:
+  it must not change the C ABI, journal format, or recovery semantics.
+
 ## Migration path
 
 1. Keep the current embedded-Python backend as the release path.

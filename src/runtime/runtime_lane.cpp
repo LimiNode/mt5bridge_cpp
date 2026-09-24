@@ -54,8 +54,15 @@ RuntimeLane::Permit RuntimeLane::acquire(RuntimeCallLane lane) {
     --waiters;
     occupied_ = true;
     if (lane == RuntimeCallLane::trade_critical) {
-        if (consecutive_trade_grants_ < trade_burst_limit_)
-            ++consecutive_trade_grants_;
+        // Only grants made while market data was waiting consume the bounded
+        // trade burst.  Uncontended trade calls must not leave stale priority
+        // debt that penalizes the next market-data waiter.
+        if (waiting_market_data_ != 0) {
+            if (consecutive_trade_grants_ < trade_burst_limit_)
+                ++consecutive_trade_grants_;
+        } else {
+            consecutive_trade_grants_ = 0;
+        }
     } else {
         consecutive_trade_grants_ = 0;
     }

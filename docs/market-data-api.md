@@ -154,6 +154,11 @@ Each epoch has a hard one-million-tick safety budget and publishes catch-up in
 `max_batch * ring_capacity` is bounded to one million retained ticks, so the
 ring capacity is bounded by both batch count and payload size. If the budget or pagination proof is exhausted, the
 source remains `RECONNECTING` instead of claiming `READY`.
+Each physical realtime page is one bounded `market_data` admission. The bridge
+copies that page into native tick records and releases the interpreter and lane
+before doing C++ boundary/multiplicity work or acquiring the next page, so a
+long catch-up epoch cannot monopolize the runtime lane. The forward and tail
+passes share one `now_msc` snapshot captured at epoch start.
 Reconciliation compares complete tick payload multiplicities and reports
 rewrites or disappeared records in diagnostics. A non-empty page accompanied
 by an MT5 timeout/IPC status is retained for reconciliation but is not published

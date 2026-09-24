@@ -22,6 +22,12 @@ can be starved by an unbounded queue.
 The scheduler is deliberately non-preemptive: a market-data call already
 inside a Python/MT5 operation is allowed to finish. Individual pagination and
 bootstrap probes therefore remain the unit of admission and must stay bounded.
+Realtime catch-up follows the same rule for every physical
+`copy_ticks_from()` page: the page is copied into native POD storage, then the
+GIL, interpreter mutex, and market-data lane are released before C++ performs
+boundary and multiplicity processing or requests the next page. A single
+`now_msc` snapshot still bounds both forward and overlap passes in one poll
+epoch.
 The lane is private implementation state and does not change the C ABI or the
 public C++ client surface.
 

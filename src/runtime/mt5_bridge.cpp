@@ -1791,6 +1791,66 @@ bool copy_ticks_page(PyObject *mt5, const char *symbol, int64_t from_msc, int fl
     return false;
 }
 
+/// \struct RealtimePageRead
+/// \brief Owns one bounded realtime page copied out of Python.
+struct RealtimePageRead {
+    std::vector<Mt5Tick> values;
+    int error_code = 1;
+    bool ok = false;
+    bool partial = false;
+    bool fatal = false;
+    bool reconnected = false;
+};
+
+/// \brief Reads one realtime page under one short market-data admission.
+/// \param symbol Symbol requested from MetaTrader.
+/// \param from_msc Inclusive page anchor in Unix milliseconds.
+/// \param count Maximum number of physical ticks to request.
+/// \param flags Effective COPY_TICKS_* mask.
+/// \return POD page result; Python objects never leave this function.
+RealtimePageRead read_realtime_page(const std::string &symbol, int64_t from_msc, int count,
+                                    uint32_t flags) {
+    RealtimePageRead result;
+    RuntimeCallAdmission call;
+    if (!call) {
+        result.error_code = 0;
+        return result;
+    }
+    GilScope gil(true);
+    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+    if (!mt5) {
+        PyErr_Clear();
+        result.error_code = 0;
+        result.fatal = true;
+        return result;
+    }
+    PyRef from(make_datetime(from_msc));
+    PyRef ticks(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
+                                           symbol.c_str(), from.get(), count,
+                                           static_cast<int>(flags))
+                     : nullptr);
+    if (!ticks || ticks.get() == Py_None) {
+        PyErr_Clear();
+        result.error_code = mt5_last_error_code(mt5.get());
+        result.partial = is_transient_read_error(result.error_code);
+        if (is_ipc_error(result.error_code) && reinitialize_terminal(mt5.get()))
+            result.reconnected = true;
+        return result;
+    }
+    if (!copy_ticks_array(ticks.get(), &result.values)) {
+        PyErr_Clear();
+        result.error_code = 0;
+        result.fatal = true;
+        return result;
+    }
+    result.error_code = mt5_last_error_code(mt5.get());
+    result.partial = is_partial_read_error(result.error_code);
+    if (is_ipc_error(result.error_code) && reinitialize_terminal(mt5.get()))
+        result.reconnected = true;
+    result.ok = true;
+    return result;
+}
+
 /// \brief Progressively warms a deep tick-history request before pagination.
 /// \param request Symbol and inclusive historical range.
 /// \param flags Effective COPY_TICKS_* filter.
@@ -2220,226 +2280,229 @@ void realtime_poller() try {
             bool forward_complete = false;
             std::vector<Mt5Tick> forward_boundary;
             const auto poll_started = std::chrono::steady_clock::now();
-            {
-                RuntimeCallAdmission call;
-                if (!call) {
+            const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<
+                std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+            int64_t page_from = cursor >= 0 ? cursor :
+                (source->initial_from_msc >= 0 ? source->initial_from_msc
+                                               : std::max<int64_t>(0, now_msc - static_cast<int64_t>(interval) * 4));
+            std::unordered_map<std::string, std::size_t> consumed_boundary;
+            for (const auto &tick : boundary_snapshot)
+                ++consumed_boundary[tick_payload_key(tick)];
+            std::size_t consumed_boundary_count = boundary_snapshot.size();
+            std::vector<Mt5Tick> boundary_records = boundary_snapshot;
+            const uint32_t physical_page_size = std::max<uint32_t>(1024u, max_batch);
+            for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
+                const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
+                    consumed_boundary_count;
+                const int count = static_cast<int>(std::min<uint64_t>(requested,
+                    static_cast<uint64_t>(std::numeric_limits<int>::max())));
+                RealtimePageRead read = read_realtime_page(symbol, page_from, count, flags);
+                error_code = read.error_code;
+                reconnected = reconnected || read.reconnected;
+                if (read.fatal) {
                     ok = false;
-                    error_code = 0;
-                } else {
-                    GilScope gil(true);
-                    PyRef mt5(PyImport_ImportModule("MetaTrader5"));
-                    if (!mt5) {
-                        PyErr_Clear(); ok = false; fatal = true; error_code = 0;
-                    } else {
-                        const int64_t now_msc = static_cast<int64_t>(std::chrono::duration_cast<
-                            std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                        int64_t page_from = cursor >= 0 ? cursor :
-                            (source->initial_from_msc >= 0 ? source->initial_from_msc
-                                                           : std::max<int64_t>(0, now_msc - static_cast<int64_t>(interval) * 4));
-                        std::unordered_map<std::string, std::size_t> consumed_boundary;
-                        for (const auto &tick : boundary_snapshot)
-                            ++consumed_boundary[tick_payload_key(tick)];
-                        std::size_t consumed_boundary_count = boundary_snapshot.size();
-                        std::vector<Mt5Tick> boundary_records = boundary_snapshot;
-                        const uint32_t physical_page_size = std::max<uint32_t>(1024u, max_batch);
-                        for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
-                            const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
-                                consumed_boundary_count;
-                            const int count = static_cast<int>(std::min<uint64_t>(requested,
-                                static_cast<uint64_t>(std::numeric_limits<int>::max())));
-                            PyRef from(make_datetime(page_from));
-                            PyRef ticks(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
-                                symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
-                            if (!ticks || ticks.get() == Py_None) {
-                                PyErr_Clear(); error_code = mt5_last_error_code(mt5.get());
-                                failure_code = error_code;
-                                partial = is_transient_read_error(error_code);
-                                upstream_partial = partial;
-                                ok = false; break;
-                            }
-                            std::vector<Mt5Tick> page;
-                            if (!copy_ticks_array(ticks.get(), &page)) { PyErr_Clear(); ok = false; fatal = true; error_code = 0; failure_code = 0; break; }
-                            error_code = mt5_last_error_code(mt5.get());
-                            if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
-                            if (is_partial_read_error(error_code)) partial = true;
-                            if (page.empty()) { forward_complete = true; break; }
-                            // copy_ticks_from() has no upper time bound.  Rows
-                            // newer than this poll's snapshot may therefore be
-                            // present in the response, but they must not advance
-                            // the committed cursor.
-                            bool saw_after_snapshot = false;
-                            int64_t last_ts = page_from - 1;
-                            for (const auto &tick : page) {
-                                if (tick.time_msc > now_msc) {
-                                    saw_after_snapshot = true;
-                                    continue;
-                                }
-                                if (tick.time_msc >= page_from)
-                                    last_ts = std::max(last_ts, tick.time_msc);
-                            }
-                            // Keep the persistent boundary immutable while this
-                            // page is matched.  Only the temporary copy is
-                            // decremented; otherwise repeated inclusive reads
-                            // lose the original multiplicities.
-                            auto remaining_consumed = consumed_boundary;
-                            std::unordered_map<std::string, std::size_t> new_boundary;
-                            std::size_t new_boundary_count = 0;
-                            std::vector<Mt5Tick> new_boundary_records;
-                            for (const auto &tick : page) {
-                                if (tick.time_msc < page_from || tick.time_msc > now_msc) continue;
-                                if (tick.time_msc == page_from) {
-                                    const auto key = tick_payload_key(tick);
-                                    auto it = remaining_consumed.find(key);
-                                    if (it != remaining_consumed.end() && it->second != 0) {
-                                        --it->second;
-                                        continue;
-                                    }
-                                    // Retain only the current timestamp as the
-                                    // next boundary.  A late insert at the old
-                                    // timestamp is delivered but must not be
-                                    // mixed with a newer boundary.
-                                    if (last_ts == page_from) {
-                                        ++new_boundary[key];
-                                        ++new_boundary_count;
-                                        new_boundary_records.push_back(tick);
-                                    }
-                                } else if (tick.time_msc == last_ts) {
-                                    ++new_boundary[tick_payload_key(tick)];
-                                    ++new_boundary_count;
-                                    new_boundary_records.push_back(tick);
-                                }
-                                forward.push_back(tick);
-                                if (forward.size() >= kRealtimeEpochTickLimit) {
-                                    partial = true;
-                                    budget_exhausted = true;
-                                    break;
-                                }
-                            }
-                            if (forward.size() >= kRealtimeEpochTickLimit) break;
-                            if (last_ts < page_from) {
-                                if (saw_after_snapshot)
-                                    forward_complete = true;
-                                break;
-                            }
-                            if (last_ts == page_from && new_boundary_count == 0) {
-                                // The inclusive boundary has been fully consumed;
-                                // a full page with no new payload multiplicity is
-                                // a successful end of traversal, not a partial
-                                // recovery state.
-                                forward_complete = true;
-                                break;
-                            }
-                            const bool stayed_on_boundary = last_ts == page_from;
-                            if (stayed_on_boundary) {
-                                consumed_boundary_count += new_boundary_count;
-                                for (const auto &entry : new_boundary)
-                                    consumed_boundary[entry.first] += entry.second;
-                                boundary_records.insert(boundary_records.end(),
-                                    new_boundary_records.begin(), new_boundary_records.end());
-                            } else {
-                                page_from = last_ts;
-                                consumed_boundary = std::move(new_boundary);
-                                consumed_boundary_count = new_boundary_count;
-                                boundary_records = std::move(new_boundary_records);
-                            }
-                            if (saw_after_snapshot || page.size() < static_cast<std::size_t>(count)) {
-                                forward_complete = true;
-                                break;
-                            }
-                        }
-                        forward_boundary = std::move(boundary_records);
-                        const int64_t overlap_from = std::max<int64_t>(
-                            source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
-                        int64_t tail_from = overlap_from;
-                        std::unordered_map<std::string, std::size_t> tail_boundary;
-                        std::size_t tail_boundary_count = 0;
-                        for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
-                            const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
-                                tail_boundary_count;
-                            const int count = static_cast<int>(std::min<uint64_t>(requested,
-                                static_cast<uint64_t>(std::numeric_limits<int>::max())));
-                            PyRef from(make_datetime(tail_from));
-                            PyRef tail(from ? PyObject_CallMethod(mt5.get(), "copy_ticks_from", "sOii",
-                                symbol.c_str(), from.get(), count, static_cast<int>(flags)) : nullptr);
-                            if (!tail || tail.get() == Py_None) {
-                                PyErr_Clear();
-                                error_code = mt5_last_error_code(mt5.get());
-                                failure_code = error_code;
-                                partial = is_transient_read_error(error_code);
-                                upstream_partial = upstream_partial || partial;
-                                ok = false;
-                                break;
-                            }
-                            std::vector<Mt5Tick> page;
-                            if (!copy_ticks_array(tail.get(), &page)) { PyErr_Clear(); ok = false; fatal = true; error_code = 0; failure_code = 0; break; }
-                            error_code = mt5_last_error_code(mt5.get());
-                            if (error_code != 1 && is_transient_read_error(error_code)) { failure_code = error_code; upstream_partial = true; }
-                            if (is_partial_read_error(error_code)) partial = true;
-                            if (page.empty()) { reconcile_complete = true; break; }
-                            const int64_t last_ts = page.back().time_msc;
-                            auto remaining_boundary = tail_boundary;
-                            std::unordered_map<std::string, std::size_t> next_boundary;
-                            std::size_t next_boundary_count = 0;
-                            bool delivered_new_boundary = false;
-                            for (const auto &tick : page) {
-                                if (tick.time_msc < overlap_from || tick.time_msc > now_msc) continue;
-                                if (tick.time_msc < tail_from) continue;
-                                if (tick.time_msc == tail_from) {
-                                    const auto key = tick_payload_key(tick);
-                                    auto it = remaining_boundary.find(key);
-                                    if (it != remaining_boundary.end() && it->second != 0) {
-                                        --it->second;
-                                        continue;
-                                    }
-                                    if (last_ts == tail_from) {
-                                        ++next_boundary[key];
-                                        ++next_boundary_count;
-                                        delivered_new_boundary = true;
-                                    }
-                                } else if (tick.time_msc == last_ts) {
-                                    ++next_boundary[tick_payload_key(tick)];
-                                    ++next_boundary_count;
-                                    delivered_new_boundary = true;
-                                }
-                                reconcile.push_back(tick);
-                                if (reconcile.size() >= kRealtimeEpochTickLimit) {
-                                    partial = true;
-                                    budget_exhausted = true;
-                                    break;
-                                }
-                            }
-                            if (reconcile.size() >= kRealtimeEpochTickLimit)
-                                break;
-                            if (last_ts < tail_from) {
-                                partial = true;
-                                upstream_partial = true;
-                                reconcile_complete = false;
-                                break;
-                            }
-                            if (last_ts == tail_from && !delivered_new_boundary) {
-                                // The inclusive boundary has been completely
-                                // consumed; there is no further page to seek.
-                                reconcile_complete = true;
-                                break;
-                            }
-                            const bool stayed_on_boundary = last_ts == tail_from;
-                            if (stayed_on_boundary) {
-                                tail_boundary_count += next_boundary_count;
-                                for (const auto &entry : next_boundary)
-                                    tail_boundary[entry.first] += entry.second;
-                            } else {
-                                tail_from = last_ts;
-                                tail_boundary = std::move(next_boundary);
-                                tail_boundary_count = next_boundary_count;
-                            }
-                            if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
-                                reconcile_complete = true;
-                                break;
-                            }
-                        }
-                        if (is_ipc_error(failure_code) && reinitialize_terminal(mt5.get()))
-                            reconnected = true;
+                    fatal = true;
+                    failure_code = 0;
+                    break;
+                }
+                if (!read.ok) {
+                    failure_code = error_code;
+                    partial = read.partial;
+                    upstream_partial = upstream_partial || partial;
+                    ok = false;
+                    break;
+                }
+                std::vector<Mt5Tick> page = std::move(read.values);
+                if (error_code != 1 && is_transient_read_error(error_code)) {
+                    failure_code = error_code;
+                    upstream_partial = true;
+                }
+                if (read.partial)
+                    partial = true;
+                if (page.empty()) {
+                    forward_complete = true;
+                    break;
+                }
+                // copy_ticks_from() has no upper time bound. Rows newer than
+                // this poll's snapshot must not advance the committed cursor.
+                bool saw_after_snapshot = false;
+                int64_t last_ts = page_from - 1;
+                for (const auto &tick : page) {
+                    if (tick.time_msc > now_msc) {
+                        saw_after_snapshot = true;
+                        continue;
                     }
+                    if (tick.time_msc >= page_from)
+                        last_ts = std::max(last_ts, tick.time_msc);
+                }
+                // Keep the persistent boundary immutable while this page is
+                // matched. Only the temporary copy is decremented; otherwise
+                // repeated inclusive reads lose the original multiplicities.
+                auto remaining_consumed = consumed_boundary;
+                std::unordered_map<std::string, std::size_t> new_boundary;
+                std::size_t new_boundary_count = 0;
+                std::vector<Mt5Tick> new_boundary_records;
+                for (const auto &tick : page) {
+                    if (tick.time_msc < page_from || tick.time_msc > now_msc)
+                        continue;
+                    if (tick.time_msc == page_from) {
+                        const auto key = tick_payload_key(tick);
+                        auto it = remaining_consumed.find(key);
+                        if (it != remaining_consumed.end() && it->second != 0) {
+                            --it->second;
+                            continue;
+                        }
+                        // Retain only the current timestamp as the next
+                        // boundary. A late insert at the old timestamp is
+                        // delivered but must not be mixed with a newer one.
+                        if (last_ts == page_from) {
+                            ++new_boundary[key];
+                            ++new_boundary_count;
+                            new_boundary_records.push_back(tick);
+                        }
+                    } else if (tick.time_msc == last_ts) {
+                        ++new_boundary[tick_payload_key(tick)];
+                        ++new_boundary_count;
+                        new_boundary_records.push_back(tick);
+                    }
+                    forward.push_back(tick);
+                    if (forward.size() >= kRealtimeEpochTickLimit) {
+                        partial = true;
+                        budget_exhausted = true;
+                        break;
+                    }
+                }
+                if (forward.size() >= kRealtimeEpochTickLimit)
+                    break;
+                if (last_ts < page_from) {
+                    if (saw_after_snapshot)
+                        forward_complete = true;
+                    break;
+                }
+                if (last_ts == page_from && new_boundary_count == 0) {
+                    // The inclusive boundary has been fully consumed; a full
+                    // page with no new payload multiplicity is a successful
+                    // end of traversal, not a partial recovery state.
+                    forward_complete = true;
+                    break;
+                }
+                const bool stayed_on_boundary = last_ts == page_from;
+                if (stayed_on_boundary) {
+                    consumed_boundary_count += new_boundary_count;
+                    for (const auto &entry : new_boundary)
+                        consumed_boundary[entry.first] += entry.second;
+                    boundary_records.insert(boundary_records.end(),
+                        new_boundary_records.begin(), new_boundary_records.end());
+                } else {
+                    page_from = last_ts;
+                    consumed_boundary = std::move(new_boundary);
+                    consumed_boundary_count = new_boundary_count;
+                    boundary_records = std::move(new_boundary_records);
+                }
+                if (saw_after_snapshot || page.size() < static_cast<std::size_t>(count)) {
+                    forward_complete = true;
+                    break;
+                }
+            }
+            forward_boundary = std::move(boundary_records);
+            const int64_t overlap_from = std::max<int64_t>(
+                source->initial_from_msc, std::max<int64_t>(0, now_msc - overlap_ms));
+            int64_t tail_from = overlap_from;
+            std::unordered_map<std::string, std::size_t> tail_boundary;
+            std::size_t tail_boundary_count = 0;
+            for (uint32_t page_no = 0; page_no < 100000u; ++page_no) {
+                const uint64_t requested = static_cast<uint64_t>(physical_page_size) +
+                    tail_boundary_count;
+                const int count = static_cast<int>(std::min<uint64_t>(requested,
+                    static_cast<uint64_t>(std::numeric_limits<int>::max())));
+                RealtimePageRead read = read_realtime_page(symbol, tail_from, count, flags);
+                error_code = read.error_code;
+                reconnected = reconnected || read.reconnected;
+                if (read.fatal) {
+                    ok = false;
+                    fatal = true;
+                    failure_code = 0;
+                    break;
+                }
+                if (!read.ok) {
+                    failure_code = error_code;
+                    partial = read.partial;
+                    upstream_partial = upstream_partial || partial;
+                    ok = false;
+                    break;
+                }
+                std::vector<Mt5Tick> page = std::move(read.values);
+                if (error_code != 1 && is_transient_read_error(error_code)) {
+                    failure_code = error_code;
+                    upstream_partial = true;
+                }
+                if (read.partial)
+                    partial = true;
+                if (page.empty()) {
+                    reconcile_complete = true;
+                    break;
+                }
+                const int64_t last_ts = page.back().time_msc;
+                auto remaining_boundary = tail_boundary;
+                std::unordered_map<std::string, std::size_t> next_boundary;
+                std::size_t next_boundary_count = 0;
+                bool delivered_new_boundary = false;
+                for (const auto &tick : page) {
+                    if (tick.time_msc < overlap_from || tick.time_msc > now_msc)
+                        continue;
+                    if (tick.time_msc < tail_from)
+                        continue;
+                    if (tick.time_msc == tail_from) {
+                        const auto key = tick_payload_key(tick);
+                        auto it = remaining_boundary.find(key);
+                        if (it != remaining_boundary.end() && it->second != 0) {
+                            --it->second;
+                            continue;
+                        }
+                        if (last_ts == tail_from) {
+                            ++next_boundary[key];
+                            ++next_boundary_count;
+                            delivered_new_boundary = true;
+                        }
+                    } else if (tick.time_msc == last_ts) {
+                        ++next_boundary[tick_payload_key(tick)];
+                        ++next_boundary_count;
+                        delivered_new_boundary = true;
+                    }
+                    reconcile.push_back(tick);
+                    if (reconcile.size() >= kRealtimeEpochTickLimit) {
+                        partial = true;
+                        budget_exhausted = true;
+                        break;
+                    }
+                }
+                if (reconcile.size() >= kRealtimeEpochTickLimit)
+                    break;
+                if (last_ts < tail_from) {
+                    partial = true;
+                    upstream_partial = true;
+                    reconcile_complete = false;
+                    break;
+                }
+                if (last_ts == tail_from && !delivered_new_boundary) {
+                    // The inclusive boundary has been completely consumed;
+                    // there is no further page to seek.
+                    reconcile_complete = true;
+                    break;
+                }
+                const bool stayed_on_boundary = last_ts == tail_from;
+                if (stayed_on_boundary) {
+                    tail_boundary_count += next_boundary_count;
+                    for (const auto &entry : next_boundary)
+                        tail_boundary[entry.first] += entry.second;
+                } else {
+                    tail_from = last_ts;
+                    tail_boundary = std::move(next_boundary);
+                    tail_boundary_count = next_boundary_count;
+                }
+                if (page.size() < static_cast<std::size_t>(count) || last_ts > now_msc) {
+                    reconcile_complete = true;
+                    break;
                 }
             }
             const auto duration_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(

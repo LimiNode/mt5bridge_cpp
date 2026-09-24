@@ -15,10 +15,11 @@ import ctypes
 import json
 import os
 import sys
+import threading
 import types
 import unittest
 from collections import namedtuple
-from ctypes import POINTER, Structure, byref, c_char_p, c_double, c_int, c_int32
+from ctypes import POINTER, Structure, byref, c_char_p, c_double, c_int, c_int32, c_uint8
 from ctypes import c_int64, c_size_t, c_uint32, c_uint64, c_void_p
 from datetime import datetime, timezone
 
@@ -65,6 +66,26 @@ class Mt5FetchDiagnostics(Structure):
         ("complete", ctypes.c_uint8),
         ("reserved", ctypes.c_uint8 * 2),
         ("status", c_int32),
+    ]
+
+
+class Mt5AccountInfo(Structure):
+    """Matches the typed account snapshot used by the trade-critical lane."""
+
+    _fields_ = [
+        ("server", ctypes.c_char * 128),
+        ("currency", ctypes.c_char * 16),
+        ("login", c_uint64),
+        ("margin_mode", c_int32),
+        ("trade_mode", c_int32),
+        ("leverage", c_int32),
+        ("trade_allowed", c_uint8),
+        ("trade_expert", c_uint8),
+        ("fifo_close", c_uint8),
+        ("hedge_allowed", c_uint8),
+        ("balance", c_double),
+        ("equity", c_double),
+        ("known_fields", c_uint64),
     ]
 
 
@@ -472,6 +493,8 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         cls.module.mt5bridge_initialize.restype = c_int
         cls.module.mt5bridge_shutdown.argtypes = []
         cls.module.mt5bridge_shutdown.restype = c_int
+        cls.module.mt5bridge_account_info.argtypes = [POINTER(Mt5AccountInfo)]
+        cls.module.mt5bridge_account_info.restype = c_int
         cls.module.mt5bridge_last_error.argtypes = []
         cls.module.mt5bridge_last_error.restype = c_char_p
         cls.module.mt5bridge_eval_json.argtypes = [c_char_p, POINTER(c_void_p)]
@@ -1676,6 +1699,97 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(diagnostics.gap_reason, 0)
         self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
         self.module.mt5bridge_shutdown()
+
+    def test_realtime_releases_lane_between_pages_for_trade_critical_call(self) -> None:
+        """A trade-critical call runs between two physical realtime pages."""
+        import time
+
+        first_page_ready = threading.Event()
+        release_first_page = threading.Event()
+        page_two_started = threading.Event()
+        trade_done = threading.Event()
+        events: list[str] = []
+        events_lock = threading.Lock()
+        page_calls = [0]
+
+        fake = fake_module([])
+
+        def copy_ticks_from(symbol: str, when: object, count: int, flags: int) -> np.ndarray:
+            del symbol, flags
+            page_calls[0] += 1
+            with events_lock:
+                events.append(f"page{page_calls[0]}")
+            if page_calls[0] == 1:
+                first_page_ready.set()
+                if not release_first_page.wait(2.0):
+                    raise TimeoutError("test did not release realtime page one")
+                start = int(when.timestamp() * 1000)
+                values = page(start, count)
+                values["time_msc"] = start + np.arange(count, dtype=np.int64)
+                values["time"] = values["time_msc"] // 1000
+                fake.last = (1, "Success")
+                return values
+            page_two_started.set()
+            fake.last = (1, "Success")
+            return page(int(when.timestamp() * 1000), 0)
+
+        def account_info() -> dict[str, object]:
+            with events_lock:
+                events.append("trade")
+            trade_done.set()
+            return {
+                "server": fake.account_server,
+                "currency": "USD",
+                "login": fake.account_login,
+                "margin_mode": 2,
+                "trade_mode": 0,
+                "leverage": 100,
+                "trade_allowed": True,
+                "trade_expert": True,
+                "fifo_close": False,
+                "hedge_allowed": True,
+                "balance": 1000.0,
+                "equity": 1000.0,
+            }
+
+        fake.copy_ticks_from = copy_ticks_from
+        fake.account_info = account_info
+        sys.modules["MetaTrader5"] = fake
+        self.assertEqual(self.module.mt5bridge_initialize(None), 0)
+        source = Mt5TickSourceRequest(b"EURUSD", 0, 0)
+        request = Mt5SubscriptionRequest(ctypes.pointer(source), 1, 10, 1, 16, 0, 0, (0, 0))
+        handle = Mt5SubscriptionHandle()
+        self.assertEqual(self.module.mt5bridge_subscribe_ticks(byref(request), byref(handle)), 0)
+
+        account_status: list[int] = []
+
+        def request_account() -> None:
+            info = Mt5AccountInfo()
+            account_status.append(self.module.mt5bridge_account_info(byref(info)))
+
+        account_thread: threading.Thread | None = None
+        try:
+            self.assertTrue(first_page_ready.wait(2.0), "realtime page one did not start")
+            account_thread = threading.Thread(target=request_account)
+            account_thread.start()
+            # Give the competing call a scheduling turn to reach the lane
+            # while page one still owns it; the page gate keeps the ordering
+            # deterministic once it is queued.
+            time.sleep(0.05)
+            release_first_page.set()
+            self.assertTrue(trade_done.wait(2.0), "trade-critical call did not run")
+            self.assertTrue(page_two_started.wait(2.0), "realtime page two did not run")
+            account_thread.join(2.0)
+            self.assertFalse(account_thread.is_alive(), "account call remained blocked")
+            self.assertEqual(account_status, [0])
+            self.assertGreaterEqual(len(events), 3)
+            self.assertEqual(events[:3], ["page1", "trade", "page2"])
+        finally:
+            release_first_page.set()
+            if account_thread is not None:
+                account_thread.join(2.0)
+            self.assertEqual(self.module.mt5bridge_unsubscribe(handle), 0)
+            self.module.mt5bridge_shutdown()
 
     def test_realtime_same_timestamp_reordering_between_pages_is_lossless(self) -> None:
         """Realtime pagination preserves a rotated same-timestamp boundary bucket."""

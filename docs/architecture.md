@@ -241,7 +241,10 @@ worker process.
    factory and exposes both that identity and revisions read-only. Requests carry
    the baseline as `std::optional`, making absence explicit rather than a
    default-invalid sentinel. A future worker/journal owner must retain the
-   captured value and evaluate it against the same graph instance. Snapshot
+   captured value and evaluate it against the same graph instance while the
+   owner remains alive. Durable post-dispatch records retain the baseline as
+   provenance; after restart, the recovery worker re-anchors its in-memory
+   baseline to the current graph before collecting fresh evidence. Snapshot
    collection and durable operation state remain separate.
 4. Add an observation coordinator and pre-dispatch consistency gate. The
    coordinator owns one graph loop, captures a baseline, collects authoritative
@@ -258,10 +261,12 @@ worker process.
    worker, or `order_send` side effect.
 6. Add the durable dispatch journal and admission barrier described in
    [ADR-0011](adr/0011-durable-dispatch-admission.md). The current slice
-    persists opaque intent payloads, separates journal state from
-    `OperationState`, verifies AccountKey/environment/fencing evidence, and
-    commits `dispatching` before returning a non-resendable permit. It still
-    performs no backend call and exposes no `order_send`. The concrete
+   persists opaque intent payloads and an immutable reconciliation descriptor,
+   separates journal state from `OperationState`, verifies AccountKey,
+   environment, and fencing evidence, and commits `dispatching` before
+   returning a non-resendable permit. The production Windows lease uses an
+   exclusive account lock plus a durable monotonic fencing epoch. It still
+   performs no backend call and exposes no `order_send`. The concrete
     `WindowsFileJournalStore` from [ADR-0012](adr/0012-windows-file-journal-store.md)
     supplies bounded, checksum-validated, atomically replaced records for this
     seam, with status-bearing single-record recovery and complete restart
@@ -277,14 +282,14 @@ worker process.
    complete-result, exception, malformed-result, and account-mismatch paths
    with a fake runtime. A successful broker result is only a reconciliation
    seed, not proof of final fill.
-8. Add startup recovery orchestration and the reconciliation worker around the
-   durable journal and observation graph. Only after these owner-loop and
-   identity rules are covered by fake-runtime tests should the high-level
-   asynchronous `TradeManager` be introduced. Side-effecting methods must
-   follow [ADR-0004](adr/0004-trade-reconciliation.md).
-   The owner-loop policy is specified in
+8. The startup recovery orchestration and reconciliation worker now wrap the
+   durable journal and observation graph. The descriptor contract is specified
+   in [ADR-0020](adr/0020-durable-reconciliation-descriptor.md), and the
+   owner-loop policy in
    [ADR-0017](adr/0017-operation-recovery-and-reconciliation-worker.md): every
    recovered post-dispatch record is observation-only and never resendable.
+   The next layer is the high-level asynchronous `TradeManager`; its
+   side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
 10. Add hybrid virtual/broker exit policies and a risk engine only after the

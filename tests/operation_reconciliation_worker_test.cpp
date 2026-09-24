@@ -112,7 +112,8 @@ mt5bridge::ObservationBatch history_batch(const mt5bridge::AccountKey &key,
 }
 
 void enter_dispatching(mt5bridge::OperationJournal &journal,
-                       const mt5bridge::OperationKey &key) {
+                       const mt5bridge::OperationKey &key,
+                       mt5bridge::ReconciliationDescriptor descriptor) {
     require(journal.transition_operation(key, mt5bridge::OperationState::prechecking)
                 .accepted(),
             "operation did not enter prechecking");
@@ -123,6 +124,9 @@ void enter_dispatching(mt5bridge::OperationJournal &journal,
                 key, mt5bridge::JournalState::dispatch_intent_persisted)
                 .accepted(),
             "dispatch intent was not persisted");
+    require(journal.persist_reconciliation_descriptor(key, std::move(descriptor))
+                .accepted(),
+            "reconciliation descriptor was not persisted");
     require(journal.transition_journal(key, mt5bridge::JournalState::dispatching, 77)
                 .accepted(),
             "dispatch barrier was not persisted");
@@ -138,14 +142,6 @@ int main() {
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
         require(journal.create(key, {0x01}).accepted(), "operation create failed");
-        enter_dispatching(journal, key);
-
-        const auto recovered = mt5bridge::OperationRecoveryCoordinator::recover(journal);
-        require(recovered.accepted() && recovered.operations.size() == 1 &&
-                    recovered.operations.front().non_resendable() &&
-                    recovered.operations.front().action ==
-                        mt5bridge::OperationRecoveryAction::reconcile_only,
-                "dispatching recovery became resendable");
 
         FakeProvider provider({batch(key.account, false), batch(key.account, false),
                                batch(key.account, true)});
@@ -157,6 +153,18 @@ int main() {
         require(baseline_refresh.apply.accepted(), "baseline refresh failed");
         request.baseline = coordinator.capture_baseline();
         request.predicates = {mt5bridge::require_active_order(100)};
+        enter_dispatching(
+            journal, key,
+            mt5bridge::ReconciliationDescriptor{key.account, *request.baseline,
+                                                 request.predicates,
+                                                 mt5bridge::OperationState::filled});
+
+        const auto recovered = mt5bridge::OperationRecoveryCoordinator::recover(journal);
+        require(recovered.accepted() && recovered.operations.size() == 1 &&
+                    recovered.operations.front().non_resendable() &&
+                    recovered.operations.front().action ==
+                        mt5bridge::OperationRecoveryAction::reconcile_only,
+                "dispatching recovery became resendable");
 
         mt5bridge::OperationReconciliationWorker worker(
             journal, key, coordinator, collection, request);
@@ -175,10 +183,40 @@ int main() {
                 "confirmed reconciliation was not durably settled");
         require(provider.calls == 3, "worker did not perform baseline and two cycles");
 
+        const auto restart_key = mt5bridge::OperationKey{account(), 13, 17};
+        require(journal.create(restart_key, {0x07}).accepted(),
+                "restart reconciliation operation create failed");
+        enter_dispatching(
+            journal, restart_key,
+            mt5bridge::ReconciliationDescriptor{restart_key.account, *request.baseline,
+                                                 request.predicates,
+                                                 mt5bridge::OperationState::filled});
+        mt5bridge::OperationJournal recovered_journal(store);
+        require(recovered_journal.recover(restart_key).accepted(),
+                "restart reconciliation operation was not recovered");
+        FakeProvider restart_provider({batch(restart_key.account, false),
+                                       batch(restart_key.account, true)});
+        mt5bridge::ObservationCoordinator restart_coordinator(restart_provider,
+                                                               restart_key.account);
+        mt5bridge::ObservationCollectionRequest restart_collection;
+        restart_collection.observe_positions = false;
+        mt5bridge::OperationReconciliationWorker restart_worker(
+            recovered_journal, restart_key, restart_coordinator, restart_collection);
+        const auto restart_first = restart_worker.step();
+        const auto restart_second = restart_worker.step();
+        require(restart_first.status ==
+                    mt5bridge::OperationReconciliationStatus::pending &&
+                    restart_second.status ==
+                        mt5bridge::OperationReconciliationStatus::progressed &&
+                    restart_second.record &&
+                    restart_second.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    restart_provider.calls == 2,
+                "recovered descriptor did not re-anchor to the new graph instance");
+
         const auto unresolved_key = mt5bridge::OperationKey{account(), 8, 12};
         require(journal.create(unresolved_key, {0x02}).accepted(),
                 "unresolved operation create failed");
-        enter_dispatching(journal, unresolved_key);
         FakeProvider unresolved_provider(
             {batch(unresolved_key.account, false), batch(unresolved_key.account, false)});
         mt5bridge::ObservationCoordinator unresolved_coordinator(
@@ -190,9 +228,22 @@ int main() {
         mt5bridge::ReconciliationRequest unresolved_request;
         unresolved_request.baseline = unresolved_coordinator.capture_baseline();
         unresolved_request.predicates = {mt5bridge::require_active_order(200)};
-        mt5bridge::OperationReconciliationWorker unresolved_worker(
+        enter_dispatching(
+            journal, unresolved_key,
+            mt5bridge::ReconciliationDescriptor{unresolved_key.account,
+                                                 *unresolved_request.baseline,
+                                                 unresolved_request.predicates,
+                                                 mt5bridge::OperationState::filled});
+        mt5bridge::ReconciliationRequest mismatched_request = unresolved_request;
+        mismatched_request.predicates = {mt5bridge::require_active_order(201)};
+        mt5bridge::OperationReconciliationWorker mismatched_worker(
             journal, unresolved_key, unresolved_coordinator, unresolved_collection,
-            unresolved_request);
+            mismatched_request);
+        require(mismatched_worker.step().status ==
+                    mt5bridge::OperationReconciliationStatus::invalid_request,
+                "caller-supplied reconciliation contract replaced the durable descriptor");
+        mt5bridge::OperationReconciliationWorker unresolved_worker(
+            journal, unresolved_key, unresolved_coordinator, unresolved_collection);
         const auto not_observed = unresolved_worker.step(false, true);
         require(not_observed.status ==
                     mt5bridge::OperationReconciliationStatus::not_observed &&
@@ -204,7 +255,6 @@ int main() {
         const auto gap_key = mt5bridge::OperationKey{account(), 9, 13};
         require(journal.create(gap_key, {0x03}).accepted(),
                 "event-gap operation create failed");
-        enter_dispatching(journal, gap_key);
         const mt5bridge::ObservationWindow gap_window{1000, 2000};
         FakeProvider gap_provider({history_batch(gap_key.account, gap_window, false),
                                    history_batch(gap_key.account, gap_window, false),
@@ -219,6 +269,11 @@ int main() {
         mt5bridge::ReconciliationRequest gap_request;
         gap_request.baseline = gap_coordinator.capture_baseline();
         gap_request.predicates = {mt5bridge::require_history_order(100)};
+        enter_dispatching(
+            journal, gap_key,
+            mt5bridge::ReconciliationDescriptor{gap_key.account, *gap_request.baseline,
+                                                 gap_request.predicates,
+                                                 mt5bridge::OperationState::filled});
         mt5bridge::OperationReconciliationWorker gap_worker(
             journal, gap_key, gap_coordinator, gap_collection, gap_request);
         const auto gap_cycle = gap_worker.step(true, false);
@@ -236,7 +291,6 @@ int main() {
         const auto account_key = mt5bridge::OperationKey{account(), 10, 14};
         require(journal.create(account_key, {0x04}).accepted(),
                 "account-mismatch operation create failed");
-        enter_dispatching(journal, account_key);
         FakeProvider account_provider({batch(account_key.account, false),
                                        batch({"Other-Server", 43}, false)});
         mt5bridge::ObservationCoordinator account_coordinator(account_provider,
@@ -248,6 +302,12 @@ int main() {
         mt5bridge::ReconciliationRequest account_request;
         account_request.baseline = account_coordinator.capture_baseline();
         account_request.predicates = {mt5bridge::require_active_order(100)};
+        enter_dispatching(
+            journal, account_key,
+            mt5bridge::ReconciliationDescriptor{account_key.account,
+                                                 *account_request.baseline,
+                                                 account_request.predicates,
+                                                 mt5bridge::OperationState::filled});
         mt5bridge::OperationReconciliationWorker account_worker(
             journal, account_key, account_coordinator, account_collection, account_request);
         const auto account_cycle = account_worker.step();
@@ -268,7 +328,6 @@ int main() {
         const auto ambiguous_key = mt5bridge::OperationKey{account(), 11, 15};
         require(journal.create(ambiguous_key, {0x05}).accepted(),
                 "ambiguous operation create failed");
-        enter_dispatching(journal, ambiguous_key);
         mt5bridge::ObservationBatch malformed = batch(ambiguous_key.account, false);
         Mt5OrderSnapshot malformed_order{};
         malformed_order.ticket = 100;
@@ -285,6 +344,12 @@ int main() {
         mt5bridge::ReconciliationRequest ambiguous_request;
         ambiguous_request.baseline = ambiguous_coordinator.capture_baseline();
         ambiguous_request.predicates = {mt5bridge::require_active_order(100)};
+        enter_dispatching(
+            journal, ambiguous_key,
+            mt5bridge::ReconciliationDescriptor{ambiguous_key.account,
+                                                 *ambiguous_request.baseline,
+                                                 ambiguous_request.predicates,
+                                                 mt5bridge::OperationState::filled});
         mt5bridge::OperationReconciliationWorker ambiguous_worker(
             journal, ambiguous_key, ambiguous_coordinator, ambiguous_collection,
             ambiguous_request);
@@ -301,7 +366,6 @@ int main() {
         const auto partial_key = mt5bridge::OperationKey{account(), 12, 16};
         require(journal.create(partial_key, {0x06}).accepted(),
                 "partial operation create failed");
-        enter_dispatching(journal, partial_key);
         FakeProvider partial_provider({batch(partial_key.account, false),
                                        batch(partial_key.account, true)});
         mt5bridge::ObservationCoordinator partial_coordinator(partial_provider,
@@ -313,6 +377,12 @@ int main() {
         mt5bridge::ReconciliationRequest partial_request;
         partial_request.baseline = partial_coordinator.capture_baseline();
         partial_request.predicates = {mt5bridge::require_active_order(100)};
+        enter_dispatching(
+            journal, partial_key,
+            mt5bridge::ReconciliationDescriptor{partial_key.account,
+                                                 *partial_request.baseline,
+                                                 partial_request.predicates,
+                                                 mt5bridge::OperationState::partially_filled});
         mt5bridge::OperationReconciliationWorker partial_worker(
             journal, partial_key, partial_coordinator, partial_collection,
             partial_request, mt5bridge::OperationState::partially_filled);

@@ -6,6 +6,7 @@
 #include <mt5bridge/dispatch/journal.hpp>
 #include <mt5bridge/observation/worker.hpp>
 
+#include <cstddef>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -159,9 +160,29 @@ public:
         OperationState settled_state = OperationState::filled)
         : journal_(journal),
           key_(std::move(key)),
+          descriptor_(make_descriptor(key_, reconciliation_request, settled_state)),
           worker_(coordinator, std::move(collection_request),
-                  std::move(reconciliation_request)),
+                  rebase_request(std::move(reconciliation_request), coordinator.graph())),
           settled_state_(settled_state) {}
+
+    /// \brief Binds a worker directly to the journal's durable descriptor.
+    /// \param journal Owner-loop journal containing the operation.
+    /// \param key Immutable operation identity.
+    /// \param coordinator Coordinator used for authoritative refreshes.
+    /// \param collection_request Domains refreshed on each cycle.
+    /// \note A graph from a new process is re-anchored before the first refresh;
+    ///       the durable descriptor itself remains unchanged.
+    OperationReconciliationWorker(
+        OperationJournal &journal, OperationKey key,
+        ObservationCoordinator &coordinator,
+        ObservationCollectionRequest collection_request)
+        : journal_(journal),
+          key_(std::move(key)),
+          descriptor_(journal_descriptor(journal_, key_)),
+          worker_(coordinator, std::move(collection_request),
+                  request_from_descriptor(descriptor_, coordinator.graph())),
+          settled_state_(descriptor_ ? descriptor_->settled_state
+                                     : OperationState::filled) {}
 
     OperationReconciliationWorker(const OperationReconciliationWorker &) = delete;
     OperationReconciliationWorker &operator=(const OperationReconciliationWorker &) =
@@ -177,6 +198,12 @@ public:
         if (!current)
             return {OperationReconciliationStatus::operation_not_found,
                     std::nullopt, std::nullopt};
+        if (!current->reconciliation_descriptor || !descriptor_)
+            return {OperationReconciliationStatus::invalid_state, std::nullopt,
+                    current};
+        if (!same_descriptor(*current->reconciliation_descriptor, *descriptor_))
+            return {OperationReconciliationStatus::invalid_request, std::nullopt,
+                    current};
         if (!valid_settled_state(settled_state_) ||
             is_terminal(current->operation_state))
             return {OperationReconciliationStatus::invalid_state, std::nullopt,
@@ -231,6 +258,96 @@ public:
     }
 
 private:
+    static std::optional<ReconciliationDescriptor> make_descriptor(
+        const OperationKey &key, const ReconciliationRequest &request,
+        OperationState settled_state) {
+        if (!request.baseline)
+            return std::nullopt;
+        ReconciliationDescriptor descriptor{key.account, *request.baseline,
+                                            request.predicates, settled_state};
+        return descriptor.valid()
+                   ? std::optional<ReconciliationDescriptor>(std::move(descriptor))
+                   : std::nullopt;
+    }
+
+    static std::optional<ReconciliationDescriptor> journal_descriptor(
+        OperationJournal &journal, const OperationKey &key) {
+        const auto record = journal.find(key);
+        if (!record || !record->reconciliation_descriptor)
+            return std::nullopt;
+        return record->reconciliation_descriptor;
+    }
+
+    static ReconciliationRequest request_from_descriptor(
+        const std::optional<ReconciliationDescriptor> &descriptor,
+        const ObservationGraph &graph) {
+        ReconciliationRequest request;
+        if (descriptor) {
+            // Graph instance ids and domain revisions are process-local. A
+            // recovered descriptor remains the immutable provenance contract,
+            // so a recovered worker always starts from the current graph
+            // baseline. The next refresh then supplies fresh evidence even if
+            // a restarted process happens to reuse an instance id.
+            request.baseline = capture_reconciliation_baseline(graph);
+            request.predicates = descriptor->predicates;
+        }
+        return request;
+    }
+
+    static bool baseline_usable(const ReconciliationBaseline &baseline,
+                                const ObservationGraph &graph) {
+        return baseline.graph_instance_id() == graph.instance_id() &&
+               baseline.graph_revision() <= graph.revision() &&
+               baseline.active_orders_revision() <=
+                   graph.domain_revision(ObservationDomain::active_orders) &&
+               baseline.positions_revision() <=
+                   graph.domain_revision(ObservationDomain::positions) &&
+               baseline.history_orders_revision() <=
+                   graph.domain_revision(ObservationDomain::history_orders) &&
+               baseline.history_deals_revision() <=
+                   graph.domain_revision(ObservationDomain::history_deals);
+    }
+
+    static ReconciliationRequest rebase_request(ReconciliationRequest request,
+                                                const ObservationGraph &graph) {
+        if (request.baseline && !baseline_usable(*request.baseline, graph))
+            request.baseline = capture_reconciliation_baseline(graph);
+        return request;
+    }
+
+    static bool same_window(const std::optional<ObservationWindow> &left,
+                            const std::optional<ObservationWindow> &right) {
+        if (left.has_value() != right.has_value())
+            return false;
+        return !left || (left->from_msc == right->from_msc &&
+                         left->to_msc == right->to_msc);
+    }
+
+    static bool same_descriptor(const ReconciliationDescriptor &left,
+                                const ReconciliationDescriptor &right) {
+        if (left.account != right.account ||
+            left.baseline.account() != right.baseline.account() ||
+            left.baseline.graph_instance_id() != right.baseline.graph_instance_id() ||
+            left.baseline.graph_revision() != right.baseline.graph_revision() ||
+            left.baseline.active_orders_revision() != right.baseline.active_orders_revision() ||
+            left.baseline.positions_revision() != right.baseline.positions_revision() ||
+            left.baseline.history_orders_revision() != right.baseline.history_orders_revision() ||
+            left.baseline.history_deals_revision() != right.baseline.history_deals_revision() ||
+            left.settled_state != right.settled_state ||
+            left.predicates.size() != right.predicates.size())
+            return false;
+        for (std::size_t index = 0; index < left.predicates.size(); ++index) {
+            const auto &left_predicate = left.predicates[index];
+            const auto &right_predicate = right.predicates[index];
+            if (left_predicate.kind != right_predicate.kind ||
+                left_predicate.ticket != right_predicate.ticket ||
+                !same_window(left_predicate.history_window,
+                             right_predicate.history_window))
+                return false;
+        }
+        return true;
+    }
+
     static bool valid_settled_state(OperationState state) {
         return state == OperationState::partially_filled ||
                state == OperationState::filled || state == OperationState::cancelled ||
@@ -265,6 +382,7 @@ private:
 
     OperationJournal &journal_;
     OperationKey key_;
+    std::optional<ReconciliationDescriptor> descriptor_;
     ReconciliationWorker worker_;
     OperationState settled_state_;
 };

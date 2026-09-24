@@ -148,7 +148,8 @@ public:
 };
 
 void prepare_for_admission(mt5bridge::OperationJournal &journal,
-                           const mt5bridge::OperationKey &operation_key) {
+                           const mt5bridge::OperationKey &operation_key,
+                           mt5bridge::ReconciliationDescriptor descriptor) {
     require(journal.transition_operation(operation_key,
                                          mt5bridge::OperationState::prechecking)
                 .accepted(),
@@ -160,6 +161,10 @@ void prepare_for_admission(mt5bridge::OperationJournal &journal,
                 operation_key, mt5bridge::JournalState::dispatch_intent_persisted)
                 .accepted(),
             "dispatch intent transition failed");
+    require(journal.persist_reconciliation_descriptor(
+                operation_key, std::move(descriptor))
+                .accepted(),
+            "reconciliation descriptor transition failed");
 }
 
 std::optional<mt5bridge::DispatchPermit> admit(
@@ -196,13 +201,16 @@ int main() {
             {*first.sample, *second.sample}, consistency_request);
         require(consistency.consistent() && consistency.proof,
                 "consistent proof setup failed");
+        const auto descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, coordinator.capture_baseline(),
+            {mt5bridge::require_active_order(20)}, mt5bridge::OperationState::filled};
 
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
         const auto rejected_key = key(7);
         require(journal.create(rejected_key, {0x01, 0x02}).accepted(),
                 "rejection operation create failed");
-        prepare_for_admission(journal, rejected_key);
+        prepare_for_admission(journal, rejected_key, descriptor);
         FakeLease lease{operation_account};
         auto permit = admit(journal, coordinator.graph(), rejected_key,
                             *consistency.proof, lease);
@@ -232,7 +240,7 @@ int main() {
         const auto stale_key = key(8);
         require(journal.create(stale_key, {0x03}).accepted(),
                 "stale-permit operation create failed");
-        prepare_for_admission(journal, stale_key);
+        prepare_for_admission(journal, stale_key, descriptor);
         FakeLease stale_lease{operation_account};
         auto stale_permit = admit(journal, coordinator.graph(), stale_key,
                                   *consistency.proof, stale_lease);
@@ -254,7 +262,7 @@ int main() {
         const auto lease_key = key(9);
         require(journal.create(lease_key, {0x03}).accepted(),
                 "lease-loss operation create failed");
-        prepare_for_admission(journal, lease_key);
+        prepare_for_admission(journal, lease_key, descriptor);
         FakeLease dropping_lease{operation_account};
         dropping_lease.drop_before_call = true;
         auto lease_permit = admit(journal, coordinator.graph(), lease_key,
@@ -275,7 +283,7 @@ int main() {
         const auto transport_key = key(10);
         require(journal.create(transport_key, {0x04}).accepted(),
                 "transport-failure operation create failed");
-        prepare_for_admission(journal, transport_key);
+        prepare_for_admission(journal, transport_key, descriptor);
         FakeLease transport_lease{operation_account};
         auto transport_permit = admit(journal, coordinator.graph(), transport_key,
                                       *consistency.proof, transport_lease);
@@ -302,7 +310,7 @@ int main() {
         const auto account_switch_key = key(11);
         require(journal.create(account_switch_key, {0x05}).accepted(),
                 "account-switch operation create failed");
-        prepare_for_admission(journal, account_switch_key);
+        prepare_for_admission(journal, account_switch_key, descriptor);
         FakeLease account_switch_lease{operation_account};
         auto account_switch_permit = admit(journal, coordinator.graph(), account_switch_key,
                                             *consistency.proof, account_switch_lease);

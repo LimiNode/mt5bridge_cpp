@@ -503,7 +503,10 @@ emit a new transition to `CONFIRMED`, `RECONCILED`, or `AMBIGUOUS`.
 
 Before the side effect, the operation journal durably records its
 `AccountKey` (at minimum server and login), `TradeId`, `OperationId`, request
-payload, and `dispatch_intent_persisted`. This record is still pre-side-effect:
+payload, `dispatch_intent_persisted`, and an immutable reconciliation descriptor
+containing the pre-dispatch baseline, attribution predicates, and allowed
+settlement state. The descriptor is committed before the barrier and is
+required on every post-dispatch record. This record is still pre-side-effect:
 recovery may reacquire the same lease, re-check the account, advance to
 `dispatching`, and perform the one send. The `dispatching` record is a durable
 may-have-been-sent barrier. On restart, a `dispatching` record with no result

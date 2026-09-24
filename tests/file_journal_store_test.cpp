@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -35,6 +36,17 @@ void prepare(mt5bridge::OperationJournal &journal,
                 operation_key, mt5bridge::JournalState::dispatch_intent_persisted)
                 .accepted(),
             "dispatch intent transition failed");
+    mt5bridge::ObservationGraph graph(operation_key.account);
+    const mt5bridge::ObservationWindow history_window{1000, 2000};
+    mt5bridge::ReconciliationDescriptor descriptor{
+        operation_key.account, mt5bridge::capture_reconciliation_baseline(graph),
+        {mt5bridge::require_active_order(20),
+         mt5bridge::require_history_order(21, history_window)},
+        mt5bridge::OperationState::filled};
+    require(journal.persist_reconciliation_descriptor(operation_key,
+                                                       std::move(descriptor))
+                .accepted(),
+            "reconciliation descriptor transition failed");
 }
 
 } // namespace
@@ -53,6 +65,30 @@ int main() {
         require(store.ready(), "file journal store did not open its directory");
 
         const auto operation_key = key();
+        const auto lease_account = operation_key.account;
+        std::uint64_t first_fencing_token = 0;
+        {
+            mt5bridge::WindowsSingleWriterLease lease(directory, lease_account);
+            require(lease.ready(), "production writer lease did not open");
+            const auto held = lease.held_fencing_token(lease_account);
+            require(held && *held != 0, "writer lease did not expose a token");
+            first_fencing_token = *held;
+            require(!lease.held_fencing_token(mt5bridge::AccountKey{"Other-Trade", 43}),
+                    "writer lease exposed its token to another account");
+
+            mt5bridge::WindowsSingleWriterLease duplicate(directory, lease_account);
+            require(!duplicate.ready() &&
+                        !duplicate.held_fencing_token(lease_account),
+                    "duplicate account owner acquired the writer lease");
+        }
+        {
+            mt5bridge::WindowsSingleWriterLease successor(directory, lease_account);
+            require(successor.ready(), "writer lease was not reacquired after release");
+            const auto held = successor.held_fencing_token(lease_account);
+            require(held && *held > first_fencing_token,
+                    "fencing epoch did not advance durably");
+        }
+
         mt5bridge::OperationJournal journal(store);
         require(journal.create(operation_key, {0x01, 0x02, 0x03}).accepted(),
                 "file-backed create was not committed");
@@ -66,8 +102,23 @@ int main() {
         const auto recovered_record = recovered_store.load(operation_key);
         require(recovered_record.found() && recovered_record.record->journal_state ==
                                        mt5bridge::JournalState::dispatching &&
-                    recovered_record.record->fencing_token == 77,
-                "dispatching record did not survive store reopen");
+                    recovered_record.record->fencing_token == 77 &&
+                    recovered_record.record->reconciliation_descriptor &&
+                    recovered_record.record->reconciliation_descriptor->valid() &&
+                    recovered_record.record->reconciliation_descriptor->predicates.size() ==
+                        2 &&
+                    recovered_record.record->reconciliation_descriptor->predicates.front()
+                            .ticket ==
+                        20 &&
+                    recovered_record.record->reconciliation_descriptor->predicates.back()
+                            .history_window &&
+                    recovered_record.record->reconciliation_descriptor->predicates.back()
+                            .history_window->from_msc ==
+                        1000 &&
+                    recovered_record.record->reconciliation_descriptor->predicates.back()
+                            .history_window->to_msc ==
+                        2000,
+                "dispatching record or reconciliation descriptor did not survive store reopen");
 
         mt5bridge::OperationJournal owner_a(store);
         mt5bridge::OperationJournal owner_b(recovered_store);
@@ -195,6 +246,23 @@ int main() {
         require(result_store.commit(replacement_candidate, result_record.record->revision) ==
                     mt5bridge::StoreCommitStatus::io_error,
                 "corrupt record was overwritten instead of failing closed");
+
+        std::filesystem::path epoch_path;
+        for (const auto &entry : std::filesystem::directory_iterator(directory)) {
+            if (entry.path().extension() == L".epoch") {
+                epoch_path = entry.path();
+                break;
+            }
+        }
+        require(!epoch_path.empty(), "fencing epoch file was not created");
+        {
+            std::ofstream corrupt_epoch(epoch_path,
+                                        std::ios::binary | std::ios::trunc);
+            corrupt_epoch.put('X');
+        }
+        mt5bridge::WindowsSingleWriterLease corrupt_lease(directory, lease_account);
+        require(!corrupt_lease.ready() && !corrupt_lease.last_error().empty(),
+                "corrupt fencing epoch was accepted");
 
         std::filesystem::remove_all(directory, cleanup_error);
         std::cout << "file journal store checks passed\n";

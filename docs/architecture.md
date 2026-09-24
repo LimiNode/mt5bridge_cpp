@@ -134,6 +134,14 @@ The private execution-lane scheduler is specified in
 [ADR-0018](adr/0018-execution-lane-fairness.md): trade-critical calls receive
 bounded priority over queued bulk market-data work without changing the public
 ABI or preempting an in-flight Python operation.
+The production account ownership primitive is specified in
+[ADR-0019](adr/0019-production-account-lease.md): a Windows-exclusive
+account lock and durable monotonic fencing epoch implement the existing
+`SingleWriterLease` seam without adding a side-effecting public API.
+The immutable post-dispatch evidence contract is specified in
+[ADR-0020](adr/0020-durable-reconciliation-descriptor.md): dispatch admission
+persists the reconciliation baseline and predicates before opening the
+non-resendable barrier, and recovery rejects records that lack them.
 The managed trade identity, close-obligation, scheduling, and exit-policy
 boundaries are specified in [ADR-0006](adr/0006-managed-trade-lifecycle.md).
 The read-only account-scoped evidence graph is specified in

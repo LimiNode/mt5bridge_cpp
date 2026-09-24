@@ -6,6 +6,7 @@
 #include <mt5bridge/dispatch/journal.hpp>
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -64,6 +65,59 @@ private:
     std::filesystem::path directory_;
     bool ready_ = false;
     mutable std::string last_error_;
+};
+
+/// \class WindowsSingleWriterLease
+/// \brief Holds one account-scoped Windows ownership lock and fencing epoch.
+///
+/// Construction acquires an exclusive lock for the account and durably advances
+/// that account's fencing epoch before reporting the lease ready. The lock is
+/// held until destruction; a later owner therefore receives a strictly higher
+/// token only after the previous owner has released the OS handle.
+class WindowsSingleWriterLease final : public SingleWriterLease {
+public:
+    /// \brief Acquires the account-scoped lease below one journal directory.
+    /// \param directory Directory shared by the journal and lease metadata.
+    /// \param account Immutable server/login identity to fence.
+    WindowsSingleWriterLease(std::filesystem::path directory, AccountKey account);
+    ~WindowsSingleWriterLease() override;
+
+    WindowsSingleWriterLease(const WindowsSingleWriterLease &) = delete;
+    WindowsSingleWriterLease &operator=(const WindowsSingleWriterLease &) = delete;
+    WindowsSingleWriterLease(WindowsSingleWriterLease &&) = delete;
+    WindowsSingleWriterLease &operator=(WindowsSingleWriterLease &&) = delete;
+
+    /// \brief Returns the held token only for the leased account.
+    /// \param account Account identity being checked by the admission barrier.
+    /// \return Current durable fencing token, or empty when not held.
+    std::optional<std::uint64_t> held_fencing_token(
+        const AccountKey &account) const override;
+
+    /// \brief Tests whether lock acquisition and epoch persistence succeeded.
+    /// \return True while this object owns the account lease.
+    bool ready() const { return ready_; }
+
+    /// \brief Returns the latest construction or storage diagnostic.
+    /// \return Stable diagnostic until destruction.
+    const std::string &last_error() const { return last_error_; }
+
+    /// \brief Returns the anchored metadata directory.
+    /// \return Absolute directory used for lock and epoch files.
+    const std::filesystem::path &directory() const { return directory_; }
+
+    /// \brief Returns the immutable account identity held by this lease.
+    /// \return Account key supplied at construction.
+    const AccountKey &account() const { return account_; }
+
+private:
+    struct State;
+
+    std::filesystem::path directory_;
+    AccountKey account_;
+    std::unique_ptr<State> state_;
+    bool ready_ = false;
+    std::uint64_t token_ = 0;
+    std::string last_error_;
 };
 
 } // namespace mt5bridge

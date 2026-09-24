@@ -25,6 +25,7 @@ constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'J', 'N', 'L', '0', '1'}};
 constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::size_t kMaxStringBytes = 1U << 20;
 constexpr std::size_t kMaxPayloadBytes = 16U << 20;
+constexpr std::uint32_t kMaxReconciliationPredicates = 1U << 20;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
 constexpr std::size_t kMaxBodyBytes = 2U * (kMaxPayloadBytes + kMaxStringBytes) + 256U;
@@ -121,6 +122,113 @@ bool read_payload(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
     return true;
 }
 
+bool append_reconciliation_descriptor(
+    std::vector<std::uint8_t> &bytes,
+    const std::optional<ReconciliationDescriptor> &descriptor) {
+    append_u32(bytes, descriptor ? 1u : 0u);
+    if (!descriptor)
+        return true;
+    if (!descriptor->valid() ||
+        descriptor->predicates.size() > (std::numeric_limits<std::uint32_t>::max)())
+        return false;
+    const auto &baseline = descriptor->baseline;
+    if (!append_bytes(bytes, descriptor->account.server))
+        return false;
+    append_u64(bytes, descriptor->account.login);
+    if (!append_bytes(bytes, baseline.account().server))
+        return false;
+    append_u64(bytes, baseline.account().login);
+    append_u64(bytes, baseline.graph_instance_id());
+    append_u64(bytes, baseline.graph_revision());
+    append_u64(bytes, baseline.active_orders_revision());
+    append_u64(bytes, baseline.positions_revision());
+    append_u64(bytes, baseline.history_orders_revision());
+    append_u64(bytes, baseline.history_deals_revision());
+    append_u32(bytes, static_cast<std::uint32_t>(descriptor->settled_state));
+    append_u32(bytes, static_cast<std::uint32_t>(descriptor->predicates.size()));
+    for (const auto &predicate : descriptor->predicates) {
+        append_u32(bytes, static_cast<std::uint32_t>(predicate.kind));
+        append_u64(bytes, predicate.ticket);
+        append_u32(bytes, predicate.history_window ? 1u : 0u);
+        if (predicate.history_window) {
+            append_u64(bytes, static_cast<std::uint64_t>(predicate.history_window->from_msc));
+            append_u64(bytes, static_cast<std::uint64_t>(predicate.history_window->to_msc));
+        }
+    }
+    return true;
+}
+
+bool read_reconciliation_descriptor(
+    const std::vector<std::uint8_t> &bytes, std::size_t &offset,
+    std::optional<ReconciliationDescriptor> &descriptor) {
+    if (offset == bytes.size())
+        return true;
+    std::uint32_t present = 0;
+    if (!read_u32(bytes, offset, present) || present > 1)
+        return false;
+    if (present == 0)
+        return offset == bytes.size();
+
+    AccountKey descriptor_account;
+    std::string baseline_server;
+    std::uint64_t baseline_login = 0;
+    std::uint64_t graph_instance_id = 0;
+    std::uint64_t graph_revision = 0;
+    std::uint64_t active_orders_revision = 0;
+    std::uint64_t positions_revision = 0;
+    std::uint64_t history_orders_revision = 0;
+    std::uint64_t history_deals_revision = 0;
+    std::uint32_t settled_state = 0;
+    std::uint32_t predicate_count = 0;
+    if (!read_string(bytes, offset, descriptor_account.server) ||
+        !read_u64(bytes, offset, descriptor_account.login) ||
+        !read_string(bytes, offset, baseline_server) ||
+        !read_u64(bytes, offset, baseline_login) ||
+        !read_u64(bytes, offset, graph_instance_id) ||
+        !read_u64(bytes, offset, graph_revision) ||
+        !read_u64(bytes, offset, active_orders_revision) ||
+        !read_u64(bytes, offset, positions_revision) ||
+        !read_u64(bytes, offset, history_orders_revision) ||
+        !read_u64(bytes, offset, history_deals_revision) ||
+        !read_u32(bytes, offset, settled_state) ||
+        !read_u32(bytes, offset, predicate_count) ||
+        predicate_count > kMaxReconciliationPredicates)
+        return false;
+    const AccountKey baseline_account{std::move(baseline_server), baseline_login};
+    const auto baseline = ReconciliationBaseline::restore(
+        baseline_account, graph_instance_id, graph_revision, active_orders_revision,
+        positions_revision, history_orders_revision, history_deals_revision);
+    if (!baseline)
+        return false;
+    ReconciliationDescriptor value{std::move(descriptor_account), *baseline, {},
+                                   static_cast<OperationState>(settled_state)};
+    value.predicates.reserve(predicate_count);
+    for (std::uint32_t index = 0; index < predicate_count; ++index) {
+        std::uint32_t kind = 0;
+        std::uint64_t ticket = 0;
+        std::uint32_t has_window = 0;
+        if (!read_u32(bytes, offset, kind) || !read_u64(bytes, offset, ticket) ||
+            !read_u32(bytes, offset, has_window) || has_window > 1)
+            return false;
+        ReconciliationPredicate predicate;
+        predicate.kind = static_cast<ReconciliationPredicateKind>(kind);
+        predicate.ticket = ticket;
+        if (has_window != 0) {
+            std::uint64_t from = 0;
+            std::uint64_t to = 0;
+            if (!read_u64(bytes, offset, from) || !read_u64(bytes, offset, to))
+                return false;
+            predicate.history_window = ObservationWindow{
+                static_cast<std::int64_t>(from), static_cast<std::int64_t>(to)};
+        }
+        value.predicates.push_back(std::move(predicate));
+    }
+    if (offset != bytes.size() || !value.valid())
+        return false;
+    descriptor = std::move(value);
+    return true;
+}
+
 std::uint64_t checksum(const std::vector<std::uint8_t> &bytes) {
     std::uint64_t result = 1469598103934665603ULL;
     for (const std::uint8_t byte : bytes) {
@@ -145,6 +253,8 @@ std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &r
     append_u32(body, static_cast<std::uint32_t>(record.journal_state));
     append_u64(body, record.revision);
     append_u64(body, record.fencing_token);
+    if (!append_reconciliation_descriptor(body, record.reconciliation_descriptor))
+        return std::nullopt;
     return body;
 }
 
@@ -199,6 +309,8 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
         !read_u32(body, body_offset, journal_state) ||
         !read_u64(body, body_offset, record.revision) ||
         !read_u64(body, body_offset, record.fencing_token) ||
+        !read_reconciliation_descriptor(body, body_offset,
+                                        record.reconciliation_descriptor) ||
         body_offset != body.size())
         return std::nullopt;
     record.operation_state = static_cast<OperationState>(operation_state);
@@ -329,6 +441,82 @@ bool write_file(const std::filesystem::path &path,
     return true;
 }
 
+std::string hex_bytes(const std::string &value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0x0f]);
+    }
+    return result;
+}
+
+std::filesystem::path lease_path(const std::filesystem::path &directory,
+                                 const AccountKey &account, const char *suffix) {
+    const std::string filename = "lease-" + hex_bytes(account.server) + "-" +
+                                 hex_u64(account.login);
+    return directory / widen_ascii(filename + suffix);
+}
+
+bool read_epoch(const std::filesystem::path &path, std::uint64_t &epoch,
+                std::string &error) {
+    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+            epoch = 0;
+            return true;
+        }
+        error = win32_error("CreateFileW(epoch)", code);
+        return false;
+    }
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(handle, &size) || size.QuadPart != sizeof(std::uint64_t)) {
+        error = size.QuadPart < 0 ? "fencing epoch has an invalid size"
+                                  : "fencing epoch is malformed";
+        CloseHandle(handle);
+        return false;
+    }
+    std::array<std::uint8_t, sizeof(std::uint64_t)> bytes{};
+    DWORD read = 0;
+    const bool ok = ReadFile(handle, bytes.data(), static_cast<DWORD>(bytes.size()), &read,
+                             nullptr) &&
+                    read == bytes.size();
+    CloseHandle(handle);
+    if (!ok) {
+        error = win32_error("ReadFile(epoch)");
+        return false;
+    }
+    std::vector<std::uint8_t> encoded(bytes.begin(), bytes.end());
+    std::size_t offset = 0;
+    if (!read_u64(encoded, offset, epoch) || epoch == 0) {
+        error = "fencing epoch is malformed";
+        return false;
+    }
+    return true;
+}
+
+bool write_epoch(const std::filesystem::path &path, std::uint64_t epoch,
+                 std::string &error) {
+    std::vector<std::uint8_t> bytes;
+    append_u64(bytes, epoch);
+    const std::filesystem::path temporary(path.wstring() + L".tmp");
+    DeleteFileW(temporary.c_str());
+    if (!write_file(temporary, bytes, error))
+        return false;
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        error = win32_error("MoveFileExW(epoch)");
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
 #endif
 
 std::filesystem::path record_path(const std::filesystem::path &directory,
@@ -346,6 +534,19 @@ std::filesystem::path record_path(const std::filesystem::path &directory,
 void set_error(std::string &target, std::string value) { target = std::move(value); }
 
 } // namespace
+
+#if defined(_WIN32)
+struct WindowsSingleWriterLease::State {
+    HANDLE lock = INVALID_HANDLE_VALUE;
+
+    ~State() {
+        if (lock != INVALID_HANDLE_VALUE)
+            CloseHandle(lock);
+    }
+};
+#else
+struct WindowsSingleWriterLease::State {};
+#endif
 
 WindowsFileJournalStore::WindowsFileJournalStore(std::filesystem::path directory)
     : directory_(std::move(directory)) {
@@ -370,6 +571,70 @@ WindowsFileJournalStore::WindowsFileJournalStore(std::filesystem::path directory
     (void)directory_;
     set_error(last_error_, "WindowsFileJournalStore requires Windows");
 #endif
+}
+
+WindowsSingleWriterLease::WindowsSingleWriterLease(std::filesystem::path directory,
+                                                   AccountKey account)
+    : directory_(std::move(directory)), account_(std::move(account)) {
+#if defined(_WIN32)
+    try {
+        if (!account_.valid()) {
+            set_error(last_error_, "invalid lease account");
+            return;
+        }
+        if (directory_.empty()) {
+            set_error(last_error_, "lease directory is empty");
+            return;
+        }
+        const auto absolute_directory = std::filesystem::absolute(directory_);
+        std::filesystem::create_directories(absolute_directory);
+        if (!std::filesystem::is_directory(absolute_directory)) {
+            set_error(last_error_, "lease path is not a directory");
+            return;
+        }
+        directory_ = std::filesystem::weakly_canonical(absolute_directory);
+        state_ = std::make_unique<State>();
+        const auto lock = lease_path(directory_, account_, ".lock");
+        state_->lock = CreateFileW(lock.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                   OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (state_->lock == INVALID_HANDLE_VALUE) {
+            set_error(last_error_, win32_error("CreateFileW(lease lock)"));
+            return;
+        }
+
+        const auto epoch = lease_path(directory_, account_, ".epoch");
+        std::uint64_t previous = 0;
+        if (!read_epoch(epoch, previous, last_error_))
+            return;
+        if (previous == (std::numeric_limits<std::uint64_t>::max)()) {
+            set_error(last_error_, "fencing epoch exhausted");
+            return;
+        }
+        token_ = previous + 1;
+        if (!write_epoch(epoch, token_, last_error_)) {
+            token_ = 0;
+            return;
+        }
+        ready_ = true;
+    } catch (const std::filesystem::filesystem_error &error) {
+        set_error(last_error_, error.what());
+    } catch (const std::exception &error) {
+        set_error(last_error_, error.what());
+    }
+#else
+    (void)directory_;
+    (void)account_;
+    set_error(last_error_, "WindowsSingleWriterLease requires Windows");
+#endif
+}
+
+WindowsSingleWriterLease::~WindowsSingleWriterLease() = default;
+
+std::optional<std::uint64_t> WindowsSingleWriterLease::held_fencing_token(
+    const AccountKey &account) const {
+    if (!ready_ || token_ == 0 || account != account_)
+        return std::nullopt;
+    return token_;
 }
 
 StoreCommitStatus WindowsFileJournalStore::commit(

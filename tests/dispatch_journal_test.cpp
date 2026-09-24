@@ -135,8 +135,8 @@ mt5bridge::DispatchAdmissionRequest ready_request(
     return request;
 }
 
-void prepare_for_admission(mt5bridge::OperationJournal &journal,
-                           const mt5bridge::OperationKey &key) {
+void prepare_dispatch_intent(mt5bridge::OperationJournal &journal,
+                             const mt5bridge::OperationKey &key) {
     require(journal.transition_operation(key, mt5bridge::OperationState::prechecking)
                 .accepted(),
             "prechecking operation state was rejected");
@@ -147,6 +147,22 @@ void prepare_for_admission(mt5bridge::OperationJournal &journal,
                 key, mt5bridge::JournalState::dispatch_intent_persisted)
                 .accepted(),
             "dispatch intent was not durably persisted");
+}
+
+void prepare_for_admission(
+    mt5bridge::OperationJournal &journal, const mt5bridge::OperationKey &key,
+    mt5bridge::ReconciliationDescriptor descriptor) {
+    prepare_dispatch_intent(journal, key);
+    require(journal.persist_reconciliation_descriptor(key, std::move(descriptor))
+                .accepted(),
+            "reconciliation descriptor was not durably persisted");
+}
+
+mt5bridge::ReconciliationDescriptor descriptor_for(
+    const mt5bridge::OperationKey &key, const mt5bridge::ObservationGraph &graph,
+    mt5bridge::ReconciliationPredicate predicate = mt5bridge::require_active_order(20)) {
+    return {key.account, mt5bridge::capture_reconciliation_baseline(graph),
+            {std::move(predicate)}, mt5bridge::OperationState::filled};
 }
 
 } // namespace
@@ -193,6 +209,7 @@ int main() {
                 {*positions_first.sample, *positions_second.sample}, positions_scope);
         require(positions_consistency.consistent() && positions_consistency.proof.has_value(),
                 "positions-only policy result did not carry a proof");
+        const auto descriptor = descriptor_for(key, coordinator.graph());
 
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
@@ -211,7 +228,23 @@ int main() {
         require(journal.transition_journal(key, mt5bridge::JournalState::prechecked).status ==
                     mt5bridge::JournalMutationStatus::invalid_transition,
                 "journal precheck bypassed the operation lifecycle");
-        prepare_for_admission(journal, key);
+        prepare_dispatch_intent(journal, key);
+        FakeLease descriptor_lease;
+        descriptor_lease.owned_account = key.account;
+        descriptor_lease.token = 76;
+        descriptor_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier descriptor_barrier(
+            journal, coordinator.graph(), consistency_request);
+        require(descriptor_barrier
+                    .admit(key, ready_request(key.account, *fresh_consistency.proof),
+                           descriptor_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
+                "dispatch barrier opened without a durable reconciliation descriptor");
+        require(journal.persist_reconciliation_descriptor(key, descriptor).accepted(),
+                "reconciliation descriptor was not durably persisted");
+        require(journal.persist_reconciliation_descriptor(key, descriptor).status ==
+                    mt5bridge::JournalMutationStatus::invalid_transition,
+                "durable reconciliation descriptor was replaced");
         require(journal.transition_operation(key, mt5bridge::OperationState::submitting)
                         .status == mt5bridge::JournalMutationStatus::invalid_transition,
                 "submitting bypassed the dispatch barrier");
@@ -221,7 +254,10 @@ int main() {
         mt5bridge::OperationJournal scope_journal(scope_store);
         require(scope_journal.create(scope_key, {0x05}).accepted(),
                 "scope-bound proof setup create failed");
-        prepare_for_admission(scope_journal, scope_key);
+        prepare_for_admission(
+            scope_journal, scope_key,
+            descriptor_for(scope_key, positions_coordinator.graph(),
+                           mt5bridge::require_position(20)));
         FakeLease scope_lease;
         scope_lease.owned_account = scope_key.account;
         scope_lease.token = 79;
@@ -393,6 +429,13 @@ int main() {
         require(malformed_journal.recover(key).status ==
                     mt5bridge::JournalMutationStatus::invalid_record,
                 "malformed durable fencing record was recovered");
+        auto missing_descriptor_store = store;
+        missing_descriptor_store.durable[key].reconciliation_descriptor.reset();
+        mt5bridge::OperationJournal missing_descriptor_journal(
+            missing_descriptor_store);
+        require(missing_descriptor_journal.recover(key).status ==
+                    mt5bridge::JournalMutationStatus::invalid_record,
+                "post-dispatch record without a reconciliation descriptor was recovered");
         auto malformed_pair_store = store;
         malformed_pair_store.durable[key].operation_state =
             mt5bridge::OperationState::queued;
@@ -414,7 +457,7 @@ int main() {
         mt5bridge::OperationJournal owner_a(stale_store);
         require(owner_a.create(stale_key, {0x04}).accepted(),
                 "stale-writer setup create failed");
-        prepare_for_admission(owner_a, stale_key);
+        prepare_for_admission(owner_a, stale_key, descriptor);
         mt5bridge::OperationJournal owner_b(stale_store);
         require(owner_b.recover(stale_key).accepted(),
                 "stale-writer setup recovery failed");

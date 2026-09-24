@@ -85,6 +85,28 @@ public:
     /// \return History-deal domain revision.
     std::uint64_t history_deals_revision() const { return history_deals_revision_; }
 
+    /// \brief Restores a previously durable baseline without creating proof.
+    /// \param account Account scope captured with the revisions.
+    /// \param graph_instance_id Graph provenance identity.
+    /// \param graph_revision Global graph revision.
+    /// \param active_orders_revision Active-order domain revision.
+    /// \param positions_revision Position domain revision.
+    /// \param history_orders_revision History-order domain revision.
+    /// \param history_deals_revision History-deal domain revision.
+    /// \return Valid baseline, or empty when durable fields are malformed.
+    static std::optional<ReconciliationBaseline> restore(
+        AccountKey account, std::uint64_t graph_instance_id,
+        std::uint64_t graph_revision, std::uint64_t active_orders_revision,
+        std::uint64_t positions_revision, std::uint64_t history_orders_revision,
+        std::uint64_t history_deals_revision) {
+        ReconciliationBaseline baseline(
+            std::move(account), graph_instance_id, graph_revision,
+            active_orders_revision, positions_revision, history_orders_revision,
+            history_deals_revision);
+        return baseline.valid() ? std::optional<ReconciliationBaseline>(std::move(baseline))
+                                : std::nullopt;
+    }
+
     /// \brief Tests whether this baseline was captured from a valid graph.
     /// \return True only for an account-bound, internally ordered snapshot.
     bool valid() const {

@@ -4,6 +4,7 @@
 /// \brief Defines the durable operation journal and pre-side-effect admission barrier.
 
 #include <mt5bridge/observation/environment_consistency.hpp>
+#include <mt5bridge/reconciliation/engine.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,66 @@ enum class OperationState {
     rejected,            ///< Validation or the server rejected the operation.
     failed,              ///< The operation failed before a successful outcome.
     ambiguous,           ///< Evidence cannot uniquely attribute the outcome.
+};
+
+/// \struct ReconciliationDescriptor
+/// \brief Immutable post-dispatch evidence contract retained in the journal.
+///
+/// The descriptor contains the pre-side-effect baseline, explicit predicates,
+/// and lifecycle state that a confirmed reconciliation may settle. Deadline
+/// and event-gap hints remain owner-loop inputs and are intentionally not
+/// durable evidence.
+struct ReconciliationDescriptor {
+    AccountKey account; ///< Immutable account scope of the operation.
+    ReconciliationBaseline baseline; ///< Graph baseline captured before dispatch.
+    std::vector<ReconciliationPredicate> predicates; ///< Required evidence assertions.
+    OperationState settled_state = OperationState::filled; ///< State proven on confirmation.
+
+    /// \brief Tests whether the descriptor is safe to persist and replay.
+    /// \return True only for a valid account, baseline, predicates, and target state.
+    bool valid() const {
+        if (!account.valid() || !baseline.valid() || account != baseline.account() ||
+            predicates.empty())
+            return false;
+        if (settled_state != OperationState::partially_filled &&
+            settled_state != OperationState::filled &&
+            settled_state != OperationState::cancelled &&
+            settled_state != OperationState::expired &&
+            settled_state != OperationState::rejected)
+            return false;
+        for (const auto &predicate : predicates) {
+            if (predicate.ticket == 0)
+                return false;
+            const bool history =
+                predicate.kind == ReconciliationPredicateKind::history_order_present ||
+                predicate.kind == ReconciliationPredicateKind::history_order_absent ||
+                predicate.kind == ReconciliationPredicateKind::history_deal_present ||
+                predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+            const bool absence =
+                predicate.kind == ReconciliationPredicateKind::active_order_absent ||
+                predicate.kind == ReconciliationPredicateKind::position_absent ||
+                predicate.kind == ReconciliationPredicateKind::history_order_absent ||
+                predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+            switch (predicate.kind) {
+            case ReconciliationPredicateKind::active_order_present:
+            case ReconciliationPredicateKind::active_order_absent:
+            case ReconciliationPredicateKind::position_present:
+            case ReconciliationPredicateKind::position_absent:
+            case ReconciliationPredicateKind::history_order_present:
+            case ReconciliationPredicateKind::history_order_absent:
+            case ReconciliationPredicateKind::history_deal_present:
+            case ReconciliationPredicateKind::history_deal_absent:
+                break;
+            default:
+                return false;
+            }
+            if ((!history && predicate.history_window) ||
+                (history && predicate.history_window && !predicate.history_window->valid()) ||
+                (absence && history && !predicate.history_window))
+                return false;
+        }
+        return true;
+    }
 };
 
 /// \enum JournalState
@@ -174,6 +235,8 @@ struct OperationRecord {
     JournalState journal_state = JournalState::created; ///< Write-ahead state.
     std::uint64_t revision = 0; ///< Monotonic journal revision for this record.
     std::uint64_t fencing_token = 0; ///< Writer token committed at dispatching.
+    std::optional<ReconciliationDescriptor>
+        reconciliation_descriptor; ///< Durable post-dispatch evidence contract.
 
     /// \brief Tests whether the record can be persisted or recovered safely.
     /// \return True when identity, payload, state pair, revision, and fencing agree.
@@ -182,6 +245,12 @@ struct OperationRecord {
             !valid_operation_state(operation_state) || !valid_journal_state(journal_state))
             return false;
         if (!valid_state_pair(journal_state, operation_state))
+            return false;
+        if (reconciliation_descriptor &&
+            (!reconciliation_descriptor->valid() ||
+             reconciliation_descriptor->account != key.account))
+            return false;
+        if (journal_at_least_dispatching(journal_state) && !reconciliation_descriptor)
             return false;
         if (!journal_at_least_result_persisted(journal_state) && !result_payload.empty())
             return false;
@@ -478,6 +547,39 @@ public:
         candidate.revision += 1;
         if (next_state == JournalState::dispatching)
             candidate.fencing_token = fencing_token;
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
+        it->second = candidate;
+        return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
+    /// \brief Durably attaches the immutable post-dispatch evidence contract.
+    /// \param key Account and managed-operation identity.
+    /// \param descriptor Baseline, predicates, and settlement target to retain.
+    /// \return Mutation status and the descriptor-bearing record.
+    /// \note A descriptor can be attached only once and cannot be replaced.
+    JournalMutationResult persist_reconciliation_descriptor(
+        const OperationKey &key, ReconciliationDescriptor descriptor) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (it->second.journal_state != JournalState::dispatch_intent_persisted ||
+            it->second.operation_state != OperationState::prechecking ||
+            it->second.reconciliation_descriptor ||
+            !descriptor.valid() || descriptor.account != key.account)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+
+        OperationRecord candidate = it->second;
+        candidate.reconciliation_descriptor = std::move(descriptor);
+        candidate.revision += 1;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};
         const auto commit_status = store_.commit(candidate, it->second.revision);
@@ -796,7 +898,8 @@ public:
         if (!record)
             return {DispatchAdmissionStatus::operation_not_found, std::nullopt};
         if (record->journal_state != JournalState::dispatch_intent_persisted ||
-            record->operation_state != OperationState::prechecking)
+            record->operation_state != OperationState::prechecking ||
+            !record->reconciliation_descriptor)
             return {DispatchAdmissionStatus::invalid_state, std::nullopt};
         const auto fencing_token = lease.held_fencing_token(key.account);
         if (!fencing_token || *fencing_token == 0)

@@ -195,6 +195,15 @@ History absence predicates require a complete revision-filtered coverage
 window. Malformed predicates and baselines with impossible revision ordering
 are rejected before graph state is evaluated.
 
+Durable dispatch descriptors additionally record whether each asserted identity
+was present before dispatch and the expected causal transition. A new order may
+therefore cross the barrier with a zero broker ticket, provided it carries a
+non-zero client correlation id. Such an identity remains pending and cannot
+satisfy an absence predicate. Once a trusted result supplies the broker ticket,
+the owner may enrich the request with that ticket only when the same correlation
+id and causal metadata are retained; the durable descriptor itself is not
+silently broadened.
+
 The evaluator returns `PENDING`, `CONFIRMED`, `NOT_OBSERVED`,
 `ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or `AMBIGUOUS`. It does not call the
 runtime, write a journal, or invoke `order_send`. `TRADE_EVENT_GAP` is supplied
@@ -423,7 +432,7 @@ The lifecycle state is not a binary success flag:
 OperationState:
 queued -> prechecking -> submitting -> accepted -> reconciling
                                       ├── partially_filled -> filled
-                                      ├── rejected/failed
+                                      ├── rejected
                                       ├── cancelled/expired
                                       └── ambiguous
 

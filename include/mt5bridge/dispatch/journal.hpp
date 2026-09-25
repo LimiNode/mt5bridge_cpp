@@ -55,6 +55,8 @@ struct ReconciliationDescriptor {
     ReconciliationBaseline baseline; ///< Graph baseline captured before dispatch.
     std::vector<ReconciliationPredicate> predicates; ///< Required evidence assertions.
     OperationState settled_state = OperationState::filled; ///< State proven on confirmation.
+    std::uint64_t trade_id = 0; ///< Managed trade identity bound at persistence time.
+    std::uint64_t operation_id = 0; ///< Side-effect identity bound at persistence time.
 
     /// \brief Tests whether the descriptor is safe to persist and replay.
     /// \return True only for a valid account, baseline, predicates, and target state.
@@ -69,7 +71,9 @@ struct ReconciliationDescriptor {
             settled_state != OperationState::rejected)
             return false;
         for (const auto &predicate : predicates) {
-            if (predicate.ticket == 0)
+            if (!predicate.baseline_present ||
+                predicate.expected_transition == ReconciliationTransition::unspecified ||
+                (predicate.ticket == 0 && predicate.correlation_id == 0))
                 return false;
             const bool history =
                 predicate.kind == ReconciliationPredicateKind::history_order_present ||
@@ -94,6 +98,20 @@ struct ReconciliationDescriptor {
             default:
                 return false;
             }
+            const bool presence = !absence;
+            if ((presence &&
+                 predicate.expected_transition !=
+                     ReconciliationTransition::absent_to_present) ||
+                (absence &&
+                 predicate.expected_transition !=
+                     ReconciliationTransition::present_to_absent) ||
+                (predicate.expected_transition ==
+                     ReconciliationTransition::absent_to_present &&
+                 *predicate.baseline_present) ||
+                (predicate.expected_transition ==
+                     ReconciliationTransition::present_to_absent &&
+                 !*predicate.baseline_present))
+                return false;
             if ((!history && predicate.history_window) ||
                 (history && predicate.history_window && !predicate.history_window->valid()) ||
                 (absence && history && !predicate.history_window))
@@ -248,9 +266,17 @@ struct OperationRecord {
             return false;
         if (reconciliation_descriptor &&
             (!reconciliation_descriptor->valid() ||
-             reconciliation_descriptor->account != key.account))
+             reconciliation_descriptor->account != key.account ||
+             (reconciliation_descriptor->trade_id != 0 &&
+              reconciliation_descriptor->trade_id != key.trade_id) ||
+             (reconciliation_descriptor->operation_id != 0 &&
+              reconciliation_descriptor->operation_id != key.operation_id)))
             return false;
-        if (journal_at_least_dispatching(journal_state) && !reconciliation_descriptor)
+        if (journal_at_least_dispatching(journal_state) &&
+            (!reconciliation_descriptor || reconciliation_descriptor->trade_id == 0 ||
+             reconciliation_descriptor->operation_id == 0 ||
+             reconciliation_descriptor->trade_id != key.trade_id ||
+             reconciliation_descriptor->operation_id != key.operation_id))
             return false;
         if (!journal_at_least_result_persisted(journal_state) && !result_payload.empty())
             return false;
@@ -299,7 +325,6 @@ constexpr bool valid_state_pair(JournalState journal_state,
                operation_state == OperationState::cancelled ||
                operation_state == OperationState::expired ||
                operation_state == OperationState::rejected ||
-               operation_state == OperationState::failed ||
                operation_state == OperationState::ambiguous;
     }
     return false;
@@ -574,10 +599,17 @@ public:
             it->second.reconciliation_descriptor ||
             !descriptor.valid() || descriptor.account != key.account)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if ((descriptor.trade_id != 0 && descriptor.trade_id != key.trade_id) ||
+            (descriptor.operation_id != 0 && descriptor.operation_id != key.operation_id))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
         OperationRecord candidate = it->second;
+        if (descriptor.trade_id == 0)
+            descriptor.trade_id = key.trade_id;
+        if (descriptor.operation_id == 0)
+            descriptor.operation_id = key.operation_id;
         candidate.reconciliation_descriptor = std::move(descriptor);
         candidate.revision += 1;
         if (!candidate.valid())
@@ -717,7 +749,7 @@ public:
             return next == OperationState::partially_filled ||
                    next == OperationState::filled || next == OperationState::cancelled ||
                    next == OperationState::expired || next == OperationState::rejected ||
-                   next == OperationState::failed || next == OperationState::ambiguous;
+                   next == OperationState::ambiguous;
         case OperationState::partially_filled:
             return next == OperationState::reconciling ||
                    next == OperationState::filled || next == OperationState::cancelled ||

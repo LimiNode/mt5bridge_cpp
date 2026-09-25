@@ -290,6 +290,39 @@ int main() {
                     .admitted(),
                 "proof matching the configured scope was rejected");
 
+        const auto unknown_key = mt5bridge::OperationKey{account(), 10, 14};
+        MemoryStore unknown_store;
+        mt5bridge::OperationJournal unknown_journal(unknown_store);
+        require(unknown_journal.create(unknown_key, {0x06}).accepted(),
+                "unknown-ticket operation setup failed");
+        prepare_dispatch_intent(unknown_journal, unknown_key);
+        const auto unknown_predicate = mt5bridge::expect_reconciliation_transition(
+            mt5bridge::ReconciliationPredicateKind::active_order_present,
+            std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+            9001);
+        require(unknown_predicate.ticket == 0 && unknown_predicate.correlation_id == 9001,
+                "unknown-ticket predicate lost its client correlation");
+        require(unknown_journal
+                    .persist_reconciliation_descriptor(
+                        unknown_key,
+                        {unknown_key.account,
+                         mt5bridge::capture_reconciliation_baseline(coordinator.graph()),
+                         {unknown_predicate}, mt5bridge::OperationState::filled})
+                    .accepted(),
+                "unknown-ticket descriptor was not durably persisted");
+        require(unknown_journal
+                    .transition_journal(unknown_key, mt5bridge::JournalState::dispatching, 81)
+                    .accepted(),
+                "unknown-ticket operation could not cross dispatching");
+        mt5bridge::ReconciliationRequest unknown_request;
+        unknown_request.baseline = mt5bridge::capture_reconciliation_baseline(coordinator.graph());
+        unknown_request.predicates = {unknown_predicate};
+        const auto unknown_result = mt5bridge::ReconciliationEngine::evaluate(
+            coordinator.graph(), unknown_request);
+        require(unknown_result.outcome == mt5bridge::ReconciliationOutcome::pending &&
+                    unknown_result.reason == mt5bridge::ReconciliationReason::unresolved_operation,
+                "unknown broker ticket was treated as confirmed evidence");
+
         mt5bridge::DispatchAdmissionBarrier barrier(journal, coordinator.graph(),
                                                     consistency_request);
         FakeLease lease;
@@ -386,6 +419,10 @@ int main() {
                     key, mt5bridge::OperationState::reconciling)
                     .accepted(),
                 "crash recovery could not enter operation reconciliation");
+        require(recovered_journal
+                    .transition_operation(key, mt5bridge::OperationState::failed)
+                    .status == mt5bridge::JournalMutationStatus::invalid_transition,
+                "reconciling operation was incorrectly downgraded to failed");
 
         const auto entered_backend =
             journal.transition_operation(key, mt5bridge::OperationState::submitting);
@@ -443,6 +480,16 @@ int main() {
         require(malformed_pair_journal.recover(key).status ==
                     mt5bridge::JournalMutationStatus::invalid_record,
                 "incompatible journal/operation state pair was recovered");
+        auto malformed_reconciling_store = store;
+        malformed_reconciling_store.durable[key].journal_state =
+            mt5bridge::JournalState::reconciling;
+        malformed_reconciling_store.durable[key].operation_state =
+            mt5bridge::OperationState::failed;
+        mt5bridge::OperationJournal malformed_reconciling_journal(
+            malformed_reconciling_store);
+        require(malformed_reconciling_journal.recover(key).status ==
+                    mt5bridge::JournalMutationStatus::invalid_record,
+                "reconciling plus failed state pair was recovered");
         auto malformed_accepted_store = store;
         malformed_accepted_store.durable[key].operation_state =
             mt5bridge::OperationState::accepted;

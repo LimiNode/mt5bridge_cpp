@@ -13,15 +13,27 @@ Every operation must persist an immutable reconciliation descriptor before the
 - the observation graph instance and all domain revisions in the pre-dispatch
   baseline;
 - the explicit presence/absence predicates used to attribute a later broker
-  effect; and
+  effect, including whether the identity was present before dispatch and the
+  expected causal transition; and
 - the lifecycle state that confirmed evidence is allowed to settle.
+
+Broker-assigned identities are not required to exist before `order_send`. A
+predicate may instead carry a non-zero client correlation id with a zero broker
+ticket. Such a predicate is durable and valid, but remains pending until a
+trusted transport result binds the broker ticket; an unknown ticket can never
+confirm either presence or absence by itself. Known-ticket predicates retain
+the same explicit baseline transition contract, preventing a pre-existing
+ticket from being mistaken for a post-dispatch effect.
 
 The descriptor is stored in the same compare-and-committed operation record as
 the dispatch intent. A record at or beyond `dispatching` without a valid
 descriptor is malformed and is rejected during recovery. A reconciliation
 worker must either use the exact durable descriptor or provide a request that
 matches it byte-for-byte in semantic fields; caller-supplied predicates cannot
-silently broaden or replace the durable contract.
+silently broaden or replace the durable contract. The one controlled enrichment
+is replacing a zero broker ticket with a non-zero ticket while retaining the
+same non-zero client correlation id. This resolves a pre-send unknown identity
+from a trusted broker result without changing the causal contract.
 
 The descriptor is evidence provenance, not a consistency proof. It does not
 make a recovered graph baseline current, and it does not authorize a resend.
@@ -38,6 +50,9 @@ evidence.
 
 - A crash after the dispatch barrier cannot lose the information needed to
   attribute a later order, deal, position, or active-order observation.
+- New OPEN/LIMIT/STOP operations can cross the durable barrier before the
+  broker assigns an order/deal/position ticket, without weakening fail-closed
+  reconciliation.
 - Recovery fails closed for legacy or corrupted post-dispatch records that do
   not carry the descriptor.
 - The descriptor is persisted before admission, so the admission barrier never

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -255,14 +256,34 @@ int main() {
             }
         }
         require(!epoch_path.empty(), "fencing epoch file was not created");
+        std::vector<char> epoch_bytes;
         {
+            std::ifstream input(epoch_path, std::ios::binary);
+            epoch_bytes.assign(std::istreambuf_iterator<char>(input),
+                               std::istreambuf_iterator<char>());
+        }
+        require(epoch_bytes.size() > 8, "fencing epoch envelope was unexpectedly short");
+        {
+            auto corrupt_bytes = epoch_bytes;
             std::ofstream corrupt_epoch(epoch_path,
                                         std::ios::binary | std::ios::trunc);
-            corrupt_epoch.put('X');
+            corrupt_bytes[corrupt_bytes.size() / 2] ^= static_cast<char>(0x01);
+            corrupt_epoch.write(corrupt_bytes.data(),
+                                static_cast<std::streamsize>(corrupt_bytes.size()));
         }
         mt5bridge::WindowsSingleWriterLease corrupt_lease(directory, lease_account);
         require(!corrupt_lease.ready() && !corrupt_lease.last_error().empty(),
                 "corrupt fencing epoch was accepted");
+        {
+            std::ofstream restore_epoch(epoch_path,
+                                        std::ios::binary | std::ios::trunc);
+            restore_epoch.write(epoch_bytes.data(),
+                                static_cast<std::streamsize>(epoch_bytes.size()));
+        }
+        mt5bridge::WindowsSingleWriterLease successor_while_failed(directory,
+                                                                     lease_account);
+        require(successor_while_failed.ready(),
+                "failed lease retained the account lock after initialization error");
 
         std::filesystem::remove_all(directory, cleanup_error);
         std::cout << "file journal store checks passed\n";

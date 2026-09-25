@@ -24,14 +24,17 @@ Lease metadata is separate from operation records:
 
 ```text
 lease-<hex server>-<hex login>.lock   exclusive OS ownership handle
-lease-<hex server>-<hex login>.epoch  durable little-endian uint64 epoch
+lease-<hex server>-<hex login>.epoch  versioned, checksummed, account-bound envelope
 ```
 
 The account identity is encoded losslessly in the filename rather than using a
 hash-only name, so distinct server names cannot silently share a fencing lock.
-An absent epoch starts at one. A malformed, zero, or exhausted epoch fails
-closed; a stale temporary epoch file is ignored and replaced while the owner
-lock is held.
+The epoch file also carries a format marker, body length, checksum, and the
+account identity. An absent epoch starts at one. A malformed, same-size
+corruption, account mismatch, zero, or exhausted epoch fails closed; a stale
+temporary epoch file is ignored and replaced while the owner lock is held.
+Initialization failures release the OS lock immediately, even if the failed
+lease object remains alive for diagnostics.
 
 The lease is held continuously across admission and the private one-shot
 backend. The journal still remains the authority for operation revision and
@@ -53,6 +56,7 @@ the journal CAS.
 ## Verification
 
 `tests/file_journal_store_test.cpp` verifies exclusive same-account ownership,
-account scoping, monotonic token advancement after release, and fail-closed
+account scoping, monotonic token advancement after release, same-size checksum
+corruption, immediate lock release after failed initialization, and fail-closed
 handling of a corrupt epoch file. The test uses the same anchored directory as
 the Windows durable journal store and does not invoke Python or `order_send`.

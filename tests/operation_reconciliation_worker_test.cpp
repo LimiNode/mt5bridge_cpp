@@ -183,6 +183,44 @@ int main() {
                 "confirmed reconciliation was not durably settled");
         require(provider.calls == 3, "worker did not perform baseline and two cycles");
 
+        const auto enrichment_key = mt5bridge::OperationKey{account(), 70, 71};
+        require(journal.create(enrichment_key, {0x08}).accepted(),
+                "ticket-enrichment operation create failed");
+        FakeProvider enrichment_provider({batch(enrichment_key.account, false),
+                                          batch(enrichment_key.account, true)});
+        mt5bridge::ObservationCoordinator enrichment_coordinator(
+            enrichment_provider, enrichment_key.account);
+        mt5bridge::ObservationCollectionRequest enrichment_collection;
+        enrichment_collection.observe_positions = false;
+        require(enrichment_coordinator.refresh(enrichment_collection).apply.accepted(),
+                "ticket-enrichment baseline refresh failed");
+        const auto enrichment_baseline = enrichment_coordinator.capture_baseline();
+        const auto unknown_predicate = mt5bridge::expect_reconciliation_transition(
+            mt5bridge::ReconciliationPredicateKind::active_order_present,
+            std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+            7001);
+        enter_dispatching(
+            journal, enrichment_key,
+            mt5bridge::ReconciliationDescriptor{enrichment_key.account,
+                                                 enrichment_baseline,
+                                                 {unknown_predicate},
+                                                 mt5bridge::OperationState::filled});
+        mt5bridge::ReconciliationRequest enriched_request;
+        enriched_request.baseline = enrichment_baseline;
+        enriched_request.predicates = {mt5bridge::expect_reconciliation_transition(
+            mt5bridge::ReconciliationPredicateKind::active_order_present, 100, false,
+            mt5bridge::ReconciliationTransition::absent_to_present, 7001)};
+        mt5bridge::OperationReconciliationWorker enrichment_worker(
+            journal, enrichment_key, enrichment_coordinator, enrichment_collection,
+            enriched_request);
+        const auto enriched_cycle = enrichment_worker.step();
+        require(enriched_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::progressed &&
+                    enriched_cycle.record &&
+                    enriched_cycle.record->operation_state ==
+                        mt5bridge::OperationState::filled,
+                "trusted ticket enrichment did not resolve the unknown identity");
+
         const auto restart_key = mt5bridge::OperationKey{account(), 13, 17};
         require(journal.create(restart_key, {0x07}).accepted(),
                 "restart reconciliation operation create failed");

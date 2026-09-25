@@ -264,7 +264,8 @@ private:
         if (!request.baseline)
             return std::nullopt;
         ReconciliationDescriptor descriptor{key.account, *request.baseline,
-                                            request.predicates, settled_state};
+                                            request.predicates, settled_state,
+                                            key.trade_id, key.operation_id};
         return descriptor.valid()
                    ? std::optional<ReconciliationDescriptor>(std::move(descriptor))
                    : std::nullopt;
@@ -334,13 +335,22 @@ private:
             left.baseline.history_orders_revision() != right.baseline.history_orders_revision() ||
             left.baseline.history_deals_revision() != right.baseline.history_deals_revision() ||
             left.settled_state != right.settled_state ||
+            left.trade_id != right.trade_id || left.operation_id != right.operation_id ||
             left.predicates.size() != right.predicates.size())
             return false;
         for (std::size_t index = 0; index < left.predicates.size(); ++index) {
             const auto &left_predicate = left.predicates[index];
             const auto &right_predicate = right.predicates[index];
-            if (left_predicate.kind != right_predicate.kind ||
-                left_predicate.ticket != right_predicate.ticket ||
+            const bool ticket_matches =
+                left_predicate.ticket == right_predicate.ticket ||
+                (left_predicate.correlation_id != 0 &&
+                 left_predicate.correlation_id == right_predicate.correlation_id &&
+                 (left_predicate.ticket == 0 || right_predicate.ticket == 0));
+            if (left_predicate.kind != right_predicate.kind || !ticket_matches ||
+                left_predicate.baseline_present != right_predicate.baseline_present ||
+                left_predicate.correlation_id != right_predicate.correlation_id ||
+                left_predicate.expected_transition !=
+                    right_predicate.expected_transition ||
                 !same_window(left_predicate.history_window,
                              right_predicate.history_window))
                 return false;

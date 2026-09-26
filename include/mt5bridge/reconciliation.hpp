@@ -8,4 +8,3 @@
 #include <mt5bridge/reconciliation/coordinator.hpp>
 #include <mt5bridge/reconciliation/worker.hpp>
 #include <mt5bridge/reconciliation/environment_consistency.hpp>
-#include <mt5bridge/reconciliation/operation_worker.hpp>

@@ -1,6 +1,6 @@
 #pragma once
 
-/// \file reconciliation/operation_worker.hpp
+/// \file dispatch/operation_worker.hpp
 /// \brief Defines journal-aware operation reconciliation and startup recovery.
 
 #include <mt5bridge/dispatch/journal.hpp>

@@ -119,7 +119,7 @@ if(BUILD_TESTING)
                    tests/header_self_containment_reconciliation_engine.cpp
                    tests/header_self_containment_reconciliation_coordinator.cpp
                    tests/header_self_containment_reconciliation_worker.cpp
-                   tests/header_self_containment_operation_worker.cpp
+                   tests/header_self_containment_dispatch_operation_worker.cpp
                    tests/header_self_containment_environment_consistency.cpp
                    tests/header_self_containment_dispatch_journal.cpp
                    tests/header_self_containment_file_journal_store.cpp)

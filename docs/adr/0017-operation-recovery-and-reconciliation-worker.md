@@ -35,7 +35,8 @@ Terminal lifecycle states are classified before journal state so a persisted
 broker rejection is not reopened merely because its journal contains a result.
 Any record at or beyond `dispatching` is non-resendable.
 
-`OperationReconciliationWorker` binds one recovered `OperationKey` to the
+`OperationReconciliationWorker` in `dispatch/operation_worker.hpp` binds one
+recovered `OperationKey` to the
 caller-driven observation worker. Before the first refresh it normalizes a
 post-dispatch record to `reconciling` durably. It accepts explicit predicates
 and an explicit lifecycle state that those predicates prove; an opaque broker

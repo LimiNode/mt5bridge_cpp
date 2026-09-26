@@ -103,7 +103,7 @@ include/
 
 src/
 ├── bridge/mt5_bridge.cpp
-├── runtime/runtime_lane.*
+├── runtime/{runtime_lane.*,python_ref.hpp}
 ├── trade/python_dispatch_transport.*
 └── dispatch/{file_journal_store,one_shot_backend}.*
 ```
@@ -115,7 +115,9 @@ headers under `dispatch/`. The latter is implemented by the Python-free
 `src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific
 `src/trade/python_dispatch_transport.hpp/.cpp` adapter is compiled only into
-the DLL.
+the DLL. CPython-backed components share the narrow private
+`src/runtime/python_ref.hpp` ownership wrapper instead of defining local
+reference-counting helpers.
 Neither private seam is part of the consumer SDK.
 
 Everything below `include/mt5bridge*` is consumer-facing SDK/API. The source

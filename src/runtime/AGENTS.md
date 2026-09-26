@@ -12,3 +12,7 @@ must remain usable with `MT5BRIDGE_BUILD_RUNTIME=OFF`.
 Private runtime headers belong next to their implementation files in this
 directory. Do not move them into a parallel `include/` tree. Nothing in this
 directory is a consumer SDK header.
+
+`python_ref.hpp` is the shared move-only ownership primitive for strong
+`PyObject*` references. Keep it narrow; field conversion and domain-specific
+Python adapters remain in their owning market or trade implementation.

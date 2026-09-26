@@ -97,9 +97,9 @@ include/
     ├── trade/{common,account,symbol,order_check,orders,positions,deals}.h
     ├── reconciliation.hpp
     ├── reconciliation/{graph,engine,coordinator,worker,
-    │                  environment_consistency,operation_worker}.hpp
+    │                  environment_consistency}.hpp
     ├── dispatch.hpp
-    └── dispatch/{journal,file_journal_store}.hpp
+    └── dispatch/{journal,file_journal_store,operation_worker}.hpp
 
 src/
 ├── bridge/mt5_bridge.cpp

@@ -110,7 +110,6 @@ OrderSendKnown(w, o, effect) ==
     /\ dispatchWriter[o] = w
     /\ dispatchEpoch[o] = leaseEpoch[o]
     /\ permitAvailable[o] = TRUE
-    /\ sendCount[o] = 0
     /\ sendCount' = [sendCount EXCEPT ![o] = @ + 1]
     /\ brokerEffect' = [brokerEffect EXCEPT ![o] = effect]
     /\ permitAvailable' = [permitAvailable EXCEPT ![o] = FALSE]
@@ -132,7 +131,6 @@ OrderSendUnknown(w, o, effect) ==
     /\ dispatchWriter[o] = w
     /\ dispatchEpoch[o] = leaseEpoch[o]
     /\ permitAvailable[o] = TRUE
-    /\ sendCount[o] = 0
     /\ sendCount' = [sendCount EXCEPT ![o] = @ + 1]
     /\ brokerEffect' = [brokerEffect EXCEPT ![o] = effect]
     /\ permitAvailable' = [permitAvailable EXCEPT ![o] = FALSE]
@@ -250,7 +248,7 @@ Next ==
 TypeOK ==
     /\ state \in [Operations -> States]
     /\ barrierEver \in [Operations -> BOOLEAN]
-    /\ sendCount \in [Operations -> 0..1]
+    /\ sendCount \in [Operations -> 0..2]
     /\ brokerEffect \in [Operations -> BrokerEffects]
     /\ resultDurable \in [Operations -> BOOLEAN]
     /\ bindingsDurable \in [Operations -> BOOLEAN]

@@ -307,7 +307,7 @@ workers rather than inferred from one broker result.
 ## Journal-aware recovery and reconciliation
 
 The current owner-loop slice is exposed by
-[`reconciliation/operation_worker.hpp`](../include/mt5bridge/reconciliation/operation_worker.hpp).
+[`dispatch/operation_worker.hpp`](../include/mt5bridge/dispatch/operation_worker.hpp).
 `OperationRecoveryCoordinator::recover()` discovers every durable record after
 a restart and classifies it without sending: pre-dispatch records may resume
 validation, while `dispatching`, `result_persisted`, and `reconciling` records

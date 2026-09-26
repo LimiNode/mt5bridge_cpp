@@ -11,6 +11,7 @@ It covers the current durable pre-side-effect contract:
 
 - one non-resendable `dispatching` barrier per operation;
 - monotonically increasing lease epochs and current-token checks;
+- a one-shot permit that is consumed at the transport boundary;
 - crash/restart recovery to reconciliation rather than resend;
 - at-most-one broker send;
 - atomic result and reconciliation-evidence persistence;

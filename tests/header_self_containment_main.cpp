@@ -16,7 +16,7 @@ extern "C" int mt5bridge_probe_reconciliation_graph_header();
 extern "C" int mt5bridge_probe_reconciliation_engine_header();
 extern "C" int mt5bridge_probe_reconciliation_coordinator_header();
 extern "C" int mt5bridge_probe_reconciliation_worker_header();
-extern "C" int mt5bridge_probe_operation_worker_header();
+extern "C" int mt5bridge_probe_dispatch_operation_worker_header();
 extern "C" int mt5bridge_probe_environment_consistency_header();
 extern "C" int mt5bridge_probe_dispatch_journal_header();
 extern "C" int mt5bridge_probe_file_journal_store_header();
@@ -37,7 +37,7 @@ int main() {
            mt5bridge_probe_reconciliation_engine_header() |
            mt5bridge_probe_reconciliation_coordinator_header() |
            mt5bridge_probe_reconciliation_worker_header() |
-           mt5bridge_probe_operation_worker_header() |
+           mt5bridge_probe_dispatch_operation_worker_header() |
            mt5bridge_probe_environment_consistency_header() |
            mt5bridge_probe_dispatch_journal_header() |
            mt5bridge_probe_file_journal_store_header();

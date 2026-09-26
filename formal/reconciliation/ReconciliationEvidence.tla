@@ -8,7 +8,8 @@ EXTENDS Naturals, FiniteSets
 (* the durable baseline.                                                   *)
 (***************************************************************************)
 
-CONSTANTS Domains, Accounts, RequestModes, MaxRevision, MaxGraphInstance
+CONSTANTS Domains, Accounts, RequestModes, MaxRevision, MaxGraphInstance,
+          MaxDomainRevision
 
 EvidenceKinds == {"unseen", "match", "absence", "ambiguous"}
 
@@ -78,6 +79,7 @@ Refresh(d, kind, isAuthoritative) ==
     /\ kind \in EvidenceKinds
     /\ isAuthoritative \in BOOLEAN
     /\ graphRevision < MaxRevision
+    /\ domainRevision[d] < MaxDomainRevision
     /\ graphRevision' = graphRevision + 1
     /\ domainRevision' = [domainRevision EXCEPT ![d] = @ + 1]
     /\ evidence' = [evidence EXCEPT ![d] = kind]
@@ -171,8 +173,8 @@ TypeOK ==
     /\ graphRevision \in 0..MaxRevision
     /\ baselineGraphInstance \in 1..MaxGraphInstance
     /\ baselineGraphRevision \in 0..MaxRevision
-    /\ domainRevision \in [Domains -> Nat]
-    /\ baselineDomainRevision \in [Domains -> Nat]
+    /\ domainRevision \in [Domains -> 0..MaxDomainRevision]
+    /\ baselineDomainRevision \in [Domains -> 0..MaxDomainRevision]
     /\ evidence \in [Domains -> EvidenceKinds]
     /\ authoritative \in [Domains -> BOOLEAN]
     /\ gapEvidence \in [Domains -> BOOLEAN]

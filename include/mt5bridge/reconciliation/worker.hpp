@@ -1,9 +1,9 @@
 #pragma once
 
-/// \file observation/worker.hpp
+/// \file reconciliation/worker.hpp
 /// \brief Defines the caller-driven bounded reconciliation worker.
 
-#include <mt5bridge/observation/coordinator.hpp>
+#include <mt5bridge/reconciliation/coordinator.hpp>
 
 #include <cstdint>
 #include <optional>

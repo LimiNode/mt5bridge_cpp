@@ -1,9 +1,9 @@
 #pragma once
 
-/// \file observation/environment_consistency.hpp
+/// \file reconciliation/environment_consistency.hpp
 /// \brief Defines bounded cross-view consistency checks for MT5 observations.
 
-#include <mt5bridge/observation/coordinator.hpp>
+#include <mt5bridge/reconciliation/coordinator.hpp>
 
 #include <algorithm>
 #include <array>

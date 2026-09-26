@@ -27,7 +27,7 @@ the broker supplied a single atomic cross-domain snapshot.
 ## Decision
 
 `EnvironmentConsistencyPolicy` in
-`include/mt5bridge/environment_consistency.hpp` evaluates a caller-owned
+`include/mt5bridge/reconciliation/environment_consistency.hpp` evaluates a caller-owned
 sequence of `ObservationSample` values returned by
 `ObservationCoordinator::refresh()`. The sample constructor is private to the
 coordinator and carries the accepted batch, graph instance identity, and exact

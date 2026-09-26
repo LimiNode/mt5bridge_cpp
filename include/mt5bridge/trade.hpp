@@ -1,6 +1,6 @@
 #pragma once
 
 /// \file trade.hpp
-/// \brief Provides the public trade-observation domain umbrella.
+/// \brief Provides the public C++ trade-domain umbrella.
 
-#include <mt5bridge/trade/observation.h>
+#include <mt5bridge/trade.h>

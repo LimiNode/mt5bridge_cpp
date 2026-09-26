@@ -1,9 +1,12 @@
 #pragma once
 
-/// \file observation/graph.hpp
+/// \file reconciliation/graph.hpp
 /// \brief Defines the observation-only C++ graph for typed MT5 evidence.
 
-#include <mt5bridge/trade/observation.h>
+#include <mt5bridge/trade/account.h>
+#include <mt5bridge/trade/deals.h>
+#include <mt5bridge/trade/orders.h>
+#include <mt5bridge/trade/positions.h>
 
 #include <algorithm>
 #include <atomic>

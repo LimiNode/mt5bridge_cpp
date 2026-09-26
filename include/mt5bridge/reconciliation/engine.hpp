@@ -53,6 +53,14 @@ enum class ReconciliationPredicateKind {
     history_deal_absent,   ///< A history deal ticket must be absent in a window.
 };
 
+/// \enum ReconciliationTransition
+/// \brief Describes the causal state change expected after dispatch.
+enum class ReconciliationTransition {
+    unspecified,       ///< A live observation request has no durable transition contract.
+    absent_to_present, ///< The identity was absent before dispatch and must appear.
+    present_to_absent, ///< The identity existed before dispatch and must disappear.
+};
+
 /// \class ReconciliationBaseline
 /// \brief Immutable graph revisions captured before an observation cycle.
 class ReconciliationBaseline {
@@ -84,6 +92,28 @@ public:
     /// \brief Returns the history-deal domain revision at capture time.
     /// \return History-deal domain revision.
     std::uint64_t history_deals_revision() const { return history_deals_revision_; }
+
+    /// \brief Restores a previously durable baseline without creating proof.
+    /// \param account Account scope captured with the revisions.
+    /// \param graph_instance_id Graph provenance identity.
+    /// \param graph_revision Global graph revision.
+    /// \param active_orders_revision Active-order domain revision.
+    /// \param positions_revision Position domain revision.
+    /// \param history_orders_revision History-order domain revision.
+    /// \param history_deals_revision History-deal domain revision.
+    /// \return Valid baseline, or empty when durable fields are malformed.
+    static std::optional<ReconciliationBaseline> restore(
+        AccountKey account, std::uint64_t graph_instance_id,
+        std::uint64_t graph_revision, std::uint64_t active_orders_revision,
+        std::uint64_t positions_revision, std::uint64_t history_orders_revision,
+        std::uint64_t history_deals_revision) {
+        ReconciliationBaseline baseline(
+            std::move(account), graph_instance_id, graph_revision,
+            active_orders_revision, positions_revision, history_orders_revision,
+            history_deals_revision);
+        return baseline.valid() ? std::optional<ReconciliationBaseline>(std::move(baseline))
+                                : std::nullopt;
+    }
 
     /// \brief Tests whether this baseline was captured from a valid graph.
     /// \return True only for an account-bound, internally ordered snapshot.
@@ -143,34 +173,85 @@ struct ReconciliationPredicate {
     /// \brief Optional time window for a history predicate.
     /// \note Required for history absence and optional for history presence.
     std::optional<ObservationWindow> history_window;
+    /// \brief Whether the asserted identity existed in the pre-dispatch baseline.
+    /// \note Required when this predicate is persisted in a durable descriptor.
+    std::optional<bool> baseline_present;
+    /// \brief Correlation identity used while a broker ticket is still unknown.
+    /// \note A non-zero value is required when `ticket` is zero in a descriptor.
+    std::uint64_t correlation_id = 0;
+    /// \brief Causal transition expected from this predicate after dispatch.
+    ReconciliationTransition expected_transition =
+        ReconciliationTransition::unspecified;
 };
+
+/// \brief Builds a durable causal predicate, including unknown-ticket identity.
+/// \param kind Presence/absence domain asserted by the transition.
+/// \param ticket Known broker ticket, or empty before `order_send` assigns one.
+/// \param baseline_present Whether the identity was present before dispatch.
+/// \param transition Expected causal transition.
+/// \param correlation_id Stable client-side correlation while the ticket is unknown.
+/// \param history_window Optional history coverage window.
+/// \return Predicate suitable for a durable reconciliation descriptor.
+inline ReconciliationPredicate expect_reconciliation_transition(
+    ReconciliationPredicateKind kind, std::optional<std::uint64_t> ticket,
+    bool baseline_present, ReconciliationTransition transition,
+    std::uint64_t correlation_id = 0,
+    std::optional<ObservationWindow> history_window = std::nullopt) {
+    return {kind, ticket.value_or(0), std::move(history_window), baseline_present,
+            correlation_id, transition};
+}
+
+/// \brief Annotates a ticket predicate with its pre-dispatch causal state.
+/// \param predicate Existing domain predicate.
+/// \param baseline_present Whether its asserted identity existed before dispatch.
+/// \param correlation_id Stable client-side identity for an unknown ticket.
+/// \return The same predicate with a matching expected transition.
+inline ReconciliationPredicate with_reconciliation_transition(
+    ReconciliationPredicate predicate, bool baseline_present,
+    std::uint64_t correlation_id = 0) {
+    const bool absence =
+        predicate.kind == ReconciliationPredicateKind::active_order_absent ||
+        predicate.kind == ReconciliationPredicateKind::position_absent ||
+        predicate.kind == ReconciliationPredicateKind::history_order_absent ||
+        predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+    predicate.baseline_present = baseline_present;
+    predicate.correlation_id = correlation_id;
+    predicate.expected_transition =
+        absence ? ReconciliationTransition::present_to_absent
+                : ReconciliationTransition::absent_to_present;
+    return predicate;
+}
 
 /// \brief Requires a post-baseline active order ticket.
 /// \param ticket MT5 active order ticket.
 /// \return Presence predicate.
 inline ReconciliationPredicate require_active_order(std::uint64_t ticket) {
-    return {ReconciliationPredicateKind::active_order_present, ticket, std::nullopt};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::active_order_present, ticket, std::nullopt}, false);
 }
 
 /// \brief Requires a post-baseline active order ticket to be absent.
 /// \param ticket MT5 active order ticket.
 /// \return Absence predicate.
 inline ReconciliationPredicate require_active_order_absent(std::uint64_t ticket) {
-    return {ReconciliationPredicateKind::active_order_absent, ticket, std::nullopt};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::active_order_absent, ticket, std::nullopt}, true);
 }
 
 /// \brief Requires a post-baseline position ticket.
 /// \param ticket MT5 position ticket.
 /// \return Presence predicate.
 inline ReconciliationPredicate require_position(std::uint64_t ticket) {
-    return {ReconciliationPredicateKind::position_present, ticket, std::nullopt};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::position_present, ticket, std::nullopt}, false);
 }
 
 /// \brief Requires a post-baseline position ticket to be absent.
 /// \param ticket MT5 position ticket.
 /// \return Absence predicate.
 inline ReconciliationPredicate require_position_absent(std::uint64_t ticket) {
-    return {ReconciliationPredicateKind::position_absent, ticket, std::nullopt};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::position_absent, ticket, std::nullopt}, true);
 }
 
 /// \brief Requires a history order ticket, optionally within a time window.
@@ -179,7 +260,8 @@ inline ReconciliationPredicate require_position_absent(std::uint64_t ticket) {
 /// \return Presence predicate.
 inline ReconciliationPredicate require_history_order(
     std::uint64_t ticket, std::optional<ObservationWindow> window = std::nullopt) {
-    return {ReconciliationPredicateKind::history_order_present, ticket, window};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::history_order_present, ticket, window}, false);
 }
 
 /// \brief Requires a history order ticket to be absent in a covered window.
@@ -188,7 +270,8 @@ inline ReconciliationPredicate require_history_order(
 /// \return Absence predicate.
 inline ReconciliationPredicate require_history_order_absent(
     std::uint64_t ticket, ObservationWindow window) {
-    return {ReconciliationPredicateKind::history_order_absent, ticket, window};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::history_order_absent, ticket, window}, true);
 }
 
 /// \brief Requires a history deal ticket, optionally within a time window.
@@ -197,7 +280,8 @@ inline ReconciliationPredicate require_history_order_absent(
 /// \return Presence predicate.
 inline ReconciliationPredicate require_history_deal(
     std::uint64_t ticket, std::optional<ObservationWindow> window = std::nullopt) {
-    return {ReconciliationPredicateKind::history_deal_present, ticket, window};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::history_deal_present, ticket, window}, false);
 }
 
 /// \brief Requires a history deal ticket to be absent in a covered window.
@@ -206,7 +290,8 @@ inline ReconciliationPredicate require_history_deal(
 /// \return Absence predicate.
 inline ReconciliationPredicate require_history_deal_absent(
     std::uint64_t ticket, ObservationWindow window) {
-    return {ReconciliationPredicateKind::history_deal_absent, ticket, window};
+    return with_reconciliation_transition(
+        {ReconciliationPredicateKind::history_deal_absent, ticket, window}, true);
 }
 
 /// \struct ReconciliationRequest
@@ -284,8 +369,19 @@ public:
         bool has_pending = false;
         bool has_missing = false;
         bool has_contradiction = false;
+        bool has_unbound_identity = false;
 
         for (const auto &predicate : request.predicates) {
+            // A broker-assigned identity is legitimately unknown before the
+            // transport result arrives.  Keep that durable expectation
+            // pending; an unknown ticket must never satisfy an absence
+            // predicate or be treated as a confirmed presence.
+            if (predicate.ticket == 0) {
+                ++result.pending_predicates;
+                has_pending = true;
+                has_unbound_identity = true;
+                continue;
+            }
             switch (predicate.kind) {
             case ReconciliationPredicateKind::active_order_present:
             case ReconciliationPredicateKind::active_order_absent: {
@@ -433,11 +529,18 @@ public:
         if (has_contradiction) {
             result.outcome = ReconciliationOutcome::ambiguous;
             result.reason = ReconciliationReason::contradictory_evidence;
+        } else if (has_unbound_identity) {
+            result.outcome = ReconciliationOutcome::pending;
+            result.reason = ReconciliationReason::unresolved_operation;
+        } else if (request.trade_event_gap && (has_pending || has_missing)) {
+            // An event gap invalidates both an apparently missing identity and
+            // an observation that has not settled yet.  Keep the operation
+            // explicitly unresolved until a later authoritative cycle.
+            result.outcome = ReconciliationOutcome::trade_event_gap;
+            result.reason = ReconciliationReason::trade_event_gap;
         } else if (has_pending) {
-            result.outcome = request.trade_event_gap ? ReconciliationOutcome::trade_event_gap
-                                                     : ReconciliationOutcome::pending;
-            result.reason = request.trade_event_gap ? ReconciliationReason::trade_event_gap
-                                                    : ReconciliationReason::waiting_for_observation;
+            result.outcome = ReconciliationOutcome::pending;
+            result.reason = ReconciliationReason::waiting_for_observation;
         } else if (has_missing && request.deadline_expired) {
             result.outcome = ReconciliationOutcome::not_observed;
             result.reason = ReconciliationReason::evidence_missing;
@@ -459,7 +562,11 @@ private:
     }
 
     static bool valid_predicate(const ReconciliationPredicate &predicate) {
-        if (predicate.ticket == 0)
+        if (predicate.ticket == 0 && predicate.correlation_id == 0)
+            return false;
+        if (predicate.ticket == 0 &&
+            (predicate.expected_transition == ReconciliationTransition::unspecified ||
+             !predicate.baseline_present))
             return false;
         switch (predicate.kind) {
         case ReconciliationPredicateKind::active_order_present:
@@ -484,12 +591,23 @@ private:
             predicate.kind == ReconciliationPredicateKind::position_absent ||
             predicate.kind == ReconciliationPredicateKind::history_order_absent ||
             predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+        if (predicate.ticket == 0 && absence)
+            return false;
         if (!history && predicate.history_window)
             return false;
         if (history && predicate.history_window && !predicate.history_window->valid())
             return false;
         if (absence && history && !predicate.history_window)
             return false;
+        if (predicate.baseline_present) {
+            const bool expected_presence = !absence;
+            const auto expected_transition =
+                expected_presence ? ReconciliationTransition::absent_to_present
+                                  : ReconciliationTransition::present_to_absent;
+            if (predicate.expected_transition != expected_transition ||
+                *predicate.baseline_present != !expected_presence)
+                return false;
+        }
         return true;
     }
 

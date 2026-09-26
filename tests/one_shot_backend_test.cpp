@@ -148,7 +148,8 @@ public:
 };
 
 void prepare_for_admission(mt5bridge::OperationJournal &journal,
-                           const mt5bridge::OperationKey &operation_key) {
+                           const mt5bridge::OperationKey &operation_key,
+                           mt5bridge::ReconciliationDescriptor descriptor) {
     require(journal.transition_operation(operation_key,
                                          mt5bridge::OperationState::prechecking)
                 .accepted(),
@@ -160,6 +161,10 @@ void prepare_for_admission(mt5bridge::OperationJournal &journal,
                 operation_key, mt5bridge::JournalState::dispatch_intent_persisted)
                 .accepted(),
             "dispatch intent transition failed");
+    require(journal.persist_reconciliation_descriptor(
+                operation_key, std::move(descriptor))
+                .accepted(),
+            "reconciliation descriptor transition failed");
 }
 
 std::optional<mt5bridge::DispatchPermit> admit(
@@ -196,13 +201,16 @@ int main() {
             {*first.sample, *second.sample}, consistency_request);
         require(consistency.consistent() && consistency.proof,
                 "consistent proof setup failed");
+        const auto descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, coordinator.capture_baseline(),
+            {mt5bridge::require_active_order(999)}, mt5bridge::OperationState::filled};
 
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
         const auto rejected_key = key(7);
         require(journal.create(rejected_key, {0x01, 0x02}).accepted(),
                 "rejection operation create failed");
-        prepare_for_admission(journal, rejected_key);
+        prepare_for_admission(journal, rejected_key, descriptor);
         FakeLease lease{operation_account};
         auto permit = admit(journal, coordinator.graph(), rejected_key,
                             *consistency.proof, lease);
@@ -229,10 +237,104 @@ int main() {
                     transport.calls == 1,
                 "consumed permit enabled a second backend call");
 
+        const auto binding_key = key(12);
+        require(journal.create(binding_key, {0x06}).accepted(),
+                "binding operation create failed");
+        const auto unknown_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, coordinator.capture_baseline(),
+            {mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::active_order_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 12001)},
+            mt5bridge::OperationState::filled};
+        prepare_for_admission(journal, binding_key, unknown_descriptor);
+        FakeLease binding_lease{operation_account};
+        auto binding_permit = admit(journal, coordinator.graph(), binding_key,
+                                    *consistency.proof, binding_lease);
+        require(binding_permit.has_value(), "binding permit setup failed");
+        FakeTransport binding_transport;
+        binding_transport.next.reconciliation_bindings.push_back({12001, 999});
+        FakeAccountProbe binding_account_probe({operation_account, operation_account});
+        const auto binding_result = backend.execute(
+            journal, binding_key, std::move(*binding_permit), binding_account_probe,
+            binding_lease, binding_transport);
+        require(binding_result.completed() && binding_result.record &&
+                    binding_result.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}) &&
+                    binding_result.record->reconciliation_bindings.size() == 1 &&
+                    binding_result.record->reconciliation_bindings.front() ==
+                        mt5bridge::ReconciliationBinding{12001, 999},
+                "validated broker result did not create a durable ticket binding");
+        mt5bridge::OperationJournal binding_recovered(store);
+        const auto recovered_binding = binding_recovered.recover(binding_key);
+        require(recovered_binding.accepted() && recovered_binding.record &&
+                    recovered_binding.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}) &&
+                    recovered_binding.record->reconciliation_bindings.size() == 1,
+                "durable ticket binding did not survive journal recovery");
+
+        const auto missing_binding_key = key(14);
+        require(journal.create(missing_binding_key, {0x06, 0x01}).accepted(),
+                "missing-binding operation create failed");
+        prepare_for_admission(journal, missing_binding_key, unknown_descriptor);
+        FakeLease missing_binding_lease{operation_account};
+        auto missing_binding_permit =
+            admit(journal, coordinator.graph(), missing_binding_key, *consistency.proof,
+                  missing_binding_lease);
+        require(missing_binding_permit.has_value(),
+                "missing-binding permit setup failed");
+        FakeTransport missing_binding_transport;
+        FakeAccountProbe missing_binding_probe({operation_account, operation_account});
+        const auto missing_binding_result = backend.execute(
+            journal, missing_binding_key, std::move(*missing_binding_permit),
+            missing_binding_probe, missing_binding_lease, missing_binding_transport);
+        require(missing_binding_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::
+                        reconciliation_binding_failed &&
+                    missing_binding_result.record &&
+                    missing_binding_result.record->result_payload.empty() &&
+                    missing_binding_result.record->operation_state ==
+                        mt5bridge::OperationState::submitting &&
+                    missing_binding_transport.calls == 1,
+                "missing result-derived binding was persisted without atomic identity evidence");
+
+        const auto binding_conflict_key = key(13);
+        require(journal.create(binding_conflict_key, {0x07}).accepted(),
+                "binding-conflict operation create failed");
+        const auto conflicting_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, coordinator.capture_baseline(),
+            {mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::active_order_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 13001)},
+            mt5bridge::OperationState::filled};
+        prepare_for_admission(journal, binding_conflict_key, conflicting_descriptor);
+        FakeLease binding_conflict_lease{operation_account};
+        auto binding_conflict_permit = admit(
+            journal, coordinator.graph(), binding_conflict_key, *consistency.proof,
+            binding_conflict_lease);
+        require(binding_conflict_permit.has_value(),
+                "binding-conflict permit setup failed");
+        FakeTransport binding_conflict_transport;
+        binding_conflict_transport.next.reconciliation_bindings = {
+            {13001, 998}, {13001, 999}};
+        FakeAccountProbe binding_conflict_probe({operation_account, operation_account});
+        const auto binding_conflict_result = backend.execute(
+            journal, binding_conflict_key, std::move(*binding_conflict_permit),
+            binding_conflict_probe, binding_conflict_lease, binding_conflict_transport);
+        require(binding_conflict_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::reconciliation_binding_failed &&
+                    binding_conflict_result.record &&
+                    binding_conflict_result.record->reconciliation_bindings.empty() &&
+                    binding_conflict_result.record->result_payload.empty() &&
+                    binding_conflict_result.record->operation_state ==
+                        mt5bridge::OperationState::submitting,
+                "conflicting ticket binding escaped the atomic result commit");
+
         const auto stale_key = key(8);
         require(journal.create(stale_key, {0x03}).accepted(),
                 "stale-permit operation create failed");
-        prepare_for_admission(journal, stale_key);
+        prepare_for_admission(journal, stale_key, descriptor);
         FakeLease stale_lease{operation_account};
         auto stale_permit = admit(journal, coordinator.graph(), stale_key,
                                   *consistency.proof, stale_lease);
@@ -254,7 +356,7 @@ int main() {
         const auto lease_key = key(9);
         require(journal.create(lease_key, {0x03}).accepted(),
                 "lease-loss operation create failed");
-        prepare_for_admission(journal, lease_key);
+        prepare_for_admission(journal, lease_key, descriptor);
         FakeLease dropping_lease{operation_account};
         dropping_lease.drop_before_call = true;
         auto lease_permit = admit(journal, coordinator.graph(), lease_key,
@@ -275,7 +377,7 @@ int main() {
         const auto transport_key = key(10);
         require(journal.create(transport_key, {0x04}).accepted(),
                 "transport-failure operation create failed");
-        prepare_for_admission(journal, transport_key);
+        prepare_for_admission(journal, transport_key, descriptor);
         FakeLease transport_lease{operation_account};
         auto transport_permit = admit(journal, coordinator.graph(), transport_key,
                                       *consistency.proof, transport_lease);
@@ -302,7 +404,7 @@ int main() {
         const auto account_switch_key = key(11);
         require(journal.create(account_switch_key, {0x05}).accepted(),
                 "account-switch operation create failed");
-        prepare_for_admission(journal, account_switch_key);
+        prepare_for_admission(journal, account_switch_key, descriptor);
         FakeLease account_switch_lease{operation_account};
         auto account_switch_permit = admit(journal, coordinator.graph(), account_switch_key,
                                             *consistency.proof, account_switch_lease);

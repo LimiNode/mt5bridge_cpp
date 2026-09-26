@@ -64,13 +64,21 @@ pass in the same owner loop:
 2. the freshly read current account and the opaque
    `EnvironmentConsistencyProof` account match the operation's immutable
    `AccountKey`;
-3. the proof covers the configured admission domains and history windows;
+3. the proof covers the effective admission scope: the configured domains and
+   history windows unioned with every domain/window referenced by the durable
+   reconciliation descriptor;
 4. the proof's graph instance and last revision match the current graph, so a
    proof cannot be replayed after another observation;
 5. there is no unresolved prior operation and no event gap requiring a fresh
    authoritative observation;
 6. a `SingleWriterLease` is continuously held for the account and exposes a
    non-zero fencing token.
+
+The public raw-result convenience path is intentionally narrower than the
+private backend path. If any descriptor predicate still has an unknown broker
+ticket, `OperationJournal::persist_result()` returns `invalid_transition`.
+Only the backend's atomic result-plus-bindings mutation can advance such an
+operation to `result_persisted`.
 
 The durable transition returns a move-only, barrier-created `DispatchPermit`
 carrying the operation key, fencing token, and committed journal revision. The

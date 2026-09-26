@@ -76,10 +76,18 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
         return {OneShotExecutionStatus::result_not_durable, call.retcode,
                 journal.find(key)};
 
-    const auto persisted = journal.persist_result(key, std::move(call.raw_result));
+    const auto current_record = journal.find(key);
+    const bool requires_bindings =
+        current_record && current_record->reconciliation_descriptor &&
+        descriptor_requires_result_bindings(*current_record->reconciliation_descriptor);
+    const bool has_bindings = !call.reconciliation_bindings.empty();
+    const auto persisted = journal.persist_result_with_bindings(
+        key, std::move(call.raw_result), std::move(call.reconciliation_bindings));
     if (!persisted.accepted())
-        return {OneShotExecutionStatus::result_not_durable, call.retcode,
-                journal.find(key)};
+        return {(requires_bindings || has_bindings)
+                    ? OneShotExecutionStatus::reconciliation_binding_failed
+                             : OneShotExecutionStatus::result_not_durable,
+                call.retcode, journal.find(key)};
 
     OperationState final_state = OperationState::reconciling;
     if (call.retcode == kTradeRetcodeMarketClosed ||

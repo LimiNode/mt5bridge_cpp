@@ -246,6 +246,83 @@ inline bool reconciliation_descriptor_matches_graph(
     return true;
 }
 
+/// \brief Tests whether a descriptor contains broker identities still unknown at dispatch.
+/// \param descriptor Durable post-dispatch evidence contract.
+/// \return True when at least one predicate needs a result-derived binding.
+inline bool descriptor_requires_result_bindings(const ReconciliationDescriptor &descriptor) {
+    return std::any_of(descriptor.predicates.begin(), descriptor.predicates.end(),
+                       [](const ReconciliationPredicate &predicate) {
+                           return predicate.ticket == 0;
+                       });
+}
+
+/// \brief Tests whether every unknown predicate has one durable ticket binding.
+/// \param descriptor Descriptor whose result-derived identities are required.
+/// \param bindings Candidate bindings extracted from one broker result.
+/// \return True only when the binding set is complete for the descriptor.
+inline bool descriptor_bindings_complete(
+    const ReconciliationDescriptor &descriptor,
+    const std::vector<ReconciliationBinding> &bindings) {
+    std::size_t required = 0;
+    for (const auto &predicate : descriptor.predicates) {
+        if (predicate.ticket == 0)
+            ++required;
+    }
+    return required == bindings.size();
+}
+
+/// \brief Builds the effective observation scope for one dispatch descriptor.
+/// \param descriptor Durable predicates whose evidence must be fresh.
+/// \param caller_scope Caller-requested admission scope.
+/// \return Union scope, or empty when either input is malformed.
+inline std::optional<EnvironmentConsistencyRequest> effective_dispatch_scope(
+    const ReconciliationDescriptor &descriptor,
+    EnvironmentConsistencyRequest caller_scope) {
+    if (!descriptor.valid() || !caller_scope.valid())
+        return std::nullopt;
+
+    const auto extend_window = [](std::optional<ObservationWindow> *target,
+                                  const std::optional<ObservationWindow> &source) {
+        if (!source)
+            return;
+        if (!*target) {
+            *target = *source;
+            return;
+        }
+        target->emplace(ObservationWindow{
+            (std::min)((*target)->from_msc, source->from_msc),
+            (std::max)((*target)->to_msc, source->to_msc)});
+    };
+
+    for (const auto &predicate : descriptor.predicates) {
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::active_order_absent:
+            caller_scope.require_active_orders = true;
+            break;
+        case ReconciliationPredicateKind::position_present:
+        case ReconciliationPredicateKind::position_absent:
+            caller_scope.require_positions = true;
+            break;
+        case ReconciliationPredicateKind::history_order_present:
+        case ReconciliationPredicateKind::history_order_absent:
+            if (!predicate.history_window)
+                return std::nullopt;
+            extend_window(&caller_scope.history_orders_window, predicate.history_window);
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+        case ReconciliationPredicateKind::history_deal_absent:
+            if (!predicate.history_window)
+                return std::nullopt;
+            extend_window(&caller_scope.history_deals_window, predicate.history_window);
+            break;
+        }
+    }
+    return caller_scope.valid() ? std::optional<EnvironmentConsistencyRequest>(
+                                     std::move(caller_scope))
+                                : std::nullopt;
+}
+
 /// \enum JournalState
 /// \brief Durable write-ahead state around the future side effect.
 enum class JournalState {
@@ -437,6 +514,11 @@ struct OperationRecord {
                     return false;
             }
         }
+        if (reconciliation_descriptor &&
+            journal_at_least_result_persisted(journal_state) &&
+            !descriptor_bindings_complete(*reconciliation_descriptor,
+                                          reconciliation_bindings))
+            return false;
         if (!journal_at_least_dispatching(journal_state))
             return fencing_token == 0;
         return fencing_token != 0;
@@ -783,6 +865,12 @@ public:
     /// \return Mutation status and the committed result-bearing record.
     JournalMutationResult persist_result(
         const OperationKey &key, std::vector<std::uint8_t> result_payload) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (it->second.reconciliation_descriptor &&
+            descriptor_requires_result_bindings(*it->second.reconciliation_descriptor))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         return persist_result_with_bindings(key, std::move(result_payload), {});
     }
 
@@ -912,6 +1000,9 @@ private:
         if (it->second.journal_state != JournalState::dispatching ||
             result_payload.empty() ||
             it->second.operation_state != OperationState::submitting)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.reconciliation_descriptor &&
+            !descriptor_bindings_complete(*it->second.reconciliation_descriptor, bindings))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
@@ -1061,7 +1152,8 @@ public:
     /// \brief Binds the barrier to one owner-loop journal, graph, and scope.
     /// \param journal Journal that owns the operation state transitions.
     /// \param graph Current graph whose revision must match the proof.
-    /// \param required_scope Domains and history range required for admission.
+    /// \param required_scope Caller-requested domains and history range. The
+    /// descriptor predicates are merged into this scope before proof checking.
     DispatchAdmissionBarrier(OperationJournal &journal, const ObservationGraph &graph,
                              EnvironmentConsistencyRequest required_scope)
         : journal_(journal), graph_(graph), required_scope_(std::move(required_scope)) {}
@@ -1085,16 +1177,6 @@ public:
             return {DispatchAdmissionStatus::event_gap, std::nullopt};
         if (request.current_account != key.account)
             return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
-        if (!request.environment_proof || !request.environment_proof->valid())
-            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
-        if (request.environment_proof->account() != key.account)
-            return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
-        if (!request.environment_proof->covers(required_scope_))
-            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
-        if (request.environment_proof->graph_instance_id() != graph_.instance_id() ||
-            request.environment_proof->last_graph_revision() != graph_.revision())
-            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
-
         const auto record = journal_.find(key);
         if (!record)
             return {DispatchAdmissionStatus::operation_not_found, std::nullopt};
@@ -1105,6 +1187,20 @@ public:
         if (!reconciliation_descriptor_matches_graph(*record->reconciliation_descriptor,
                                                       graph_))
             return {DispatchAdmissionStatus::invalid_state, std::nullopt};
+        const auto effective_scope = effective_dispatch_scope(
+            *record->reconciliation_descriptor, required_scope_);
+        if (!effective_scope)
+            return {DispatchAdmissionStatus::invalid_state, std::nullopt};
+        if (!request.environment_proof || !request.environment_proof->valid())
+            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
+        if (request.environment_proof->account() != key.account)
+            return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
+        if (!request.environment_proof->covers(*effective_scope))
+            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
+        if (request.environment_proof->graph_instance_id() != graph_.instance_id() ||
+            request.environment_proof->last_graph_revision() != graph_.revision())
+            return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
+
         const auto fencing_token = lease.held_fencing_token(key.account);
         if (!fencing_token || *fencing_token == 0)
             return {DispatchAdmissionStatus::lease_not_held, std::nullopt};

@@ -273,6 +273,31 @@ int main() {
                     recovered_binding.record->reconciliation_bindings.size() == 1,
                 "durable ticket binding did not survive journal recovery");
 
+        const auto missing_binding_key = key(14);
+        require(journal.create(missing_binding_key, {0x06, 0x01}).accepted(),
+                "missing-binding operation create failed");
+        prepare_for_admission(journal, missing_binding_key, unknown_descriptor);
+        FakeLease missing_binding_lease{operation_account};
+        auto missing_binding_permit =
+            admit(journal, coordinator.graph(), missing_binding_key, *consistency.proof,
+                  missing_binding_lease);
+        require(missing_binding_permit.has_value(),
+                "missing-binding permit setup failed");
+        FakeTransport missing_binding_transport;
+        FakeAccountProbe missing_binding_probe({operation_account, operation_account});
+        const auto missing_binding_result = backend.execute(
+            journal, missing_binding_key, std::move(*missing_binding_permit),
+            missing_binding_probe, missing_binding_lease, missing_binding_transport);
+        require(missing_binding_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::
+                        reconciliation_binding_failed &&
+                    missing_binding_result.record &&
+                    missing_binding_result.record->result_payload.empty() &&
+                    missing_binding_result.record->operation_state ==
+                        mt5bridge::OperationState::submitting &&
+                    missing_binding_transport.calls == 1,
+                "missing result-derived binding was persisted without atomic identity evidence");
+
         const auto binding_conflict_key = key(13);
         require(journal.create(binding_conflict_key, {0x07}).accepted(),
                 "binding-conflict operation create failed");

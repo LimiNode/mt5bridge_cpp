@@ -119,6 +119,14 @@ mt5bridge::ObservationBatch active_batch(const mt5bridge::AccountKey &key) {
     return batch;
 }
 
+mt5bridge::ObservationBatch empty_active_batch(const mt5bridge::AccountKey &key) {
+    mt5bridge::ObservationBatch batch;
+    batch.account = key;
+    batch.observed_domains = mt5bridge::ObservationDomain::active_orders |
+                             mt5bridge::ObservationDomain::positions;
+    return batch;
+}
+
 mt5bridge::ObservationBatch positions_only_batch(const mt5bridge::AccountKey &key) {
     mt5bridge::ObservationBatch batch;
     batch.account = key;
@@ -232,6 +240,63 @@ int main() {
         require(positions_consistency.consistent() && positions_consistency.proof.has_value(),
                 "positions-only policy result did not carry a proof");
 
+        FakeObservationProvider stale_active_provider(
+            {empty_active_batch(key.account), positions_only_batch(key.account),
+             positions_only_batch(key.account), positions_only_batch(key.account),
+             positions_only_batch(key.account)});
+        mt5bridge::ObservationCoordinator stale_active_coordinator(stale_active_provider,
+                                                                    key.account);
+        require(stale_active_coordinator.refresh(collection).sample.has_value(),
+                "stale active-order setup did not accept its initial sample");
+        const auto stale_active_second =
+            stale_active_coordinator.refresh(positions_collection);
+        const auto stale_active_third =
+            stale_active_coordinator.refresh(positions_collection);
+        const auto stale_active_fourth =
+            stale_active_coordinator.refresh(positions_collection);
+        const auto stale_active_fifth =
+            stale_active_coordinator.refresh(positions_collection);
+        require(stale_active_second.sample && stale_active_third.sample &&
+                    stale_active_fourth.sample && stale_active_fifth.sample,
+                "stale active-order setup did not advance positions");
+        const auto stale_active_baseline = stale_active_coordinator.capture_baseline();
+        require(stale_active_baseline.active_orders_revision() != 0 &&
+                    stale_active_baseline.active_orders_revision() <
+                        stale_active_coordinator.graph().revision(),
+                "stale active-order setup did not preserve an old domain revision");
+        const auto stale_active_descriptor = mt5bridge::ReconciliationDescriptor{
+            key.account, stale_active_baseline,
+            {mt5bridge::require_active_order(100)}, mt5bridge::OperationState::filled};
+        require(mt5bridge::reconciliation_descriptor_matches_graph(
+                    stale_active_descriptor, stale_active_coordinator.graph()),
+                "stale active-order descriptor setup unexpectedly failed");
+        const auto stale_active_proof =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*stale_active_fourth.sample, *stale_active_fifth.sample},
+                positions_scope);
+        require(stale_active_proof.consistent(),
+                "stale active-order positions proof setup failed");
+        const auto stale_active_key = mt5bridge::OperationKey{account(), 34, 35};
+        MemoryStore stale_active_store;
+        mt5bridge::OperationJournal stale_active_journal(stale_active_store);
+        require(stale_active_journal.create(stale_active_key, {0x0F}).accepted(),
+                "stale active-order operation setup failed");
+        prepare_for_admission(stale_active_journal, stale_active_key,
+                              stale_active_descriptor);
+        FakeLease stale_active_lease;
+        stale_active_lease.owned_account = stale_active_key.account;
+        stale_active_lease.token = 84;
+        stale_active_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier stale_active_barrier(
+            stale_active_journal, stale_active_coordinator.graph(), positions_scope);
+        require(stale_active_barrier
+                    .admit(stale_active_key,
+                          ready_request(stale_active_key.account,
+                                        *stale_active_proof.proof),
+                          stale_active_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::environment_not_ready,
+                "stale active-order domain was admitted from a positions-only proof");
+
         const mt5bridge::ObservationWindow history_window{1000, 2000};
         FakeObservationProvider history_provider(
             {history_orders_batch(key.account, history_window),
@@ -256,6 +321,64 @@ int main() {
             {*history_first.sample, *history_second.sample}, history_scope);
         require(history_consistency.consistent() && history_consistency.proof.has_value(),
                 "history consistency proof setup failed");
+
+        FakeObservationProvider stale_history_provider(
+            {history_orders_batch(key.account, history_window),
+             positions_only_batch(key.account), positions_only_batch(key.account),
+             positions_only_batch(key.account), positions_only_batch(key.account)});
+        mt5bridge::ObservationCoordinator stale_history_coordinator(stale_history_provider,
+                                                                     key.account);
+        mt5bridge::ObservationCollectionRequest stale_history_collection;
+        stale_history_collection.observe_active_orders = false;
+        stale_history_collection.observe_positions = false;
+        stale_history_collection.history_orders_window = history_window;
+        require(stale_history_coordinator.refresh(stale_history_collection).sample.has_value(),
+                "stale history setup did not accept history sample");
+        const auto stale_history_second =
+            stale_history_coordinator.refresh(positions_collection);
+        const auto stale_history_third =
+            stale_history_coordinator.refresh(positions_collection);
+        const auto stale_history_fourth =
+            stale_history_coordinator.refresh(positions_collection);
+        const auto stale_history_fifth =
+            stale_history_coordinator.refresh(positions_collection);
+        require(stale_history_second.sample && stale_history_third.sample &&
+                    stale_history_fourth.sample && stale_history_fifth.sample,
+                "stale history setup did not advance unrelated positions");
+        const auto stale_history_baseline = stale_history_coordinator.capture_baseline();
+        const auto stale_history_descriptor = mt5bridge::ReconciliationDescriptor{
+            key.account, stale_history_baseline,
+            {mt5bridge::require_history_order(500, history_window)},
+            mt5bridge::OperationState::filled};
+        require(mt5bridge::reconciliation_descriptor_matches_graph(
+                    stale_history_descriptor, stale_history_coordinator.graph()),
+                "stale history descriptor setup unexpectedly failed");
+        const auto stale_history_proof =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*stale_history_fourth.sample, *stale_history_fifth.sample},
+                positions_scope);
+        require(stale_history_proof.consistent(),
+                "stale history positions proof setup failed");
+        const auto stale_history_key = mt5bridge::OperationKey{account(), 36, 37};
+        MemoryStore stale_history_store;
+        mt5bridge::OperationJournal stale_history_journal(stale_history_store);
+        require(stale_history_journal.create(stale_history_key, {0x10}).accepted(),
+                "stale history operation setup failed");
+        prepare_for_admission(stale_history_journal, stale_history_key,
+                              stale_history_descriptor);
+        FakeLease stale_history_lease;
+        stale_history_lease.owned_account = stale_history_key.account;
+        stale_history_lease.token = 85;
+        stale_history_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier stale_history_barrier(
+            stale_history_journal, stale_history_coordinator.graph(), positions_scope);
+        require(stale_history_barrier
+                    .admit(stale_history_key,
+                          ready_request(stale_history_key.account,
+                                        *stale_history_proof.proof),
+                          stale_history_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::environment_not_ready,
+                "stale history domain was admitted from a positions-only proof");
 
         const auto unobserved_history_descriptor = mt5bridge::ReconciliationDescriptor{
             key.account, mt5bridge::capture_reconciliation_baseline(coordinator.graph()),
@@ -434,6 +557,13 @@ int main() {
                     .transition_journal(unknown_key, mt5bridge::JournalState::dispatching, 81)
                     .accepted(),
                 "unknown-ticket operation could not cross dispatching");
+        require(unknown_journal
+                    .transition_operation(unknown_key, mt5bridge::OperationState::submitting)
+                    .accepted(),
+                "unknown-ticket operation could not enter submitting");
+        require(unknown_journal.persist_result(unknown_key, {0xAA}).status ==
+                    mt5bridge::JournalMutationStatus::invalid_transition,
+                "public result persistence bypassed unknown-ticket bindings");
         mt5bridge::ReconciliationRequest unknown_request;
         unknown_request.baseline = mt5bridge::capture_reconciliation_baseline(coordinator.graph());
         unknown_request.predicates = {unknown_predicate};

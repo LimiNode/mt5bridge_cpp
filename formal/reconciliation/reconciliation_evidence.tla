@@ -1,4 +1,4 @@
-------------------------- MODULE ReconciliationEvidence -------------------------
+------------------------- MODULE reconciliation_evidence -------------------------
 EXTENDS Naturals, FiniteSets
 
 (***************************************************************************)
@@ -17,12 +17,12 @@ RefreshKinds == EvidenceKinds \ {"unseen"}
 VARIABLES requestMode, currentAccount, baselineAccount,
           graphInstance, graphRevision, baselineGraphInstance,
           baselineGraphRevision, domainRevision, baselineDomainRevision,
-          evidence, authoritative, gapEvidence, eventGap, deadlineExpired
+          evidence, authoritative, eventGap, deadlineExpired
 
 vars == <<requestMode, currentAccount, baselineAccount,
            graphInstance, graphRevision, baselineGraphInstance,
            baselineGraphRevision, domainRevision, baselineDomainRevision,
-           evidence, authoritative, gapEvidence, eventGap, deadlineExpired>>
+           evidence, authoritative, eventGap, deadlineExpired>>
 
 Init ==
     /\ requestMode \in RequestModes
@@ -36,9 +36,19 @@ Init ==
     /\ baselineDomainRevision = [d \in Domains |-> 0]
     /\ evidence = [d \in Domains |-> "unseen"]
     /\ authoritative = [d \in Domains |-> FALSE]
-    /\ gapEvidence = [d \in Domains |-> FALSE]
     /\ eventGap = FALSE
     /\ deadlineExpired = FALSE
+
+RequiredDomains(mode) ==
+    IF mode = "all_present"
+    THEN Domains
+    ELSE IF mode = "history_order_absent"
+    THEN {"history_orders"}
+    ELSE IF mode = "active_order_present"
+    THEN {"active_orders"}
+    ELSE IF mode = "history_deal_present"
+    THEN {"history_deals"}
+    ELSE {}
 
 ExpectedPresent(d) ==
     IF requestMode = "history_order_absent" /\ d = "history_orders"
@@ -54,9 +64,10 @@ PredicateSatisfied(d) ==
           ELSE /\ evidence[d] = "absence"
                /\ authoritative[d]
 
-AllFresh == \A d \in Domains : Fresh(d)
-AllSatisfied == \A d \in Domains : PredicateSatisfied(d)
-HasFreshAmbiguity == \E d \in Domains : Fresh(d) /\ evidence[d] = "ambiguous"
+AllFresh == \A d \in RequiredDomains(requestMode) : Fresh(d)
+AllSatisfied == \A d \in RequiredDomains(requestMode) : PredicateSatisfied(d)
+HasFreshAmbiguity ==
+    \E d \in RequiredDomains(requestMode) : Fresh(d) /\ evidence[d] = "ambiguous"
 
 Outcome ==
     IF currentAccount # baselineAccount
@@ -65,7 +76,7 @@ Outcome ==
     THEN "ambiguous"
     ELSE IF HasFreshAmbiguity
     THEN "ambiguous"
-    ELSE IF eventGap
+    ELSE IF eventGap /\ (~AllFresh \/ ~AllSatisfied)
     THEN "trade_event_gap"
     ELSE IF ~AllFresh
     THEN "pending"
@@ -77,18 +88,15 @@ Outcome ==
 
 Refresh(d, kind, isAuthoritative) ==
     /\ d \in Domains
-    /\ kind \in EvidenceKinds
+    /\ kind \in RefreshKinds
     /\ isAuthoritative \in BOOLEAN
+    /\ d \in RequiredDomains(requestMode)
     /\ graphRevision < MaxRevision
     /\ domainRevision[d] < MaxDomainRevision
     /\ graphRevision' = graphRevision + 1
     /\ domainRevision' = [domainRevision EXCEPT ![d] = @ + 1]
     /\ evidence' = [evidence EXCEPT ![d] = kind]
     /\ authoritative' = [authoritative EXCEPT ![d] = isAuthoritative]
-    /\ gapEvidence' =
-          IF eventGap /\ isAuthoritative
-          THEN [gapEvidence EXCEPT ![d] = TRUE]
-          ELSE gapEvidence
     /\ UNCHANGED <<requestMode, currentAccount, baselineAccount,
                     graphInstance, baselineGraphInstance,
                     baselineGraphRevision, baselineDomainRevision,
@@ -97,22 +105,11 @@ Refresh(d, kind, isAuthoritative) ==
 OpenEventGap ==
     /\ ~eventGap
     /\ eventGap' = TRUE
-    /\ gapEvidence' = [d \in Domains |-> FALSE]
     /\ UNCHANGED <<requestMode, currentAccount, baselineAccount,
                     graphInstance, graphRevision, baselineGraphInstance,
                     baselineGraphRevision, domainRevision,
                     baselineDomainRevision, evidence, authoritative,
                     deadlineExpired>>
-
-CloseEventGap ==
-    /\ eventGap
-    /\ \A d \in Domains : gapEvidence[d]
-    /\ eventGap' = FALSE
-    /\ UNCHANGED <<requestMode, currentAccount, baselineAccount,
-                    graphInstance, graphRevision, baselineGraphInstance,
-                    baselineGraphRevision, domainRevision,
-                    baselineDomainRevision, evidence, authoritative,
-                    gapEvidence, deadlineExpired>>
 
 SwitchAccount(account) ==
     /\ account \in Accounts
@@ -122,7 +119,7 @@ SwitchAccount(account) ==
                     graphRevision, baselineGraphInstance,
                     baselineGraphRevision, domainRevision,
                     baselineDomainRevision, evidence, authoritative,
-                    gapEvidence, eventGap, deadlineExpired>>
+                    eventGap, deadlineExpired>>
 
 GraphReplacement ==
     /\ graphRevision < MaxRevision
@@ -132,7 +129,7 @@ GraphReplacement ==
     /\ UNCHANGED <<requestMode, currentAccount, baselineAccount,
                     baselineGraphInstance, baselineGraphRevision,
                     domainRevision, baselineDomainRevision, evidence,
-                    authoritative, gapEvidence, eventGap, deadlineExpired>>
+                    authoritative, eventGap, deadlineExpired>>
 
 RestartReanchor ==
     /\ graphRevision < MaxRevision
@@ -146,7 +143,7 @@ RestartReanchor ==
     /\ eventGap' = FALSE
     /\ deadlineExpired' = FALSE
     /\ UNCHANGED <<requestMode, currentAccount, domainRevision, evidence,
-                    authoritative, gapEvidence>>
+                    authoritative>>
 
 ExpireDeadline ==
     /\ deadlineExpired' = TRUE
@@ -154,13 +151,12 @@ ExpireDeadline ==
                     graphInstance, graphRevision, baselineGraphInstance,
                     baselineGraphRevision, domainRevision,
                     baselineDomainRevision, evidence, authoritative,
-                    gapEvidence, eventGap>>
+                    eventGap>>
 
 Next ==
-    \/ \E d \in Domains, kind \in RefreshKinds,
+    \/ \E d \in RequiredDomains(requestMode), kind \in RefreshKinds,
           isAuthoritative \in BOOLEAN : Refresh(d, kind, isAuthoritative)
     \/ OpenEventGap
-    \/ CloseEventGap
     \/ \E account \in Accounts : SwitchAccount(account)
     \/ GraphReplacement
     \/ RestartReanchor
@@ -178,7 +174,6 @@ TypeOK ==
     /\ baselineDomainRevision \in [Domains -> 0..MaxDomainRevision]
     /\ evidence \in [Domains -> EvidenceKinds]
     /\ authoritative \in [Domains -> BOOLEAN]
-    /\ gapEvidence \in [Domains -> BOOLEAN]
     /\ eventGap \in BOOLEAN
     /\ deadlineExpired \in BOOLEAN
     /\ baselineGraphRevision <= graphRevision
@@ -186,25 +181,26 @@ TypeOK ==
            domainRevision[d] <= graphRevision /\
            baselineDomainRevision[d] <= graphRevision
 
-NoFalseConfirmed ==
-    Outcome = "confirmed" =>
-        /\ currentAccount = baselineAccount
-        /\ graphInstance = baselineGraphInstance
-        /\ ~eventGap
-        /\ AllFresh
-        /\ AllSatisfied
-        /\ ~HasFreshAmbiguity
+SafeToConfirm ==
+    /\ currentAccount = baselineAccount
+    /\ graphInstance = baselineGraphInstance
+    /\ AllFresh
+    /\ AllSatisfied
+    /\ ~HasFreshAmbiguity
 
-GapBlocksConfirmation ==
+NoFalseConfirmed ==
+    Outcome = "confirmed" => SafeToConfirm
+
+GapDoesNotMaskUnsettledEvidence ==
     (eventGap /\ currentAccount = baselineAccount /\
-        graphInstance = baselineGraphInstance)
-        => (Outcome # "confirmed")
+        graphInstance = baselineGraphInstance /\
+        ~HasFreshAmbiguity /\ (~AllFresh \/ ~AllSatisfied))
+        => (Outcome = "trade_event_gap")
 
 RestartRequiresFreshEvidence ==
     (graphInstance = baselineGraphInstance /\
         baselineGraphRevision = graphRevision /\
-        (\E d \in Domains :
-            domainRevision[d] = baselineDomainRevision[d]))
+        ~AllFresh)
         => (Outcome # "confirmed")
 
 AbsenceNeedsAuthoritativeCoverage ==

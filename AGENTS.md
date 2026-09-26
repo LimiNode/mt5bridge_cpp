@@ -41,6 +41,10 @@ may load it dynamically; they must not depend on private C++ or Python objects.
   responsibility directory. Private headers stay beside their `.cpp` files;
   do not create a parallel private include tree or split a single
   implementation unit without a real responsibility boundary.
+- Use lowercase `snake_case` for project source/module files and directories,
+  including C++, TLA+, and test files; reserve `CamelCase` for C++ type names.
+  Repository-standard metadata such as `README.md`, `AGENTS.md`, and
+  `CMakeLists.txt` keeps its conventional spelling.
 - Prefer one general helper over repeated validation/serialization blocks.
   Delete unreachable branches, redundant checks, and comments that only repeat
   the next line.

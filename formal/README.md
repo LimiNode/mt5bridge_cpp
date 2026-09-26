@@ -6,7 +6,7 @@ observation. The models use finite symbolic identities; they do not model
 Python serialization, Win32 file I/O, C ABI layout, or market-data payload
 conversion.
 
-The first model is [dispatch/DispatchRecovery.tla](dispatch/DispatchRecovery.tla).
+The first model is [dispatch/dispatch_recovery.tla](dispatch/dispatch_recovery.tla).
 It covers the current durable pre-side-effect contract:
 
 - one non-resendable `dispatching` barrier per operation;
@@ -17,12 +17,13 @@ It covers the current durable pre-side-effect contract:
 - atomic result and reconciliation-evidence persistence;
 - terminal resolution only after durable evidence.
 
-Run it with a TLA+ tools distribution (TLC 2.18 or newer):
+Run it with the pinned TLA+ Tools v1.8.0 artifact (or a compatible TLC
+distribution):
 
 ```text
 pushd formal/dispatch
-java -cp ../../tla2tools.jar tlc2.TLC -config DispatchRecovery.cfg \
-    DispatchRecovery.tla
+java -cp ../../tla2tools.jar tlc2.TLC -config dispatch_recovery.cfg \
+    dispatch_recovery.tla
 popd
 ```
 
@@ -42,7 +43,7 @@ the JAR checksum before execution. Local runs use the same command shown
 above; Java 17 or newer is sufficient.
 
 The second model is
-[reconciliation/ReconciliationEvidence.tla](reconciliation/ReconciliationEvidence.tla).
+[reconciliation/reconciliation_evidence.tla](reconciliation/reconciliation_evidence.tla).
 It checks observation ordering independently from dispatch recovery:
 
 - active orders, positions, history orders, and history deals refresh as
@@ -50,8 +51,8 @@ It checks observation ordering independently from dispatch recovery:
 - a domain that has not advanced past the durable baseline remains stale, and
   absence without authoritative coverage is not evidence of non-execution;
 - contradictory/non-unique evidence is ambiguous rather than confirmed;
-- an event gap remains unresolved until every domain has a fresh authoritative
-  snapshot;
+- an event gap blocks unresolved missing/pending evidence, matching the C++
+  engine's `trade_event_gap` policy;
 - account and graph-instance changes cannot produce confirmation; and
 - restart re-anchors the baseline without manufacturing fresh evidence.
 
@@ -59,15 +60,20 @@ Run it with the same pinned TLC artifact:
 
 ```text
 pushd formal/reconciliation
-java -cp ../../tla2tools.jar tlc2.TLC -config ReconciliationEvidence.cfg \
-    ReconciliationEvidence.tla
+java -cp ../../tla2tools.jar tlc2.TLC -config reconciliation_evidence.cfg \
+    reconciliation_evidence.tla
+java -cp ../../tla2tools.jar tlc2.TLC \
+    -config reconciliation_evidence_refresh.cfg \
+    reconciliation_evidence.tla
 popd
 ```
 
-The finite configuration explores both an all-presence request and a history
-order absence request. The latter requires authoritative coverage, making the
-model explicit about the difference between a stale/lagging view and proof of
-absence.
+The main configuration explores all four domains and scoped requests. The
+refresh configuration uses two domains with a revision bound of two, making
+repeated refresh, post-gap, and post-restart paths explicit without making the
+primary ordering run unbounded. History absence still requires authoritative
+coverage, making the model explicit about the difference between a
+stale/lagging view and proof of absence.
 
 The next planned model is the managed trade lifecycle (`CloseObligation`,
 partial fills, cancellation, and slicing).

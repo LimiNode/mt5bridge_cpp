@@ -6,8 +6,8 @@ Accepted as a verification aid for the durable dispatch layer.
 
 ## Decision
 
-Keep a small finite TLA+ model in `formal/dispatch/DispatchRecovery.tla` with
-its checked configuration in `DispatchRecovery.cfg`. The model covers the
+Keep a small finite TLA+ model in `formal/dispatch/dispatch_recovery.tla` with
+its checked configuration in `dispatch_recovery.cfg`. The model covers the
 interleavings that are difficult to exhaustively review in C++:
 
 - a durable `dispatching` barrier is never a resend path;

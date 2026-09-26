@@ -7,8 +7,9 @@ Accepted as a verification aid for observation-only reconciliation.
 ## Decision
 
 Keep a small finite TLA+ model in
-`formal/reconciliation/ReconciliationEvidence.tla` with its checked
-configuration in `ReconciliationEvidence.cfg`. The model deliberately keeps
+`formal/reconciliation/reconciliation_evidence.tla` with its checked
+configuration in `reconciliation_evidence.cfg` and
+`reconciliation_evidence_refresh.cfg`. The model deliberately keeps
 the evidence domains independent:
 
 - active orders, positions, history orders, and history deals may refresh in
@@ -18,15 +19,19 @@ the evidence domains independent:
   view is authoritative, while missing visibility never proves non-execution;
 - contradictory or non-unique evidence is ambiguous, never guessed as a
   confirmation;
-- an event gap remains unresolved until every domain has a fresh authoritative
-  snapshot;
+- an event gap blocks unresolved missing/pending evidence, while an already
+  satisfied scoped request follows the same confirmation rule as the C++
+  engine;
 - account and graph-instance mismatches cannot confirm a request; and
 - restart re-anchors the in-memory baseline but produces no fresh evidence.
 
-The finite configuration explores both an all-presence request and a history
-order absence request. TLC 1.8.0 is downloaded by CI over HTTPS, verified by
-the same pinned SHA-256 as the dispatch model, and run with Java 17. The model
-does not replace focused C++ tests or a broker smoke test.
+The main finite configuration explores all four evidence domains, including
+an all-presence request, a scoped active-order request, and a history-order
+absence request. A second compact configuration permits repeated refreshes of
+two domains, covering post-gap and post-restart re-observation without making
+the primary ordering run unbounded. TLC 1.8.0 is downloaded by CI over HTTPS,
+verified by the same pinned SHA-256 as the dispatch model, and run with Java
+17. The model does not replace focused C++ tests or a broker smoke test.
 
 ## Consequences
 

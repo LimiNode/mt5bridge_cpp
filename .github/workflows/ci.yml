@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -41,15 +41,15 @@ jobs:
         run: |
           pushd formal/dispatch
           java -cp ../../tla2tools.jar tlc2.TLC \
-            -config DispatchRecovery.cfg \
-            DispatchRecovery.tla
+            -config dispatch_recovery.cfg \
+            dispatch_recovery.tla
           popd
 
   formal-reconciliation:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -65,6 +65,9 @@ jobs:
         run: |
           pushd formal/reconciliation
           java -cp ../../tla2tools.jar tlc2.TLC \
-            -config ReconciliationEvidence.cfg \
-            ReconciliationEvidence.tla
+            -config reconciliation_evidence.cfg \
+            reconciliation_evidence.tla
+          java -cp ../../tla2tools.jar tlc2.TLC \
+            -config reconciliation_evidence_refresh.cfg \
+            reconciliation_evidence.tla
           popd

@@ -1,4 +1,4 @@
------------------------------- MODULE DispatchRecovery ------------------------------
+------------------------------ MODULE dispatch_recovery ------------------------------
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Writers, Operations, MaxEpoch

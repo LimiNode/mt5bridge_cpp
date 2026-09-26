@@ -99,27 +99,29 @@ include/
     └── dispatch/{journal,file_journal_store}.hpp
 
 src/
-└── runtime/
-    └── mt5_bridge.cpp
+├── bridge/mt5_bridge.cpp
+├── runtime/runtime_lane.*
+├── trade/python_dispatch_transport.*
+└── dispatch/{file_journal_store,one_shot_backend}.*
 ```
 
 The public dispatch domain is exposed through `dispatch.hpp` and its focused
 headers under `dispatch/`. The latter is implemented by the Python-free
-`src/runtime/file_journal_store.cpp` source in the separate
+`src/dispatch/file_journal_store.cpp` source in the separate
 `mt5bridge::journal` target. The private one-shot execution seam lives in
-`src/runtime/one_shot_backend.hpp/.cpp` and is built as
+`src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific
-`python_dispatch_transport.hpp/.cpp` adapter is compiled only into the DLL.
+`src/trade/python_dispatch_transport.hpp/.cpp` adapter is compiled only into
+the DLL.
 Neither private seam is part of the consumer SDK.
 
 Everything below `include/mt5bridge*` is consumer-facing SDK/API. The source
-under `src/runtime/` is implementation owned by the native targets and must
-not be included by applications. When the runtime grows, private `.hpp` and
-`.cpp` files should live side by side in `src/runtime/`; do not create a
-second private include tree merely to mirror the public one. Keep
-`src/runtime/mt5_bridge.cpp` as one implementation unit until a real
-responsibility boundary justifies a split; directory shape alone is not a
-reason to add speculative wrappers or adapters.
+under `src/` is implementation owned by native targets and must not be
+included by applications. Private `.hpp` and `.cpp` files should live side by
+side in the directory owning their responsibility; do not create a second
+private include tree merely to mirror the public one. The bridge adapter is
+kept separate from runtime, market, trade, and dispatch implementation so new
+domain logic does not accumulate in the exported-entry translation unit.
 
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).

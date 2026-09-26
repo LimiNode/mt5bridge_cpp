@@ -22,7 +22,8 @@ the evidence domains independent:
 - an event gap blocks unresolved missing/pending evidence, while an already
   satisfied scoped request follows the same confirmation rule as the C++
   engine;
-- account and graph-instance mismatches cannot confirm a request; and
+- the operation account is immutable across restart re-anchor, so account and
+  graph-instance mismatches cannot confirm a request; and
 - restart re-anchors the in-memory baseline but produces no fresh evidence.
 
 The main finite configuration explores all four evidence domains, including

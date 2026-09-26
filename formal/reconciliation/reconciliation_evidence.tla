@@ -8,8 +8,8 @@ EXTENDS Naturals, FiniteSets
 (* the durable baseline.                                                   *)
 (***************************************************************************)
 
-CONSTANTS Domains, Accounts, RequestModes, MaxRevision, MaxGraphInstance,
-          MaxDomainRevision
+CONSTANTS Domains, Accounts, OperationAccount, RequestModes, MaxRevision,
+          MaxGraphInstance, MaxDomainRevision
 
 EvidenceKinds == {"unseen", "match", "absence", "ambiguous"}
 RefreshKinds == EvidenceKinds \ {"unseen"}
@@ -26,8 +26,9 @@ vars == <<requestMode, currentAccount, baselineAccount,
 
 Init ==
     /\ requestMode \in RequestModes
-    /\ currentAccount = "A"
-    /\ baselineAccount = "A"
+    /\ OperationAccount \in Accounts
+    /\ currentAccount = OperationAccount
+    /\ baselineAccount = OperationAccount
     /\ graphInstance = 1
     /\ graphRevision = 0
     /\ baselineGraphInstance = 1
@@ -70,7 +71,7 @@ HasFreshAmbiguity ==
     \E d \in RequiredDomains(requestMode) : Fresh(d) /\ evidence[d] = "ambiguous"
 
 Outcome ==
-    IF currentAccount # baselineAccount
+    IF currentAccount # OperationAccount \/ baselineAccount # OperationAccount
     THEN "account_mismatch"
     ELSE IF graphInstance # baselineGraphInstance
     THEN "ambiguous"
@@ -182,7 +183,8 @@ TypeOK ==
            baselineDomainRevision[d] <= graphRevision
 
 SafeToConfirm ==
-    /\ currentAccount = baselineAccount
+    /\ currentAccount = OperationAccount
+    /\ baselineAccount = OperationAccount
     /\ graphInstance = baselineGraphInstance
     /\ AllFresh
     /\ AllSatisfied
@@ -191,8 +193,12 @@ SafeToConfirm ==
 NoFalseConfirmed ==
     Outcome = "confirmed" => SafeToConfirm
 
+NoCrossAccountConfirmation ==
+    Outcome = "confirmed" => currentAccount = OperationAccount
+
 GapDoesNotMaskUnsettledEvidence ==
-    (eventGap /\ currentAccount = baselineAccount /\
+    (eventGap /\ currentAccount = OperationAccount /\
+        baselineAccount = OperationAccount /\
         graphInstance = baselineGraphInstance /\
         ~HasFreshAmbiguity /\ (~AllFresh \/ ~AllSatisfied))
         => (Outcome = "trade_event_gap")

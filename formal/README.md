@@ -53,7 +53,8 @@ It checks observation ordering independently from dispatch recovery:
 - contradictory/non-unique evidence is ambiguous rather than confirmed;
 - an event gap blocks unresolved missing/pending evidence, matching the C++
   engine's `trade_event_gap` policy;
-- account and graph-instance changes cannot produce confirmation; and
+- account and graph-instance changes cannot produce confirmation, including
+  after a restart re-anchor; and
 - restart re-anchors the baseline without manufacturing fresh evidence.
 
 Run it with the same pinned TLC artifact:

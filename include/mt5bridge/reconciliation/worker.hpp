@@ -85,6 +85,10 @@ public:
         return last_cycle_;
     }
 
+    /// \brief Returns the current graph used by the coordinator.
+    /// \return Read-only graph provenance and account scope.
+    const ObservationGraph &graph() const { return coordinator_.graph(); }
+
     /// \brief Returns the number of provider refreshes performed.
     /// \return One-based cycle count, or zero before the first step.
     std::uint64_t cycle_count() const { return cycle_count_; }

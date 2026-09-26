@@ -360,6 +360,63 @@ int main() {
                     account_provider.calls == 2,
                 "account-mismatched worker resumed observation instead of suspending");
 
+        const auto reanchor_key = mt5bridge::OperationKey{account(), 101, 201};
+        require(journal.create(reanchor_key, {0x09}).accepted(),
+                "cross-account re-anchor operation create failed");
+        FakeProvider reanchor_baseline_provider({batch(reanchor_key.account, false)});
+        mt5bridge::ObservationCoordinator reanchor_baseline_coordinator(
+            reanchor_baseline_provider, reanchor_key.account);
+        mt5bridge::ObservationCollectionRequest reanchor_collection;
+        reanchor_collection.observe_positions = false;
+        require(reanchor_baseline_coordinator.refresh(reanchor_collection)
+                    .apply.accepted(),
+                "cross-account re-anchor baseline refresh failed");
+        mt5bridge::ReconciliationRequest reanchor_request;
+        reanchor_request.baseline =
+            reanchor_baseline_coordinator.capture_baseline();
+        reanchor_request.predicates = {mt5bridge::require_active_order(100)};
+        enter_dispatching(
+            journal, reanchor_key,
+            mt5bridge::ReconciliationDescriptor{
+                reanchor_key.account, *reanchor_request.baseline,
+                reanchor_request.predicates, mt5bridge::OperationState::filled});
+
+        const auto foreign_account = mt5bridge::AccountKey{"Other-Server", 43};
+        FakeProvider foreign_recovery_provider(
+            {batch(foreign_account, false), batch(foreign_account, true)});
+        mt5bridge::ObservationCoordinator foreign_recovery_coordinator(
+            foreign_recovery_provider, foreign_account);
+        mt5bridge::OperationReconciliationWorker foreign_recovery_worker(
+            journal, reanchor_key, foreign_recovery_coordinator, reanchor_collection);
+        const auto foreign_cycle = foreign_recovery_worker.step();
+        require(foreign_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::account_mismatch &&
+                    foreign_cycle.record &&
+                    foreign_cycle.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    foreign_cycle.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    foreign_recovery_provider.calls == 0,
+                "recovered operation was re-anchored to a foreign account");
+
+        FakeProvider restored_account_provider(
+            {batch(reanchor_key.account, false), batch(reanchor_key.account, true)});
+        mt5bridge::ObservationCoordinator restored_account_coordinator(
+            restored_account_provider, reanchor_key.account);
+        mt5bridge::OperationReconciliationWorker restored_account_worker(
+            journal, reanchor_key, restored_account_coordinator, reanchor_collection);
+        const auto restored_first = restored_account_worker.step();
+        const auto restored_second = restored_account_worker.step();
+        require(restored_first.status ==
+                    mt5bridge::OperationReconciliationStatus::pending &&
+                    restored_second.status ==
+                        mt5bridge::OperationReconciliationStatus::progressed &&
+                    restored_second.record &&
+                    restored_second.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    restored_account_provider.calls == 2,
+                "matching-account re-anchor did not resume reconciliation");
+
         const auto ambiguous_key = mt5bridge::OperationKey{account(), 11, 15};
         require(journal.create(ambiguous_key, {0x05}).accepted(),
                 "ambiguous operation create failed");

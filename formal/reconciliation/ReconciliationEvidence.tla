@@ -186,20 +186,21 @@ NoFalseConfirmed ==
         /\ ~HasFreshAmbiguity
 
 GapBlocksConfirmation ==
-    eventGap /\ currentAccount = baselineAccount /\
-        graphInstance = baselineGraphInstance
-        => Outcome # "confirmed"
+    (eventGap /\ currentAccount = baselineAccount /\
+        graphInstance = baselineGraphInstance)
+        => (Outcome # "confirmed")
 
 RestartRequiresFreshEvidence ==
-    graphInstance = baselineGraphInstance /\
+    (graphInstance = baselineGraphInstance /\
         baselineGraphRevision = graphRevision /\
-        \E d \in Domains : domainRevision[d] = baselineDomainRevision[d]
-        => Outcome # "confirmed"
+        (\E d \in Domains :
+            domainRevision[d] = baselineDomainRevision[d]))
+        => (Outcome # "confirmed")
 
 AbsenceNeedsAuthoritativeCoverage ==
-    Outcome = "confirmed" /\ requestMode = "history_order_absent"
-        => authoritative["history_orders"] /\
-           evidence["history_orders"] = "absence"
+    (Outcome = "confirmed" /\ requestMode = "history_order_absent")
+        => (authoritative["history_orders"] /\
+            evidence["history_orders"] = "absence")
 
 Spec == Init /\ [][Next]_vars
 

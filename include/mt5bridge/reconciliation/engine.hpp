@@ -587,6 +587,8 @@ private:
             predicate.kind == ReconciliationPredicateKind::position_absent ||
             predicate.kind == ReconciliationPredicateKind::history_order_absent ||
             predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+        if (predicate.ticket == 0 && absence)
+            return false;
         if (!history && predicate.history_window)
             return false;
         if (history && predicate.history_window && !predicate.history_window->valid())

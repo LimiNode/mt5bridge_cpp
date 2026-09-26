@@ -160,7 +160,7 @@ void prepare_for_admission(
 
 mt5bridge::ReconciliationDescriptor descriptor_for(
     const mt5bridge::OperationKey &key, const mt5bridge::ObservationGraph &graph,
-    mt5bridge::ReconciliationPredicate predicate = mt5bridge::require_active_order(20)) {
+    mt5bridge::ReconciliationPredicate predicate = mt5bridge::require_active_order(999)) {
     return {key.account, mt5bridge::capture_reconciliation_baseline(graph),
             {std::move(predicate)}, mt5bridge::OperationState::filled};
 }
@@ -323,6 +323,52 @@ int main() {
                     unknown_result.reason == mt5bridge::ReconciliationReason::unresolved_operation,
                 "unknown broker ticket was treated as confirmed evidence");
 
+        const auto baseline_present_key = mt5bridge::OperationKey{account(), 16, 20};
+        MemoryStore baseline_present_store;
+        mt5bridge::OperationJournal baseline_present_journal(baseline_present_store);
+        require(baseline_present_journal.create(baseline_present_key, {0x07}).accepted(),
+                "baseline-present mismatch setup failed");
+        prepare_for_admission(
+            baseline_present_journal, baseline_present_key,
+            descriptor_for(baseline_present_key, coordinator.graph(),
+                           mt5bridge::require_active_order(20)));
+        FakeLease baseline_present_lease;
+        baseline_present_lease.owned_account = baseline_present_key.account;
+        baseline_present_lease.token = 80;
+        baseline_present_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier baseline_present_barrier(
+            baseline_present_journal, coordinator.graph(), consistency_request);
+        require(baseline_present_barrier
+                    .admit(baseline_present_key,
+                          ready_request(baseline_present_key.account,
+                                        *fresh_consistency.proof),
+                          baseline_present_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
+                "pre-existing ticket was accepted as an absent-to-present effect");
+
+        const auto baseline_absent_key = mt5bridge::OperationKey{account(), 17, 21};
+        MemoryStore baseline_absent_store;
+        mt5bridge::OperationJournal baseline_absent_journal(baseline_absent_store);
+        require(baseline_absent_journal.create(baseline_absent_key, {0x08}).accepted(),
+                "baseline-absent mismatch setup failed");
+        prepare_for_admission(
+            baseline_absent_journal, baseline_absent_key,
+            descriptor_for(baseline_absent_key, coordinator.graph(),
+                           mt5bridge::require_active_order_absent(999)));
+        FakeLease baseline_absent_lease;
+        baseline_absent_lease.owned_account = baseline_absent_key.account;
+        baseline_absent_lease.token = 81;
+        baseline_absent_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier baseline_absent_barrier(
+            baseline_absent_journal, coordinator.graph(), consistency_request);
+        require(baseline_absent_barrier
+                    .admit(baseline_absent_key,
+                          ready_request(baseline_absent_key.account,
+                                        *fresh_consistency.proof),
+                          baseline_absent_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
+                "already-absent ticket was accepted as a present-to-absent effect");
+
         mt5bridge::DispatchAdmissionBarrier barrier(journal, coordinator.graph(),
                                                     consistency_request);
         FakeLease lease;
@@ -360,9 +406,9 @@ int main() {
                 "event gap did not block admission");
 
         lease.held = false;
-        require(barrier.admit(key, ready_request(key.account, *fresh_consistency.proof), lease)
-                        .status ==
-                    mt5bridge::DispatchAdmissionStatus::lease_not_held,
+        const auto missing_lease =
+            barrier.admit(key, ready_request(key.account, *fresh_consistency.proof), lease);
+        require(missing_lease.status == mt5bridge::DispatchAdmissionStatus::lease_not_held,
                 "missing writer lease opened the barrier");
         lease.held = true;
         lease.token = 0;

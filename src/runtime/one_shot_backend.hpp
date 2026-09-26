@@ -41,6 +41,8 @@ struct BackendCallResult {
     BrokerResultDisposition disposition = BrokerResultDisposition::reconciling;
     std::uint32_t retcode = 0; ///< MqlTradeResult.retcode when available.
     std::vector<std::uint8_t> raw_result; ///< Complete opaque result payload.
+    std::vector<ReconciliationBinding>
+        reconciliation_bindings; ///< Bindings extracted from the validated result.
 };
 
 /// \class CurrentAccountProbe
@@ -63,6 +65,8 @@ public:
     /// \brief Performs exactly one backend call for an already-submitting record.
     /// \param record Durable operation record containing the opaque request payload.
     /// \return Broker result or a transport failure; the adapter must not retry.
+    /// \note `reconciliation_bindings` must be extracted from the same fully
+    ///       validated broker result represented by `raw_result`.
     virtual BackendCallResult submit_once(const OperationRecord &record) = 0;
 };
 
@@ -78,6 +82,7 @@ enum class OneShotExecutionStatus {
     transition_failed,         ///< Durable transition to `submitting` failed.
     transport_failure,         ///< Backend returned no trustworthy broker result.
     result_not_durable,         ///< Raw broker result could not be durably persisted.
+    reconciliation_binding_failed, ///< Result persisted but identity binding failed.
     lifecycle_transition_failed, ///< Result persisted but final state transition failed.
 };
 

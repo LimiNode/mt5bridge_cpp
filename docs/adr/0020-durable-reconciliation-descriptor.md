@@ -25,6 +25,13 @@ confirm either presence or absence by itself. Known-ticket predicates retain
 the same explicit baseline transition contract, preventing a pre-existing
 ticket from being mistaken for a post-dispatch effect.
 
+Ticket enrichment is not caller-authoritative. The journal stores a separate
+single-assignment `correlation_id -> broker_ticket` binding. Only the private
+one-shot backend can create it, and only after the complete broker result has
+been durably persisted. Repeating the same binding is idempotent; a different
+ticket for an already-bound correlation is rejected. Recovery restores these
+bindings before a worker reconstructs its request.
+
 The descriptor is stored in the same compare-and-committed operation record as
 the dispatch intent. A record at or beyond `dispatching` without a valid
 descriptor is malformed and is rejected during recovery. A reconciliation
@@ -34,6 +41,12 @@ silently broaden or replace the durable contract. The one controlled enrichment
 is replacing a zero broker ticket with a non-zero ticket while retaining the
 same non-zero client correlation id. This resolves a pre-send unknown identity
 from a trusted broker result without changing the causal contract.
+
+Before opening `dispatching`, `DispatchAdmissionBarrier` requires the
+descriptor baseline to match the admission graph account, graph instance, and
+every domain revision exactly. Every known-ticket predicate is then checked
+against the actual graph contents at that baseline; a fabricated
+`baseline_present` value or a stale baseline rejects admission.
 
 The descriptor is evidence provenance, not a consistency proof. It does not
 make a recovered graph baseline current, and it does not authorize a resend.

@@ -203,7 +203,7 @@ int main() {
                 "consistent proof setup failed");
         const auto descriptor = mt5bridge::ReconciliationDescriptor{
             operation_account, coordinator.capture_baseline(),
-            {mt5bridge::require_active_order(20)}, mt5bridge::OperationState::filled};
+            {mt5bridge::require_active_order(999)}, mt5bridge::OperationState::filled};
 
         MemoryStore store;
         mt5bridge::OperationJournal journal(store);
@@ -236,6 +236,70 @@ int main() {
         require(retry.status == mt5bridge::runtime::OneShotExecutionStatus::invalid_permit &&
                     transport.calls == 1,
                 "consumed permit enabled a second backend call");
+
+        const auto binding_key = key(12);
+        require(journal.create(binding_key, {0x06}).accepted(),
+                "binding operation create failed");
+        const auto unknown_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, coordinator.capture_baseline(),
+            {mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::active_order_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 12001)},
+            mt5bridge::OperationState::filled};
+        prepare_for_admission(journal, binding_key, unknown_descriptor);
+        FakeLease binding_lease{operation_account};
+        auto binding_permit = admit(journal, coordinator.graph(), binding_key,
+                                    *consistency.proof, binding_lease);
+        require(binding_permit.has_value(), "binding permit setup failed");
+        FakeTransport binding_transport;
+        binding_transport.next.reconciliation_bindings.push_back({12001, 999});
+        FakeAccountProbe binding_account_probe({operation_account, operation_account});
+        const auto binding_result = backend.execute(
+            journal, binding_key, std::move(*binding_permit), binding_account_probe,
+            binding_lease, binding_transport);
+        require(binding_result.completed() && binding_result.record &&
+                    binding_result.record->reconciliation_bindings.size() == 1 &&
+                    binding_result.record->reconciliation_bindings.front() ==
+                        mt5bridge::ReconciliationBinding{12001, 999},
+                "validated broker result did not create a durable ticket binding");
+        mt5bridge::OperationJournal binding_recovered(store);
+        const auto recovered_binding = binding_recovered.recover(binding_key);
+        require(recovered_binding.accepted() && recovered_binding.record &&
+                    recovered_binding.record->reconciliation_bindings.size() == 1,
+                "durable ticket binding did not survive journal recovery");
+
+        const auto binding_conflict_key = key(13);
+        require(journal.create(binding_conflict_key, {0x07}).accepted(),
+                "binding-conflict operation create failed");
+        const auto conflicting_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, coordinator.capture_baseline(),
+            {mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::active_order_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 13001)},
+            mt5bridge::OperationState::filled};
+        prepare_for_admission(journal, binding_conflict_key, conflicting_descriptor);
+        FakeLease binding_conflict_lease{operation_account};
+        auto binding_conflict_permit = admit(
+            journal, coordinator.graph(), binding_conflict_key, *consistency.proof,
+            binding_conflict_lease);
+        require(binding_conflict_permit.has_value(),
+                "binding-conflict permit setup failed");
+        FakeTransport binding_conflict_transport;
+        binding_conflict_transport.next.reconciliation_bindings = {
+            {13001, 998}, {13001, 999}};
+        FakeAccountProbe binding_conflict_probe({operation_account, operation_account});
+        const auto binding_conflict_result = backend.execute(
+            journal, binding_conflict_key, std::move(*binding_conflict_permit),
+            binding_conflict_probe, binding_conflict_lease, binding_conflict_transport);
+        require(binding_conflict_result.status ==
+                    mt5bridge::runtime::OneShotExecutionStatus::reconciliation_binding_failed &&
+                    binding_conflict_result.record &&
+                    binding_conflict_result.record->reconciliation_bindings.size() == 1 &&
+                    binding_conflict_result.record->operation_state ==
+                        mt5bridge::OperationState::submitting,
+                "conflicting ticket binding was accepted or reopened for resend");
 
         const auto stale_key = key(8);
         require(journal.create(stale_key, {0x03}).accepted(),

@@ -200,9 +200,10 @@ was present before dispatch and the expected causal transition. A new order may
 therefore cross the barrier with a zero broker ticket, provided it carries a
 non-zero client correlation id. Such an identity remains pending and cannot
 satisfy an absence predicate. Once a trusted result supplies the broker ticket,
-the owner may enrich the request with that ticket only when the same correlation
-id and causal metadata are retained; the durable descriptor itself is not
-silently broadened.
+the private one-shot backend durably records a single-assignment binding before
+the worker can enrich its request. The same correlation id and causal metadata
+must be retained; a different ticket is rejected and the durable descriptor is
+never silently broadened.
 
 The evaluator returns `PENDING`, `CONFIRMED`, `NOT_OBSERVED`,
 `ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or `AMBIGUOUS`. It does not call the

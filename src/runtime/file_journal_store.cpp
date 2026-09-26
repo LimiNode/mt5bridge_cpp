@@ -173,6 +173,21 @@ bool append_reconciliation_descriptor(
     return true;
 }
 
+bool append_reconciliation_bindings(
+    std::vector<std::uint8_t> &bytes,
+    const std::vector<ReconciliationBinding> &bindings) {
+    if (bindings.size() > (std::numeric_limits<std::uint32_t>::max)())
+        return false;
+    append_u32(bytes, static_cast<std::uint32_t>(bindings.size()));
+    for (const auto &binding : bindings) {
+        if (!binding.valid())
+            return false;
+        append_u64(bytes, binding.correlation_id);
+        append_u64(bytes, binding.broker_ticket);
+    }
+    return true;
+}
+
 bool read_reconciliation_descriptor(
     const std::vector<std::uint8_t> &bytes, std::size_t &offset,
     std::optional<ReconciliationDescriptor> &descriptor, bool extended) {
@@ -182,7 +197,7 @@ bool read_reconciliation_descriptor(
     if (!read_u32(bytes, offset, present) || present > 1)
         return false;
     if (present == 0)
-        return offset == bytes.size();
+        return true;
 
     AccountKey descriptor_account;
     std::string baseline_server;
@@ -267,7 +282,7 @@ bool read_reconciliation_descriptor(
         }
         value.predicates.push_back(std::move(predicate));
     }
-    if (offset != bytes.size() || !value.valid())
+    if (!value.valid())
         return false;
     descriptor = std::move(value);
     return true;
@@ -298,6 +313,8 @@ std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &r
     append_u64(body, record.revision);
     append_u64(body, record.fencing_token);
     if (!append_reconciliation_descriptor(body, record.reconciliation_descriptor))
+        return std::nullopt;
+    if (!append_reconciliation_bindings(body, record.reconciliation_bindings))
         return std::nullopt;
     return body;
 }
@@ -356,8 +373,24 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
         !read_u64(body, body_offset, record.fencing_token) ||
         !read_reconciliation_descriptor(body, body_offset,
                                         record.reconciliation_descriptor,
-                                        version >= kFormatVersion) ||
-        body_offset != body.size())
+                                        version >= kFormatVersion))
+        return std::nullopt;
+    if (version >= kFormatVersion) {
+        std::uint32_t binding_count = 0;
+        if (!read_u32(body, body_offset, binding_count) ||
+            binding_count > kMaxReconciliationPredicates)
+            return std::nullopt;
+        record.reconciliation_bindings.reserve(binding_count);
+        for (std::uint32_t index = 0; index < binding_count; ++index) {
+            ReconciliationBinding binding;
+            if (!read_u64(body, body_offset, binding.correlation_id) ||
+                !read_u64(body, body_offset, binding.broker_ticket) ||
+                !binding.valid())
+                return std::nullopt;
+            record.reconciliation_bindings.push_back(binding);
+        }
+    }
+    if (body_offset != body.size())
         return std::nullopt;
     record.operation_state = static_cast<OperationState>(operation_state);
     record.journal_state = static_cast<JournalState>(journal_state);

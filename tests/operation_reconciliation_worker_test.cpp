@@ -215,11 +215,8 @@ int main() {
             enriched_request);
         const auto enriched_cycle = enrichment_worker.step();
         require(enriched_cycle.status ==
-                    mt5bridge::OperationReconciliationStatus::progressed &&
-                    enriched_cycle.record &&
-                    enriched_cycle.record->operation_state ==
-                        mt5bridge::OperationState::filled,
-                "trusted ticket enrichment did not resolve the unknown identity");
+                    mt5bridge::OperationReconciliationStatus::invalid_request,
+                "caller-supplied ticket enriched an unbound identity");
 
         const auto restart_key = mt5bridge::OperationKey{account(), 13, 17};
         require(journal.create(restart_key, {0x07}).accepted(),

@@ -6,6 +6,7 @@
 #include <mt5bridge/dispatch/journal.hpp>
 #include <mt5bridge/observation/worker.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <utility>
@@ -180,7 +181,7 @@ public:
           key_(std::move(key)),
           descriptor_(journal_descriptor(journal_, key_)),
           worker_(coordinator, std::move(collection_request),
-                  request_from_descriptor(descriptor_, coordinator.graph())),
+                  request_from_journal(journal_, key_, coordinator.graph())),
           settled_state_(descriptor_ ? descriptor_->settled_state
                                      : OperationState::filled) {}
 
@@ -201,7 +202,8 @@ public:
         if (!current->reconciliation_descriptor || !descriptor_)
             return {OperationReconciliationStatus::invalid_state, std::nullopt,
                     current};
-        if (!same_descriptor(*current->reconciliation_descriptor, *descriptor_))
+        if (!same_descriptor(*current->reconciliation_descriptor, *descriptor_,
+                             current->reconciliation_bindings))
             return {OperationReconciliationStatus::invalid_request, std::nullopt,
                     current};
         if (!valid_settled_state(settled_state_) ||
@@ -281,6 +283,7 @@ private:
 
     static ReconciliationRequest request_from_descriptor(
         const std::optional<ReconciliationDescriptor> &descriptor,
+        const std::vector<ReconciliationBinding> &bindings,
         const ObservationGraph &graph) {
         ReconciliationRequest request;
         if (descriptor) {
@@ -291,8 +294,28 @@ private:
             // a restarted process happens to reuse an instance id.
             request.baseline = capture_reconciliation_baseline(graph);
             request.predicates = descriptor->predicates;
+            for (auto &predicate : request.predicates) {
+                if (predicate.ticket != 0 || predicate.correlation_id == 0)
+                    continue;
+                for (const auto &binding : bindings) {
+                    if (binding.correlation_id == predicate.correlation_id) {
+                        predicate.ticket = binding.broker_ticket;
+                        break;
+                    }
+                }
+            }
         }
         return request;
+    }
+
+    static ReconciliationRequest request_from_journal(
+        OperationJournal &journal, const OperationKey &key,
+        const ObservationGraph &graph) {
+        const auto record = journal.find(key);
+        if (!record)
+            return {};
+        return request_from_descriptor(record->reconciliation_descriptor,
+                                       record->reconciliation_bindings, graph);
     }
 
     static bool baseline_usable(const ReconciliationBaseline &baseline,
@@ -324,8 +347,9 @@ private:
                          left->to_msc == right->to_msc);
     }
 
-    static bool same_descriptor(const ReconciliationDescriptor &left,
-                                const ReconciliationDescriptor &right) {
+    static bool same_descriptor(
+        const ReconciliationDescriptor &left, const ReconciliationDescriptor &right,
+        const std::vector<ReconciliationBinding> &bindings) {
         if (left.account != right.account ||
             left.baseline.account() != right.baseline.account() ||
             left.baseline.graph_instance_id() != right.baseline.graph_instance_id() ||
@@ -345,7 +369,13 @@ private:
                 left_predicate.ticket == right_predicate.ticket ||
                 (left_predicate.correlation_id != 0 &&
                  left_predicate.correlation_id == right_predicate.correlation_id &&
-                 (left_predicate.ticket == 0 || right_predicate.ticket == 0));
+                 (left_predicate.ticket == 0 || right_predicate.ticket == 0) &&
+                 std::any_of(bindings.begin(), bindings.end(), [&](const auto &binding) {
+                     return binding.correlation_id == left_predicate.correlation_id &&
+                            binding.broker_ticket ==
+                                (left_predicate.ticket == 0 ? right_predicate.ticket
+                                                            : left_predicate.ticket);
+                 }));
             if (left_predicate.kind != right_predicate.kind || !ticket_matches ||
                 left_predicate.baseline_present != right_predicate.baseline_present ||
                 left_predicate.correlation_id != right_predicate.correlation_id ||

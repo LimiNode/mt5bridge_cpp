@@ -6,6 +6,7 @@
 #include <mt5bridge/observation/environment_consistency.hpp>
 #include <mt5bridge/reconciliation/engine.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -13,6 +14,10 @@
 #include <optional>
 #include <utility>
 #include <vector>
+
+namespace mt5bridge::runtime {
+class OneShotDispatchBackend;
+}
 
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
@@ -70,7 +75,8 @@ struct ReconciliationDescriptor {
             settled_state != OperationState::expired &&
             settled_state != OperationState::rejected)
             return false;
-        for (const auto &predicate : predicates) {
+        for (std::size_t index = 0; index < predicates.size(); ++index) {
+            const auto &predicate = predicates[index];
             if (!predicate.baseline_present ||
                 predicate.expected_transition == ReconciliationTransition::unspecified ||
                 (predicate.ticket == 0 && predicate.correlation_id == 0))
@@ -85,6 +91,8 @@ struct ReconciliationDescriptor {
                 predicate.kind == ReconciliationPredicateKind::position_absent ||
                 predicate.kind == ReconciliationPredicateKind::history_order_absent ||
                 predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+            if (predicate.ticket == 0 && absence)
+                return false;
             switch (predicate.kind) {
             case ReconciliationPredicateKind::active_order_present:
             case ReconciliationPredicateKind::active_order_absent:
@@ -116,10 +124,95 @@ struct ReconciliationDescriptor {
                 (history && predicate.history_window && !predicate.history_window->valid()) ||
                 (absence && history && !predicate.history_window))
                 return false;
+            if (predicate.correlation_id != 0) {
+                for (std::size_t prior = 0; prior < index; ++prior) {
+                    if (predicates[prior].correlation_id == predicate.correlation_id)
+                        return false;
+                }
+            }
         }
         return true;
     }
 };
+
+/// \struct ReconciliationBinding
+/// \brief Durable single-assignment binding from client correlation to broker ticket.
+struct ReconciliationBinding {
+    std::uint64_t correlation_id = 0; ///< Client identity from the descriptor.
+    std::uint64_t broker_ticket = 0; ///< Ticket supplied by a validated result.
+
+    /// \brief Tests whether both identity components are usable.
+    /// \return True only for a non-zero correlation and broker ticket.
+    bool valid() const { return correlation_id != 0 && broker_ticket != 0; }
+
+    /// \brief Compares two bindings for idempotent replay.
+    /// \param other Binding to compare.
+    /// \return True when both identities match exactly.
+    bool operator==(const ReconciliationBinding &other) const {
+        return correlation_id == other.correlation_id &&
+               broker_ticket == other.broker_ticket;
+    }
+};
+
+/// \brief Verifies descriptor provenance against the graph used for admission.
+/// \param descriptor Durable descriptor to validate.
+/// \param graph Graph whose current revision is about to be admitted.
+/// \return True only when the baseline is exact and known-ticket state agrees.
+inline bool reconciliation_descriptor_matches_graph(
+    const ReconciliationDescriptor &descriptor, const ObservationGraph &graph) {
+    if (!descriptor.valid() || !graph.bound() ||
+        descriptor.account != graph.account_key() ||
+        descriptor.baseline.account() != graph.account_key() ||
+        descriptor.baseline.graph_instance_id() != graph.instance_id() ||
+        descriptor.baseline.graph_revision() != graph.revision() ||
+        descriptor.baseline.active_orders_revision() !=
+            graph.domain_revision(ObservationDomain::active_orders) ||
+        descriptor.baseline.positions_revision() !=
+            graph.domain_revision(ObservationDomain::positions) ||
+        descriptor.baseline.history_orders_revision() !=
+            graph.domain_revision(ObservationDomain::history_orders) ||
+        descriptor.baseline.history_deals_revision() !=
+            graph.domain_revision(ObservationDomain::history_deals))
+        return false;
+
+    const auto contains = [](const auto &values, std::uint64_t ticket) {
+        for (const auto &value : values) {
+            if (value.ticket == ticket)
+                return true;
+        }
+        return false;
+    };
+    const auto active_orders = graph.active_orders();
+    const auto positions = graph.positions();
+    const auto history_orders = graph.history_orders();
+    const auto history_deals = graph.history_deals();
+    for (const auto &predicate : descriptor.predicates) {
+        if (predicate.ticket == 0)
+            continue;
+        bool present = false;
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::active_order_absent:
+            present = contains(active_orders, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::position_present:
+        case ReconciliationPredicateKind::position_absent:
+            present = contains(positions, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::history_order_present:
+        case ReconciliationPredicateKind::history_order_absent:
+            present = contains(history_orders, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+        case ReconciliationPredicateKind::history_deal_absent:
+            present = contains(history_deals, predicate.ticket);
+            break;
+        }
+        if (!predicate.baseline_present || present != *predicate.baseline_present)
+            return false;
+    }
+    return true;
+}
 
 /// \enum JournalState
 /// \brief Durable write-ahead state around the future side effect.
@@ -255,6 +348,8 @@ struct OperationRecord {
     std::uint64_t fencing_token = 0; ///< Writer token committed at dispatching.
     std::optional<ReconciliationDescriptor>
         reconciliation_descriptor; ///< Durable post-dispatch evidence contract.
+    std::vector<ReconciliationBinding>
+        reconciliation_bindings; ///< Durable broker identities derived from result evidence.
 
     /// \brief Tests whether the record can be persisted or recovered safely.
     /// \return True when identity, payload, state pair, revision, and fencing agree.
@@ -284,6 +379,32 @@ struct OperationRecord {
             return false;
         if (operation_state == OperationState::accepted && result_payload.empty())
             return false;
+        if (!reconciliation_bindings.empty()) {
+            if (!reconciliation_descriptor ||
+                !journal_at_least_result_persisted(journal_state) ||
+                result_payload.empty())
+                return false;
+            for (std::size_t index = 0; index < reconciliation_bindings.size(); ++index) {
+                const auto &binding = reconciliation_bindings[index];
+                if (!binding.valid())
+                    return false;
+                for (std::size_t prior = 0; prior < index; ++prior) {
+                    if (reconciliation_bindings[prior].correlation_id ==
+                            binding.correlation_id ||
+                        reconciliation_bindings[prior].broker_ticket == binding.broker_ticket)
+                        return false;
+                }
+                const auto predicate = std::find_if(
+                    reconciliation_descriptor->predicates.begin(),
+                    reconciliation_descriptor->predicates.end(),
+                    [&binding](const auto &candidate) {
+                        return candidate.correlation_id == binding.correlation_id;
+                    });
+                if (predicate == reconciliation_descriptor->predicates.end() ||
+                    predicate->ticket != 0)
+                    return false;
+            }
+        }
         if (!journal_at_least_dispatching(journal_state))
             return fencing_token == 0;
         return fencing_token != 0;
@@ -766,8 +887,66 @@ public:
     }
 
 private:
+    /// \brief Durably binds one broker ticket to a descriptor correlation.
+    /// \param key Operation whose persisted result supplied the identity.
+    /// \param correlation_id Descriptor correlation being resolved.
+    /// \param broker_ticket Validated broker ticket from that result.
+    /// \return Accepted record, or a fail-closed mutation status.
+    /// \note This is private to the one-shot backend; callers cannot invent a
+    ///       ticket by constructing a reconciliation request.
+    JournalMutationResult bind_reconciliation_ticket(
+        const OperationKey &key, std::uint64_t correlation_id,
+        std::uint64_t broker_ticket) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (correlation_id == 0 || broker_ticket == 0 ||
+            !it->second.reconciliation_descriptor ||
+            !journal_at_least_result_persisted(it->second.journal_state) ||
+            it->second.result_payload.empty())
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+
+        const auto predicate = std::find_if(
+            it->second.reconciliation_descriptor->predicates.begin(),
+            it->second.reconciliation_descriptor->predicates.end(),
+            [correlation_id](const auto &candidate) {
+                return candidate.correlation_id == correlation_id;
+            });
+        if (predicate == it->second.reconciliation_descriptor->predicates.end() ||
+            predicate->ticket != 0)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+
+        for (const auto &binding : it->second.reconciliation_bindings) {
+            if (binding.correlation_id == correlation_id)
+                return binding.broker_ticket == broker_ticket
+                           ? JournalMutationResult{JournalMutationStatus::accepted, it->second}
+                           : JournalMutationResult{JournalMutationStatus::conflict,
+                                                   std::nullopt};
+            if (binding.broker_ticket == broker_ticket)
+                return {JournalMutationStatus::conflict, std::nullopt};
+        }
+        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+
+        OperationRecord candidate = it->second;
+        candidate.reconciliation_bindings.push_back({correlation_id, broker_ticket});
+        candidate.revision += 1;
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
+        it->second = candidate;
+        return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
     DurableJournalStore &store_;
     std::map<OperationKey, OperationRecord> records_;
+
+    friend class runtime::OneShotDispatchBackend;
 };
 
 /// \class SingleWriterLease
@@ -932,6 +1111,9 @@ public:
         if (record->journal_state != JournalState::dispatch_intent_persisted ||
             record->operation_state != OperationState::prechecking ||
             !record->reconciliation_descriptor)
+            return {DispatchAdmissionStatus::invalid_state, std::nullopt};
+        if (!reconciliation_descriptor_matches_graph(*record->reconciliation_descriptor,
+                                                      graph_))
             return {DispatchAdmissionStatus::invalid_state, std::nullopt};
         const auto fencing_token = lease.held_fencing_token(key.account);
         if (!fencing_token || *fencing_token == 0)

@@ -81,6 +81,14 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
         return {OneShotExecutionStatus::result_not_durable, call.retcode,
                 journal.find(key)};
 
+    for (const auto &binding : call.reconciliation_bindings) {
+        const auto bound = journal.bind_reconciliation_ticket(
+            key, binding.correlation_id, binding.broker_ticket);
+        if (!bound.accepted())
+            return {OneShotExecutionStatus::reconciliation_binding_failed, call.retcode,
+                    journal.find(key)};
+    }
+
     OperationState final_state = OperationState::reconciling;
     if (call.retcode == kTradeRetcodeMarketClosed ||
         call.disposition == BrokerResultDisposition::rejected)

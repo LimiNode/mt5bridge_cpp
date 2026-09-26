@@ -182,6 +182,13 @@ private and must preserve the same account and fencing checks. The embedded
 Python implementation of that seam is specified in
 [ADR-0014](adr/0014-private-python-dispatch-transport.md).
 The bridge never retries a side-effecting order implicitly.
+
+The dispatch/recovery interleavings are also specified by the finite TLC model
+in [ADR-0021](adr/0021-formal-dispatch-recovery-model.md). It checks the
+non-resendable barrier, writer/epoch fencing, atomic result-plus-binding
+persistence, and terminal-evidence requirements across crash/restart paths;
+the pinned TLC run is part of CI rather than a substitute for the focused C++
+tests.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
 embeds a verified payload, extracts it to a content-addressed per-user cache,

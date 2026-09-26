@@ -126,6 +126,28 @@ mt5bridge::ObservationBatch positions_only_batch(const mt5bridge::AccountKey &ke
     return batch;
 }
 
+mt5bridge::ObservationBatch history_orders_batch(
+    const mt5bridge::AccountKey &key, mt5bridge::ObservationWindow window,
+    std::vector<Mt5HistoryOrderSnapshot> orders = {}) {
+    mt5bridge::ObservationBatch batch;
+    batch.account = key;
+    batch.observed_domains = mt5bridge::ObservationDomain::history_orders;
+    batch.history_orders_window = window;
+    batch.history_orders = std::move(orders);
+    return batch;
+}
+
+Mt5HistoryOrderSnapshot history_order(std::uint64_t ticket,
+                                      std::int64_t time_done_msc) {
+    Mt5HistoryOrderSnapshot value{};
+    value.ticket = ticket;
+    value.time_done_msc = time_done_msc;
+    value.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                         MT5BRIDGE_ORDER_KNOWN_POSITION_ID |
+                         MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
+    return value;
+}
+
 mt5bridge::DispatchAdmissionRequest ready_request(
     const mt5bridge::AccountKey &key,
     const mt5bridge::EnvironmentConsistencyProof &proof) {
@@ -209,6 +231,104 @@ int main() {
                 {*positions_first.sample, *positions_second.sample}, positions_scope);
         require(positions_consistency.consistent() && positions_consistency.proof.has_value(),
                 "positions-only policy result did not carry a proof");
+
+        const mt5bridge::ObservationWindow history_window{1000, 2000};
+        FakeObservationProvider history_provider(
+            {history_orders_batch(key.account, history_window),
+             history_orders_batch(key.account, history_window),
+             history_orders_batch(key.account, {0, 3000},
+                                  {history_order(500, 1500)})});
+        mt5bridge::ObservationCoordinator history_coordinator(history_provider,
+                                                               key.account);
+        mt5bridge::ObservationCollectionRequest history_collection;
+        history_collection.observe_active_orders = false;
+        history_collection.observe_positions = false;
+        history_collection.history_orders_window = history_window;
+        const auto history_first = history_coordinator.refresh(history_collection);
+        const auto history_second = history_coordinator.refresh(history_collection);
+        require(history_first.sample && history_second.sample,
+                "history coverage setup did not produce samples");
+        mt5bridge::EnvironmentConsistencyRequest history_scope;
+        history_scope.require_active_orders = false;
+        history_scope.require_positions = false;
+        history_scope.history_orders_window = history_window;
+        const auto history_consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {*history_first.sample, *history_second.sample}, history_scope);
+        require(history_consistency.consistent() && history_consistency.proof.has_value(),
+                "history consistency proof setup failed");
+
+        const auto unobserved_history_descriptor = mt5bridge::ReconciliationDescriptor{
+            key.account, mt5bridge::capture_reconciliation_baseline(coordinator.graph()),
+            {mt5bridge::require_history_order(500, history_window)},
+            mt5bridge::OperationState::filled};
+        require(unobserved_history_descriptor.valid(),
+                "history baseline-absence descriptor was rejected before coverage check");
+        require(!mt5bridge::reconciliation_descriptor_matches_graph(
+                    unobserved_history_descriptor, coordinator.graph()),
+                "unobserved history absence was treated as proven baseline evidence");
+        const auto unobserved_active_descriptor = mt5bridge::ReconciliationDescriptor{
+            key.account, mt5bridge::capture_reconciliation_baseline(
+                             positions_coordinator.graph()),
+            {mt5bridge::require_active_order(999)}, mt5bridge::OperationState::filled};
+        require(!mt5bridge::reconciliation_descriptor_matches_graph(
+                    unobserved_active_descriptor, positions_coordinator.graph()),
+                "unobserved active-order absence was treated as proven baseline evidence");
+        const auto unobserved_active_key = mt5bridge::OperationKey{account(), 32, 33};
+        MemoryStore unobserved_active_store;
+        mt5bridge::OperationJournal unobserved_active_journal(unobserved_active_store);
+        require(unobserved_active_journal.create(unobserved_active_key, {0x0E}).accepted(),
+                "unobserved active-order operation setup failed");
+        prepare_for_admission(unobserved_active_journal, unobserved_active_key,
+                              unobserved_active_descriptor);
+        FakeLease unobserved_active_lease;
+        unobserved_active_lease.owned_account = unobserved_active_key.account;
+        unobserved_active_lease.token = 83;
+        unobserved_active_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier unobserved_active_barrier(
+            unobserved_active_journal, positions_coordinator.graph(), positions_scope);
+        require(unobserved_active_barrier
+                    .admit(unobserved_active_key,
+                          ready_request(unobserved_active_key.account,
+                                        *positions_consistency.proof),
+                          unobserved_active_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
+                "unobserved active-order predicate opened the dispatch barrier");
+        const auto unobserved_history_key = mt5bridge::OperationKey{account(), 30, 31};
+        MemoryStore unobserved_history_store;
+        mt5bridge::OperationJournal unobserved_history_journal(unobserved_history_store);
+        require(unobserved_history_journal.create(unobserved_history_key, {0x0D}).accepted(),
+                "unobserved history operation setup failed");
+        prepare_for_admission(unobserved_history_journal, unobserved_history_key,
+                              unobserved_history_descriptor);
+        FakeLease unobserved_history_lease;
+        unobserved_history_lease.owned_account = unobserved_history_key.account;
+        unobserved_history_lease.token = 82;
+        unobserved_history_lease.held = true;
+        mt5bridge::DispatchAdmissionBarrier unobserved_history_barrier(
+            unobserved_history_journal, coordinator.graph(), consistency_request);
+        require(unobserved_history_barrier
+                    .admit(unobserved_history_key,
+                          ready_request(unobserved_history_key.account,
+                                        *fresh_consistency.proof),
+                          unobserved_history_lease)
+                    .status == mt5bridge::DispatchAdmissionStatus::invalid_state,
+                "unobserved history predicate opened the dispatch barrier");
+
+        const auto covered_history_descriptor = mt5bridge::ReconciliationDescriptor{
+            key.account, mt5bridge::capture_reconciliation_baseline(history_coordinator.graph()),
+            {mt5bridge::require_history_order(500, history_window)},
+            mt5bridge::OperationState::filled};
+        require(mt5bridge::reconciliation_descriptor_matches_graph(
+                    covered_history_descriptor, history_coordinator.graph()),
+                "covered history baseline absence was rejected unexpectedly");
+        auto wider_history_collection = history_collection;
+        wider_history_collection.history_orders_window =
+            mt5bridge::ObservationWindow{0, 3000};
+        require(history_coordinator.refresh(wider_history_collection).sample.has_value(),
+                "wider history refresh did not produce a sample");
+        require(!mt5bridge::reconciliation_descriptor_matches_graph(
+                    covered_history_descriptor, history_coordinator.graph()),
+                "history ticket appearing after a wider refresh was falsely attributed");
         const auto descriptor = descriptor_for(key, coordinator.graph());
 
         MemoryStore store;

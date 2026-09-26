@@ -122,7 +122,8 @@ struct ReconciliationDescriptor {
                 return false;
             if ((!history && predicate.history_window) ||
                 (history && predicate.history_window && !predicate.history_window->valid()) ||
-                (absence && history && !predicate.history_window))
+                (absence && history && !predicate.history_window) ||
+                (history && !*predicate.baseline_present && !predicate.history_window))
                 return false;
             if (predicate.correlation_id != 0) {
                 for (std::size_t prior = 0; prior < index; ++prior) {
@@ -187,6 +188,37 @@ inline bool reconciliation_descriptor_matches_graph(
     const auto history_orders = graph.history_orders();
     const auto history_deals = graph.history_deals();
     for (const auto &predicate : descriptor.predicates) {
+        const bool baseline_present = *predicate.baseline_present;
+        if (!baseline_present) {
+            switch (predicate.kind) {
+            case ReconciliationPredicateKind::active_order_present:
+            case ReconciliationPredicateKind::active_order_absent:
+                if (graph.domain_revision(ObservationDomain::active_orders) == 0)
+                    return false;
+                break;
+            case ReconciliationPredicateKind::position_present:
+            case ReconciliationPredicateKind::position_absent:
+                if (graph.domain_revision(ObservationDomain::positions) == 0)
+                    return false;
+                break;
+            case ReconciliationPredicateKind::history_order_present:
+            case ReconciliationPredicateKind::history_order_absent:
+                if (!predicate.history_window ||
+                    !graph.history_orders_covered_at(
+                        *predicate.history_window,
+                        descriptor.baseline.graph_revision()))
+                    return false;
+                break;
+            case ReconciliationPredicateKind::history_deal_present:
+            case ReconciliationPredicateKind::history_deal_absent:
+                if (!predicate.history_window ||
+                    !graph.history_deals_covered_at(
+                        *predicate.history_window,
+                        descriptor.baseline.graph_revision()))
+                    return false;
+                break;
+            }
+        }
         if (predicate.ticket == 0)
             continue;
         bool present = false;
@@ -208,7 +240,7 @@ inline bool reconciliation_descriptor_matches_graph(
             present = contains(history_deals, predicate.ticket);
             break;
         }
-        if (!predicate.baseline_present || present != *predicate.baseline_present)
+        if (present != baseline_present)
             return false;
     }
     return true;
@@ -745,36 +777,13 @@ public:
         return {JournalMutationStatus::accepted, std::move(candidate)};
     }
 
-    /// \brief Atomically persists a backend result and enters `result_persisted`.
+    /// \brief Atomically persists a backend result without identity bindings.
     /// \param key Account and managed-operation identity.
     /// \param result_payload Exact opaque backend result bytes.
     /// \return Mutation status and the committed result-bearing record.
     JournalMutationResult persist_result(
         const OperationKey &key, std::vector<std::uint8_t> result_payload) {
-        const auto it = records_.find(key);
-        if (it == records_.end())
-            return {JournalMutationStatus::not_found, std::nullopt};
-        if (it->second.journal_state != JournalState::dispatching ||
-            result_payload.empty() ||
-            it->second.operation_state != OperationState::submitting)
-            return {JournalMutationStatus::invalid_transition, std::nullopt};
-        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
-            return {JournalMutationStatus::invalid_record, std::nullopt};
-
-        OperationRecord candidate = it->second;
-        candidate.journal_state = JournalState::result_persisted;
-        candidate.result_payload = std::move(result_payload);
-        candidate.revision += 1;
-        if (!candidate.valid())
-            return {JournalMutationStatus::invalid_record, std::nullopt};
-        const auto commit_status = store_.commit(candidate, it->second.revision);
-        if (commit_status != StoreCommitStatus::committed)
-            return {commit_status == StoreCommitStatus::conflict
-                        ? JournalMutationStatus::conflict
-                        : JournalMutationStatus::not_durable,
-                    std::nullopt};
-        it->second = candidate;
-        return {JournalMutationStatus::accepted, std::move(candidate)};
+        return persist_result_with_bindings(key, std::move(result_payload), {});
     }
 
     /// \brief Durably advances the managed operation lifecycle state.
@@ -887,49 +896,30 @@ public:
     }
 
 private:
-    /// \brief Durably binds one broker ticket to a descriptor correlation.
-    /// \param key Operation whose persisted result supplied the identity.
-    /// \param correlation_id Descriptor correlation being resolved.
-    /// \param broker_ticket Validated broker ticket from that result.
-    /// \return Accepted record, or a fail-closed mutation status.
-    /// \note This is private to the one-shot backend; callers cannot invent a
-    ///       ticket by constructing a reconciliation request.
-    JournalMutationResult bind_reconciliation_ticket(
-        const OperationKey &key, std::uint64_t correlation_id,
-        std::uint64_t broker_ticket) {
+    /// \brief Atomically persists a backend result and its identity bindings.
+    /// \param key Account and managed-operation identity.
+    /// \param result_payload Exact opaque backend result bytes.
+    /// \param bindings Broker identities extracted from the same validated result.
+    /// \return Mutation status and the committed result-bearing record.
+    /// \note This mutation is private to the one-shot backend so application code
+    /// cannot invent broker identity bindings.
+    JournalMutationResult persist_result_with_bindings(
+        const OperationKey &key, std::vector<std::uint8_t> result_payload,
+        std::vector<ReconciliationBinding> bindings) {
         const auto it = records_.find(key);
         if (it == records_.end())
             return {JournalMutationStatus::not_found, std::nullopt};
-        if (correlation_id == 0 || broker_ticket == 0 ||
-            !it->second.reconciliation_descriptor ||
-            !journal_at_least_result_persisted(it->second.journal_state) ||
-            it->second.result_payload.empty())
+        if (it->second.journal_state != JournalState::dispatching ||
+            result_payload.empty() ||
+            it->second.operation_state != OperationState::submitting)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
-
-        const auto predicate = std::find_if(
-            it->second.reconciliation_descriptor->predicates.begin(),
-            it->second.reconciliation_descriptor->predicates.end(),
-            [correlation_id](const auto &candidate) {
-                return candidate.correlation_id == correlation_id;
-            });
-        if (predicate == it->second.reconciliation_descriptor->predicates.end() ||
-            predicate->ticket != 0)
-            return {JournalMutationStatus::invalid_transition, std::nullopt};
-
-        for (const auto &binding : it->second.reconciliation_bindings) {
-            if (binding.correlation_id == correlation_id)
-                return binding.broker_ticket == broker_ticket
-                           ? JournalMutationResult{JournalMutationStatus::accepted, it->second}
-                           : JournalMutationResult{JournalMutationStatus::conflict,
-                                                   std::nullopt};
-            if (binding.broker_ticket == broker_ticket)
-                return {JournalMutationStatus::conflict, std::nullopt};
-        }
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
         OperationRecord candidate = it->second;
-        candidate.reconciliation_bindings.push_back({correlation_id, broker_ticket});
+        candidate.journal_state = JournalState::result_persisted;
+        candidate.result_payload = std::move(result_payload);
+        candidate.reconciliation_bindings = std::move(bindings);
         candidate.revision += 1;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};

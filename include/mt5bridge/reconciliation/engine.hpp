@@ -532,11 +532,15 @@ public:
         } else if (has_unbound_identity) {
             result.outcome = ReconciliationOutcome::pending;
             result.reason = ReconciliationReason::unresolved_operation;
+        } else if (request.trade_event_gap && (has_pending || has_missing)) {
+            // An event gap invalidates both an apparently missing identity and
+            // an observation that has not settled yet.  Keep the operation
+            // explicitly unresolved until a later authoritative cycle.
+            result.outcome = ReconciliationOutcome::trade_event_gap;
+            result.reason = ReconciliationReason::trade_event_gap;
         } else if (has_pending) {
-            result.outcome = request.trade_event_gap ? ReconciliationOutcome::trade_event_gap
-                                                     : ReconciliationOutcome::pending;
-            result.reason = request.trade_event_gap ? ReconciliationReason::trade_event_gap
-                                                    : ReconciliationReason::waiting_for_observation;
+            result.outcome = ReconciliationOutcome::pending;
+            result.reason = ReconciliationReason::waiting_for_observation;
         } else if (has_missing && request.deadline_expired) {
             result.outcome = ReconciliationOutcome::not_observed;
             result.reason = ReconciliationReason::evidence_missing;

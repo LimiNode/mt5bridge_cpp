@@ -303,7 +303,7 @@ int main() {
                 "event-gap baseline refresh failed");
         mt5bridge::ReconciliationRequest gap_request;
         gap_request.baseline = gap_coordinator.capture_baseline();
-        gap_request.predicates = {mt5bridge::require_history_order(100)};
+        gap_request.predicates = {mt5bridge::require_history_order(100, gap_window)};
         enter_dispatching(
             journal, gap_key,
             mt5bridge::ReconciliationDescriptor{gap_key.account, *gap_request.baseline,

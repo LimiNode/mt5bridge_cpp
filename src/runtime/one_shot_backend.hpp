@@ -82,7 +82,7 @@ enum class OneShotExecutionStatus {
     transition_failed,         ///< Durable transition to `submitting` failed.
     transport_failure,         ///< Backend returned no trustworthy broker result.
     result_not_durable,         ///< Raw broker result could not be durably persisted.
-    reconciliation_binding_failed, ///< Result persisted but identity binding failed.
+    reconciliation_binding_failed, ///< Result and identity bindings failed one atomic commit.
     lifecycle_transition_failed, ///< Result persisted but final state transition failed.
 };
 

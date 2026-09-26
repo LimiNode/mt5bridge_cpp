@@ -259,6 +259,8 @@ int main() {
             journal, binding_key, std::move(*binding_permit), binding_account_probe,
             binding_lease, binding_transport);
         require(binding_result.completed() && binding_result.record &&
+                    binding_result.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}) &&
                     binding_result.record->reconciliation_bindings.size() == 1 &&
                     binding_result.record->reconciliation_bindings.front() ==
                         mt5bridge::ReconciliationBinding{12001, 999},
@@ -266,6 +268,8 @@ int main() {
         mt5bridge::OperationJournal binding_recovered(store);
         const auto recovered_binding = binding_recovered.recover(binding_key);
         require(recovered_binding.accepted() && recovered_binding.record &&
+                    recovered_binding.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}) &&
                     recovered_binding.record->reconciliation_bindings.size() == 1,
                 "durable ticket binding did not survive journal recovery");
 
@@ -296,10 +300,11 @@ int main() {
         require(binding_conflict_result.status ==
                     mt5bridge::runtime::OneShotExecutionStatus::reconciliation_binding_failed &&
                     binding_conflict_result.record &&
-                    binding_conflict_result.record->reconciliation_bindings.size() == 1 &&
+                    binding_conflict_result.record->reconciliation_bindings.empty() &&
+                    binding_conflict_result.record->result_payload.empty() &&
                     binding_conflict_result.record->operation_state ==
                         mt5bridge::OperationState::submitting,
-                "conflicting ticket binding was accepted or reopened for resend");
+                "conflicting ticket binding escaped the atomic result commit");
 
         const auto stale_key = key(8);
         require(journal.create(stale_key, {0x03}).accepted(),

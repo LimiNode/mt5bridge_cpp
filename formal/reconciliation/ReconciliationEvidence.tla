@@ -8,7 +8,7 @@ EXTENDS Naturals, FiniteSets
 (* the durable baseline.                                                   *)
 (***************************************************************************)
 
-CONSTANTS Domains, Accounts, RequestModes
+CONSTANTS Domains, Accounts, RequestModes, MaxRevision, MaxGraphInstance
 
 EvidenceKinds == {"unseen", "match", "absence", "ambiguous"}
 
@@ -77,6 +77,7 @@ Refresh(d, kind, isAuthoritative) ==
     /\ d \in Domains
     /\ kind \in EvidenceKinds
     /\ isAuthoritative \in BOOLEAN
+    /\ graphRevision < MaxRevision
     /\ graphRevision' = graphRevision + 1
     /\ domainRevision' = [domainRevision EXCEPT ![d] = @ + 1]
     /\ evidence' = [evidence EXCEPT ![d] = kind]
@@ -121,6 +122,7 @@ SwitchAccount(account) ==
                     gapEvidence, eventGap, deadlineExpired>>
 
 GraphReplacement ==
+    /\ graphRevision < MaxRevision
     /\ graphInstance' = graphInstance + 1
     /\ graphRevision' = graphRevision + 1
     /\ UNCHANGED <<requestMode, currentAccount, baselineAccount,
@@ -129,6 +131,8 @@ GraphReplacement ==
                     authoritative, gapEvidence, eventGap, deadlineExpired>>
 
 RestartReanchor ==
+    /\ graphRevision < MaxRevision
+    /\ graphInstance < MaxGraphInstance
     /\ graphInstance' = graphInstance + 1
     /\ graphRevision' = graphRevision + 1
     /\ baselineGraphInstance' = graphInstance + 1
@@ -162,10 +166,10 @@ TypeOK ==
     /\ requestMode \in RequestModes
     /\ currentAccount \in Accounts
     /\ baselineAccount \in Accounts
-    /\ graphInstance \in Nat
-    /\ graphRevision \in Nat
-    /\ baselineGraphInstance \in Nat
-    /\ baselineGraphRevision \in Nat
+    /\ graphInstance \in 1..MaxGraphInstance
+    /\ graphRevision \in 0..MaxRevision
+    /\ baselineGraphInstance \in 1..MaxGraphInstance
+    /\ baselineGraphRevision \in 0..MaxRevision
     /\ domainRevision \in [Domains -> Nat]
     /\ baselineDomainRevision \in [Domains -> Nat]
     /\ evidence \in [Domains -> EvidenceKinds]
@@ -174,7 +178,9 @@ TypeOK ==
     /\ eventGap \in BOOLEAN
     /\ deadlineExpired \in BOOLEAN
     /\ baselineGraphRevision <= graphRevision
-    /\ \A d \in Domains : baselineDomainRevision[d] <= graphRevision
+    /\ \A d \in Domains :
+           domainRevision[d] <= graphRevision /\
+           baselineDomainRevision[d] <= graphRevision
 
 NoFalseConfirmed ==
     Outcome = "confirmed" =>

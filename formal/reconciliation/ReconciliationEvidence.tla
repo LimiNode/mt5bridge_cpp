@@ -123,6 +123,7 @@ SwitchAccount(account) ==
 
 GraphReplacement ==
     /\ graphRevision < MaxRevision
+    /\ graphInstance < MaxGraphInstance
     /\ graphInstance' = graphInstance + 1
     /\ graphRevision' = graphRevision + 1
     /\ UNCHANGED <<requestMode, currentAccount, baselineAccount,

@@ -1,12 +1,12 @@
-# Runtime implementation guide
+# Native implementation guide
 
-The source is split by responsibility, with the heavy implementation under
-`src/runtime/`:
+The source is split by responsibility:
 
-1. lifecycle — one Python interpreter, explicit initialize/shutdown;
-2. ABI adapter — UTF-8 request/response buffers and error reporting;
-3. dispatcher — validated method names and MetaTrader5 calls;
-4. conversion — only the small set of Python containers returned by MT5.
+- `src/bridge/` — exported C ABI adapters and legacy control-plane entry points;
+- `src/runtime/` — interpreter lifecycle, runtime admission, and scheduling;
+- `src/market/` — market-data history and realtime implementations;
+- `src/trade/` — typed trade observation and broker dispatch adapters;
+- `src/dispatch/` — durable journal and one-shot dispatch orchestration.
 
 `mt5_bridge` is the only target that may include `Python.h` or link
 `Python3::Python`; the `mt5bridge::client` target must remain runtime-agnostic.
@@ -14,11 +14,13 @@ The source is split by responsibility, with the heavy implementation under
 ## Source layout
 
 Public SDK headers live under `include/mt5bridge/` (with the root
-`include/mt5bridge.hpp` umbrella). Runtime implementation files live under
-`src/runtime/` and are private to the DLL. When a private seam is needed, keep
-its `.hpp` and `.cpp` beside each other in `src/runtime/`; do not add a second
-private include tree. Leave `mt5_bridge.cpp` as one unit until a real
-responsibility boundary justifies extracting a pair.
+`include/mt5bridge.hpp` umbrella). All source headers are private and remain
+beside their implementation in the responsibility directory; do not add a
+second private include tree. The bridge adapter may include private seams from
+runtime, trade, dispatch, and market through target-local include paths.
+
+The large bridge translation unit is being reduced in responsibility slices;
+new market, trade, or dispatch code must not be added to `src/bridge/`.
 
 Keep `g_mutex` for lifecycle/state transitions and use the separate
 `g_python_mutex` for serialized interpreter calls. Python/MT5 operations must

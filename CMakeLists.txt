@@ -29,7 +29,7 @@ set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 # The concrete journal store is Windows-specific but remains independent of
 # the CPython-backed runtime DLL. Consumers that need durable operation
 # persistence link this small native target alongside mt5bridge::client.
-add_library(mt5bridge_journal STATIC src/runtime/file_journal_store.cpp)
+add_library(mt5bridge_journal STATIC src/dispatch/file_journal_store.cpp)
 target_include_directories(mt5bridge_journal PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
@@ -40,10 +40,10 @@ set_target_properties(mt5bridge_journal PROPERTIES EXPORT_NAME journal)
 # separate from the exported client and journal targets so no unmanaged send
 # function becomes part of the consumer SDK.
 add_library(mt5bridge_one_shot_backend STATIC
-            src/runtime/one_shot_backend.cpp)
+            src/dispatch/one_shot_backend.cpp)
 target_include_directories(mt5bridge_one_shot_backend PRIVATE
                            ${PROJECT_SOURCE_DIR}/include
-                           ${PROJECT_SOURCE_DIR}/src/runtime)
+                           ${PROJECT_SOURCE_DIR}/src/dispatch)
 add_library(mt5bridge::one_shot_backend ALIAS mt5bridge_one_shot_backend)
 
 # Private runtime admission lanes keep trade-critical calls from waiting
@@ -121,7 +121,7 @@ if(BUILD_TESTING)
     add_executable(mt5bridge_one_shot_backend_test
                    tests/one_shot_backend_test.cpp)
     target_include_directories(mt5bridge_one_shot_backend_test PRIVATE
-                               ${PROJECT_SOURCE_DIR}/src/runtime)
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
     target_link_libraries(mt5bridge_one_shot_backend_test PRIVATE
                           mt5bridge::client mt5bridge::journal
                           mt5bridge::one_shot_backend)
@@ -146,11 +146,14 @@ if(MT5BRIDGE_BUILD_RUNTIME)
     endif()
 
     add_library(mt5_bridge SHARED
-                src/runtime/mt5_bridge.cpp
-                src/runtime/python_dispatch_transport.cpp)
+                src/bridge/mt5_bridge.cpp
+                src/trade/python_dispatch_transport.cpp)
     target_include_directories(mt5_bridge PRIVATE
                                ${PROJECT_SOURCE_DIR}/include
-                               ${PROJECT_SOURCE_DIR}/src/runtime)
+                               ${PROJECT_SOURCE_DIR}/src/bridge
+                               ${PROJECT_SOURCE_DIR}/src/dispatch
+                               ${PROJECT_SOURCE_DIR}/src/runtime
+                               ${PROJECT_SOURCE_DIR}/src/trade)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
     target_link_libraries(mt5_bridge PRIVATE Python3::Python mt5bridge::runtime_lane)
     get_target_property(MT5BRIDGE_PYTHON_RUNTIME_RELEASE

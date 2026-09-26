@@ -235,7 +235,7 @@ ReconcileCloseFull ==
     /\ operationVolume <= openVolume
     /\ operationState' = "filled"
     /\ openVolume' = openVolume - operationVolume
-    /\ obligationSatisfied' = openVolume = operationVolume
+    /\ obligationSatisfied' = (openVolume = operationVolume)
     /\ UNCHANGED <<planState, sliceCount, pendingRemainderVolume,
                     closeObligation, observationEpoch, lastAttemptEpoch,
                     operationId, operationKind, operationVolume,

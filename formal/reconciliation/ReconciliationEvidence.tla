@@ -12,6 +12,7 @@ CONSTANTS Domains, Accounts, RequestModes, MaxRevision, MaxGraphInstance,
           MaxDomainRevision
 
 EvidenceKinds == {"unseen", "match", "absence", "ambiguous"}
+RefreshKinds == EvidenceKinds \ {"unseen"}
 
 VARIABLES requestMode, currentAccount, baselineAccount,
           graphInstance, graphRevision, baselineGraphInstance,
@@ -156,7 +157,7 @@ ExpireDeadline ==
                     gapEvidence, eventGap>>
 
 Next ==
-    \/ \E d \in Domains, kind \in EvidenceKinds,
+    \/ \E d \in Domains, kind \in RefreshKinds,
           isAuthoritative \in BOOLEAN : Refresh(d, kind, isAuthoritative)
     \/ OpenEventGap
     \/ CloseEventGap

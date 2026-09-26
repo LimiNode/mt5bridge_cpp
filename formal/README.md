@@ -41,5 +41,33 @@ The repository CI runs this model with a pinned TLC distribution and verifies
 the JAR checksum before execution. Local runs use the same command shown
 above; Java 17 or newer is sufficient.
 
-Planned follow-up models are reconciliation evidence ordering and the managed
-trade lifecycle (`CloseObligation`, partial fills, cancellation, and slicing).
+The second model is
+[reconciliation/ReconciliationEvidence.tla](reconciliation/ReconciliationEvidence.tla).
+It checks observation ordering independently from dispatch recovery:
+
+- active orders, positions, history orders, and history deals refresh as
+  independent domains, so a deal may arrive before its history order;
+- a domain that has not advanced past the durable baseline remains stale, and
+  absence without authoritative coverage is not evidence of non-execution;
+- contradictory/non-unique evidence is ambiguous rather than confirmed;
+- an event gap remains unresolved until every domain has a fresh authoritative
+  snapshot;
+- account and graph-instance changes cannot produce confirmation; and
+- restart re-anchors the baseline without manufacturing fresh evidence.
+
+Run it with the same pinned TLC artifact:
+
+```text
+pushd formal/reconciliation
+java -cp ../../tla2tools.jar tlc2.TLC -config ReconciliationEvidence.cfg \
+    ReconciliationEvidence.tla
+popd
+```
+
+The finite configuration explores both an all-presence request and a history
+order absence request. The latter requires authoritative coverage, making the
+model explicit about the difference between a stale/lagging view and proof of
+absence.
+
+The next planned model is the managed trade lifecycle (`CloseObligation`,
+partial fills, cancellation, and slicing).

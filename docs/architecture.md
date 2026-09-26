@@ -189,6 +189,13 @@ non-resendable barrier, writer/epoch fencing, atomic result-plus-binding
 persistence, and terminal-evidence requirements across crash/restart paths;
 the pinned TLC run is part of CI rather than a substitute for the focused C++
 tests.
+The independent reconciliation-evidence ordering is specified by the finite
+model in [ADR-0022](adr/0022-formal-reconciliation-evidence-model.md). It keeps
+active orders, positions, history orders, and history deals as independently
+refreshable views; stale domains, event gaps, account/graph changes, and
+restart re-anchoring therefore cannot manufacture a `confirmed` result. This
+model is also checked by the pinned TLC CI job and remains separate from the
+dispatch model.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
 embeds a verified payload, extracts it to a content-addressed per-user cache,

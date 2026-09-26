@@ -18,6 +18,8 @@ OperationStates == {"idle", "dispatching", "submitting", "reconciling",
 BrokerOutcomes == {"none", "partial", "full", "rejected", "unknown"}
 TerminalOperationStates == {"idle", "partially_filled", "filled", "cancelled",
                             "rejected"}
+TradeStates == {"pending", "partially_open", "open", "reducing", "closing",
+                "closed"}
 
 VARIABLES planState, sliceCount, openVolume, pendingRemainderVolume,
           closeObligation, obligationSatisfied, observationEpoch,
@@ -45,6 +47,20 @@ Init ==
     /\ resultVolume = 0
     /\ brokerOutcome = "none"
     /\ sendCount = 0
+
+TradeState ==
+    IF obligationSatisfied
+    THEN "closed"
+    ELSE IF (closeObligation /\ operationKind = "close" /\
+             operationState \in {"dispatching", "submitting", "reconciling"})
+         THEN "closing"
+         ELSE IF closeObligation
+              THEN "reducing"
+              ELSE IF openVolume = 0
+                   THEN "pending"
+                   ELSE IF openVolume < TargetVolume
+                        THEN "partially_open"
+                        ELSE "open"
 
 CanStartOperation == operationState \in TerminalOperationStates
 
@@ -442,6 +458,14 @@ AmbiguousAttemptIsNonResendable ==
 
 SliceBound ==
     sliceCount <= MaxOperations
+
+ClosedTradeHasNoExposure ==
+    TradeState = "closed" =>
+        obligationSatisfied /\ openVolume = 0 /\ pendingRemainderVolume = 0
+
+CloseObligationHasReducingState ==
+    closeObligation /\ ~obligationSatisfied /\ openVolume > 0 =>
+        TradeState \in {"reducing", "closing"}
 
 Spec == Init /\ [][Next]_vars
 

@@ -533,12 +533,19 @@ write-ahead states (`created`, `prechecked`, `dispatch_intent_persisted`,
 `DurableJournalStore` before the owner-loop cache changes; a failed commit
 leaves both unchanged. `DispatchAdmissionBarrier` then verifies fresh account
 identity, an opaque `EnvironmentConsistencyProof` tied to the current graph
-instance/revision and covering the configured observation scope,
-unresolved/event-gap blockers, and a continuously-held `SingleWriterLease`
+instance/revision and covering the effective observation scope. That scope is
+the union of the caller-requested domains/windows and every domain/window
+referenced by the descriptor predicates; a positions-only proof therefore
+cannot admit an operation whose attribution depends on active orders or
+history. The descriptor domain is checked before the proof is accepted,
+then unresolved/event-gap blockers and a continuously-held `SingleWriterLease`
 with a non-zero fencing token before durably committing `dispatching`.
 `result_persisted` is reachable only through atomic
 `persist_result(result_payload)`; `accepted` follows only after that payload
-is durable, and stale writers receive a CAS conflict.
+is durable, and stale writers receive a CAS conflict. For a descriptor with a
+zero broker ticket, public raw-result persistence is rejected: the private
+backend must persist the validated result and all result-derived identity
+bindings in one compare-and-commit.
 The barrier returns only a move-only permit for a future internal backend call;
 the private `runtime::OneShotDispatchBackend` consumes that permit only after
 repeating the account, journal revision, and lease checks, then invokes its

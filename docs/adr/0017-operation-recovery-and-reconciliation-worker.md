@@ -39,7 +39,11 @@ Any record at or beyond `dispatching` is non-resendable.
 caller-driven observation worker. Before the first refresh it normalizes a
 post-dispatch record to `reconciling` durably. It accepts explicit predicates
 and an explicit lifecycle state that those predicates prove; an opaque broker
-result remains a hint and is never used to manufacture identity.
+result remains a hint and is never used to manufacture identity. The durable
+predicate/baseline contract is retained in the operation record as specified by
+[ADR-0020](0020-durable-reconciliation-descriptor.md); a worker reconstructed
+against a new graph instance re-anchors only its in-memory baseline before the
+first refresh.
 
 The mapping is deliberately fail-closed:
 

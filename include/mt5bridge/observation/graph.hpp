@@ -398,6 +398,15 @@ public:
         return coverage_covers(history_order_coverage_, window, since_revision);
     }
 
+    /// \brief Tests whether history orders cover a range by one graph revision.
+    /// \param window Inclusive history range to prove.
+    /// \param through_revision Latest graph revision whose evidence may count.
+    /// \return True when the complete range was covered no later than the revision.
+    bool history_orders_covered_at(ObservationWindow window,
+                                   std::uint64_t through_revision) const {
+        return coverage_covers_at(history_order_coverage_, window, through_revision);
+    }
+
     /// \brief Tests whether history deals cover a range after a baseline revision.
     /// \param window Inclusive history range to prove.
     /// \param since_revision Only observations newer than this revision count.
@@ -405,6 +414,15 @@ public:
     bool history_deals_covered(ObservationWindow window,
                                std::uint64_t since_revision) const {
         return coverage_covers(history_deal_coverage_, window, since_revision);
+    }
+
+    /// \brief Tests whether history deals cover a range by one graph revision.
+    /// \param window Inclusive history range to prove.
+    /// \param through_revision Latest graph revision whose evidence may count.
+    /// \return True when the complete range was covered no later than the revision.
+    bool history_deals_covered_at(ObservationWindow window,
+                                  std::uint64_t through_revision) const {
+        return coverage_covers_at(history_deal_coverage_, window, through_revision);
     }
 
     /// \brief Finds active orders linked to a position identifier.
@@ -621,6 +639,39 @@ private:
         for (const auto &entry : coverage) {
             if (entry.revision <= since_revision || !entry.window.valid() ||
                 entry.window.to_msc < requested.from_msc ||
+                entry.window.from_msc > requested.to_msc)
+                continue;
+            candidates.push_back(entry.window);
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const ObservationWindow &left, const ObservationWindow &right) {
+                      if (left.from_msc != right.from_msc)
+                          return left.from_msc < right.from_msc;
+                      return left.to_msc < right.to_msc;
+                  });
+        std::int64_t cursor = requested.from_msc;
+        for (const auto &candidate : candidates) {
+            if (candidate.to_msc < cursor)
+                continue;
+            if (candidate.from_msc > cursor)
+                return false;
+            if (candidate.to_msc >= requested.to_msc ||
+                candidate.to_msc == (std::numeric_limits<std::int64_t>::max)())
+                return true;
+            cursor = candidate.to_msc + 1;
+        }
+        return false;
+    }
+
+    static bool coverage_covers_at(const std::vector<ObservationCoverage> &coverage,
+                                   ObservationWindow requested,
+                                   std::uint64_t through_revision) {
+        if (!requested.valid() || through_revision == 0)
+            return false;
+        std::vector<ObservationWindow> candidates;
+        for (const auto &entry : coverage) {
+            if (entry.revision == 0 || entry.revision > through_revision ||
+                !entry.window.valid() || entry.window.to_msc < requested.from_msc ||
                 entry.window.from_msc > requested.to_msc)
                 continue;
             candidates.push_back(entry.window);

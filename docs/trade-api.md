@@ -195,6 +195,16 @@ History absence predicates require a complete revision-filtered coverage
 window. Malformed predicates and baselines with impossible revision ordering
 are rejected before graph state is evaluated.
 
+Durable dispatch descriptors additionally record whether each asserted identity
+was present before dispatch and the expected causal transition. A new order may
+therefore cross the barrier with a zero broker ticket, provided it carries a
+non-zero client correlation id. Such an identity remains pending and cannot
+satisfy an absence predicate. Once a trusted result supplies the broker ticket,
+the private one-shot backend durably records a single-assignment binding before
+the worker can enrich its request. The same correlation id and causal metadata
+must be retained; a different ticket is rejected and the durable descriptor is
+never silently broadened.
+
 The evaluator returns `PENDING`, `CONFIRMED`, `NOT_OBSERVED`,
 `ACCOUNT_MISMATCH`, `TRADE_EVENT_GAP`, or `AMBIGUOUS`. It does not call the
 runtime, write a journal, or invoke `order_send`. `TRADE_EVENT_GAP` is supplied
@@ -423,7 +433,7 @@ The lifecycle state is not a binary success flag:
 OperationState:
 queued -> prechecking -> submitting -> accepted -> reconciling
                                       ├── partially_filled -> filled
-                                      ├── rejected/failed
+                                      ├── rejected
                                       ├── cancelled/expired
                                       └── ambiguous
 
@@ -503,7 +513,10 @@ emit a new transition to `CONFIRMED`, `RECONCILED`, or `AMBIGUOUS`.
 
 Before the side effect, the operation journal durably records its
 `AccountKey` (at minimum server and login), `TradeId`, `OperationId`, request
-payload, and `dispatch_intent_persisted`. This record is still pre-side-effect:
+payload, `dispatch_intent_persisted`, and an immutable reconciliation descriptor
+containing the pre-dispatch baseline, attribution predicates, and allowed
+settlement state. The descriptor is committed before the barrier and is
+required on every post-dispatch record. This record is still pre-side-effect:
 recovery may reacquire the same lease, re-check the account, advance to
 `dispatching`, and perform the one send. The `dispatching` record is a durable
 may-have-been-sent barrier. On restart, a `dispatching` record with no result
@@ -520,12 +533,19 @@ write-ahead states (`created`, `prechecked`, `dispatch_intent_persisted`,
 `DurableJournalStore` before the owner-loop cache changes; a failed commit
 leaves both unchanged. `DispatchAdmissionBarrier` then verifies fresh account
 identity, an opaque `EnvironmentConsistencyProof` tied to the current graph
-instance/revision and covering the configured observation scope,
-unresolved/event-gap blockers, and a continuously-held `SingleWriterLease`
+instance/revision and covering the effective observation scope. That scope is
+the union of the caller-requested domains/windows and every domain/window
+referenced by the descriptor predicates; a positions-only proof therefore
+cannot admit an operation whose attribution depends on active orders or
+history. The descriptor domain is checked before the proof is accepted,
+then unresolved/event-gap blockers and a continuously-held `SingleWriterLease`
 with a non-zero fencing token before durably committing `dispatching`.
 `result_persisted` is reachable only through atomic
 `persist_result(result_payload)`; `accepted` follows only after that payload
-is durable, and stale writers receive a CAS conflict.
+is durable, and stale writers receive a CAS conflict. For a descriptor with a
+zero broker ticket, public raw-result persistence is rejected: the private
+backend must persist the validated result and all result-derived identity
+bindings in one compare-and-commit.
 The barrier returns only a move-only permit for a future internal backend call;
 the private `runtime::OneShotDispatchBackend` consumes that permit only after
 repeating the account, journal revision, and lease checks, then invokes its

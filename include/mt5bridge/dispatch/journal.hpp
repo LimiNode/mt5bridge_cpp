@@ -4,7 +4,9 @@
 /// \brief Defines the durable operation journal and pre-side-effect admission barrier.
 
 #include <mt5bridge/observation/environment_consistency.hpp>
+#include <mt5bridge/reconciliation/engine.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -12,6 +14,10 @@
 #include <optional>
 #include <utility>
 #include <vector>
+
+namespace mt5bridge::runtime {
+class OneShotDispatchBackend;
+}
 
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
@@ -41,6 +47,281 @@ enum class OperationState {
     failed,              ///< The operation failed before a successful outcome.
     ambiguous,           ///< Evidence cannot uniquely attribute the outcome.
 };
+
+/// \struct ReconciliationDescriptor
+/// \brief Immutable post-dispatch evidence contract retained in the journal.
+///
+/// The descriptor contains the pre-side-effect baseline, explicit predicates,
+/// and lifecycle state that a confirmed reconciliation may settle. Deadline
+/// and event-gap hints remain owner-loop inputs and are intentionally not
+/// durable evidence.
+struct ReconciliationDescriptor {
+    AccountKey account; ///< Immutable account scope of the operation.
+    ReconciliationBaseline baseline; ///< Graph baseline captured before dispatch.
+    std::vector<ReconciliationPredicate> predicates; ///< Required evidence assertions.
+    OperationState settled_state = OperationState::filled; ///< State proven on confirmation.
+    std::uint64_t trade_id = 0; ///< Managed trade identity bound at persistence time.
+    std::uint64_t operation_id = 0; ///< Side-effect identity bound at persistence time.
+
+    /// \brief Tests whether the descriptor is safe to persist and replay.
+    /// \return True only for a valid account, baseline, predicates, and target state.
+    bool valid() const {
+        if (!account.valid() || !baseline.valid() || account != baseline.account() ||
+            predicates.empty())
+            return false;
+        if (settled_state != OperationState::partially_filled &&
+            settled_state != OperationState::filled &&
+            settled_state != OperationState::cancelled &&
+            settled_state != OperationState::expired &&
+            settled_state != OperationState::rejected)
+            return false;
+        for (std::size_t index = 0; index < predicates.size(); ++index) {
+            const auto &predicate = predicates[index];
+            if (!predicate.baseline_present ||
+                predicate.expected_transition == ReconciliationTransition::unspecified ||
+                (predicate.ticket == 0 && predicate.correlation_id == 0))
+                return false;
+            const bool history =
+                predicate.kind == ReconciliationPredicateKind::history_order_present ||
+                predicate.kind == ReconciliationPredicateKind::history_order_absent ||
+                predicate.kind == ReconciliationPredicateKind::history_deal_present ||
+                predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+            const bool absence =
+                predicate.kind == ReconciliationPredicateKind::active_order_absent ||
+                predicate.kind == ReconciliationPredicateKind::position_absent ||
+                predicate.kind == ReconciliationPredicateKind::history_order_absent ||
+                predicate.kind == ReconciliationPredicateKind::history_deal_absent;
+            if (predicate.ticket == 0 && absence)
+                return false;
+            switch (predicate.kind) {
+            case ReconciliationPredicateKind::active_order_present:
+            case ReconciliationPredicateKind::active_order_absent:
+            case ReconciliationPredicateKind::position_present:
+            case ReconciliationPredicateKind::position_absent:
+            case ReconciliationPredicateKind::history_order_present:
+            case ReconciliationPredicateKind::history_order_absent:
+            case ReconciliationPredicateKind::history_deal_present:
+            case ReconciliationPredicateKind::history_deal_absent:
+                break;
+            default:
+                return false;
+            }
+            const bool presence = !absence;
+            if ((presence &&
+                 predicate.expected_transition !=
+                     ReconciliationTransition::absent_to_present) ||
+                (absence &&
+                 predicate.expected_transition !=
+                     ReconciliationTransition::present_to_absent) ||
+                (predicate.expected_transition ==
+                     ReconciliationTransition::absent_to_present &&
+                 *predicate.baseline_present) ||
+                (predicate.expected_transition ==
+                     ReconciliationTransition::present_to_absent &&
+                 !*predicate.baseline_present))
+                return false;
+            if ((!history && predicate.history_window) ||
+                (history && predicate.history_window && !predicate.history_window->valid()) ||
+                (absence && history && !predicate.history_window) ||
+                (history && !*predicate.baseline_present && !predicate.history_window))
+                return false;
+            if (predicate.correlation_id != 0) {
+                for (std::size_t prior = 0; prior < index; ++prior) {
+                    if (predicates[prior].correlation_id == predicate.correlation_id)
+                        return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
+/// \struct ReconciliationBinding
+/// \brief Durable single-assignment binding from client correlation to broker ticket.
+struct ReconciliationBinding {
+    std::uint64_t correlation_id = 0; ///< Client identity from the descriptor.
+    std::uint64_t broker_ticket = 0; ///< Ticket supplied by a validated result.
+
+    /// \brief Tests whether both identity components are usable.
+    /// \return True only for a non-zero correlation and broker ticket.
+    bool valid() const { return correlation_id != 0 && broker_ticket != 0; }
+
+    /// \brief Compares two bindings for idempotent replay.
+    /// \param other Binding to compare.
+    /// \return True when both identities match exactly.
+    bool operator==(const ReconciliationBinding &other) const {
+        return correlation_id == other.correlation_id &&
+               broker_ticket == other.broker_ticket;
+    }
+};
+
+/// \brief Verifies descriptor provenance against the graph used for admission.
+/// \param descriptor Durable descriptor to validate.
+/// \param graph Graph whose current revision is about to be admitted.
+/// \return True only when the baseline is exact and known-ticket state agrees.
+inline bool reconciliation_descriptor_matches_graph(
+    const ReconciliationDescriptor &descriptor, const ObservationGraph &graph) {
+    if (!descriptor.valid() || !graph.bound() ||
+        descriptor.account != graph.account_key() ||
+        descriptor.baseline.account() != graph.account_key() ||
+        descriptor.baseline.graph_instance_id() != graph.instance_id() ||
+        descriptor.baseline.graph_revision() != graph.revision() ||
+        descriptor.baseline.active_orders_revision() !=
+            graph.domain_revision(ObservationDomain::active_orders) ||
+        descriptor.baseline.positions_revision() !=
+            graph.domain_revision(ObservationDomain::positions) ||
+        descriptor.baseline.history_orders_revision() !=
+            graph.domain_revision(ObservationDomain::history_orders) ||
+        descriptor.baseline.history_deals_revision() !=
+            graph.domain_revision(ObservationDomain::history_deals))
+        return false;
+
+    const auto contains = [](const auto &values, std::uint64_t ticket) {
+        for (const auto &value : values) {
+            if (value.ticket == ticket)
+                return true;
+        }
+        return false;
+    };
+    const auto active_orders = graph.active_orders();
+    const auto positions = graph.positions();
+    const auto history_orders = graph.history_orders();
+    const auto history_deals = graph.history_deals();
+    for (const auto &predicate : descriptor.predicates) {
+        const bool baseline_present = *predicate.baseline_present;
+        if (!baseline_present) {
+            switch (predicate.kind) {
+            case ReconciliationPredicateKind::active_order_present:
+            case ReconciliationPredicateKind::active_order_absent:
+                if (graph.domain_revision(ObservationDomain::active_orders) == 0)
+                    return false;
+                break;
+            case ReconciliationPredicateKind::position_present:
+            case ReconciliationPredicateKind::position_absent:
+                if (graph.domain_revision(ObservationDomain::positions) == 0)
+                    return false;
+                break;
+            case ReconciliationPredicateKind::history_order_present:
+            case ReconciliationPredicateKind::history_order_absent:
+                if (!predicate.history_window ||
+                    !graph.history_orders_covered_at(
+                        *predicate.history_window,
+                        descriptor.baseline.graph_revision()))
+                    return false;
+                break;
+            case ReconciliationPredicateKind::history_deal_present:
+            case ReconciliationPredicateKind::history_deal_absent:
+                if (!predicate.history_window ||
+                    !graph.history_deals_covered_at(
+                        *predicate.history_window,
+                        descriptor.baseline.graph_revision()))
+                    return false;
+                break;
+            }
+        }
+        if (predicate.ticket == 0)
+            continue;
+        bool present = false;
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::active_order_absent:
+            present = contains(active_orders, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::position_present:
+        case ReconciliationPredicateKind::position_absent:
+            present = contains(positions, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::history_order_present:
+        case ReconciliationPredicateKind::history_order_absent:
+            present = contains(history_orders, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+        case ReconciliationPredicateKind::history_deal_absent:
+            present = contains(history_deals, predicate.ticket);
+            break;
+        }
+        if (present != baseline_present)
+            return false;
+    }
+    return true;
+}
+
+/// \brief Tests whether a descriptor contains broker identities still unknown at dispatch.
+/// \param descriptor Durable post-dispatch evidence contract.
+/// \return True when at least one predicate needs a result-derived binding.
+inline bool descriptor_requires_result_bindings(const ReconciliationDescriptor &descriptor) {
+    return std::any_of(descriptor.predicates.begin(), descriptor.predicates.end(),
+                       [](const ReconciliationPredicate &predicate) {
+                           return predicate.ticket == 0;
+                       });
+}
+
+/// \brief Tests whether every unknown predicate has one durable ticket binding.
+/// \param descriptor Descriptor whose result-derived identities are required.
+/// \param bindings Candidate bindings extracted from one broker result.
+/// \return True only when the binding set is complete for the descriptor.
+inline bool descriptor_bindings_complete(
+    const ReconciliationDescriptor &descriptor,
+    const std::vector<ReconciliationBinding> &bindings) {
+    std::size_t required = 0;
+    for (const auto &predicate : descriptor.predicates) {
+        if (predicate.ticket == 0)
+            ++required;
+    }
+    return required == bindings.size();
+}
+
+/// \brief Builds the effective observation scope for one dispatch descriptor.
+/// \param descriptor Durable predicates whose evidence must be fresh.
+/// \param caller_scope Caller-requested admission scope.
+/// \return Union scope, or empty when either input is malformed.
+inline std::optional<EnvironmentConsistencyRequest> effective_dispatch_scope(
+    const ReconciliationDescriptor &descriptor,
+    EnvironmentConsistencyRequest caller_scope) {
+    if (!descriptor.valid() || !caller_scope.valid())
+        return std::nullopt;
+
+    const auto extend_window = [](std::optional<ObservationWindow> *target,
+                                  const std::optional<ObservationWindow> &source) {
+        if (!source)
+            return;
+        if (!*target) {
+            *target = *source;
+            return;
+        }
+        target->emplace(ObservationWindow{
+            (std::min)((*target)->from_msc, source->from_msc),
+            (std::max)((*target)->to_msc, source->to_msc)});
+    };
+
+    for (const auto &predicate : descriptor.predicates) {
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::active_order_absent:
+            caller_scope.require_active_orders = true;
+            break;
+        case ReconciliationPredicateKind::position_present:
+        case ReconciliationPredicateKind::position_absent:
+            caller_scope.require_positions = true;
+            break;
+        case ReconciliationPredicateKind::history_order_present:
+        case ReconciliationPredicateKind::history_order_absent:
+            if (!predicate.history_window)
+                return std::nullopt;
+            extend_window(&caller_scope.history_orders_window, predicate.history_window);
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+        case ReconciliationPredicateKind::history_deal_absent:
+            if (!predicate.history_window)
+                return std::nullopt;
+            extend_window(&caller_scope.history_deals_window, predicate.history_window);
+            break;
+        }
+    }
+    return caller_scope.valid() ? std::optional<EnvironmentConsistencyRequest>(
+                                     std::move(caller_scope))
+                                : std::nullopt;
+}
 
 /// \enum JournalState
 /// \brief Durable write-ahead state around the future side effect.
@@ -174,6 +455,10 @@ struct OperationRecord {
     JournalState journal_state = JournalState::created; ///< Write-ahead state.
     std::uint64_t revision = 0; ///< Monotonic journal revision for this record.
     std::uint64_t fencing_token = 0; ///< Writer token committed at dispatching.
+    std::optional<ReconciliationDescriptor>
+        reconciliation_descriptor; ///< Durable post-dispatch evidence contract.
+    std::vector<ReconciliationBinding>
+        reconciliation_bindings; ///< Durable broker identities derived from result evidence.
 
     /// \brief Tests whether the record can be persisted or recovered safely.
     /// \return True when identity, payload, state pair, revision, and fencing agree.
@@ -183,11 +468,56 @@ struct OperationRecord {
             return false;
         if (!valid_state_pair(journal_state, operation_state))
             return false;
+        if (reconciliation_descriptor &&
+            (!reconciliation_descriptor->valid() ||
+             reconciliation_descriptor->account != key.account ||
+             (reconciliation_descriptor->trade_id != 0 &&
+              reconciliation_descriptor->trade_id != key.trade_id) ||
+             (reconciliation_descriptor->operation_id != 0 &&
+              reconciliation_descriptor->operation_id != key.operation_id)))
+            return false;
+        if (journal_at_least_dispatching(journal_state) &&
+            (!reconciliation_descriptor || reconciliation_descriptor->trade_id == 0 ||
+             reconciliation_descriptor->operation_id == 0 ||
+             reconciliation_descriptor->trade_id != key.trade_id ||
+             reconciliation_descriptor->operation_id != key.operation_id))
+            return false;
         if (!journal_at_least_result_persisted(journal_state) && !result_payload.empty())
             return false;
         if (journal_state == JournalState::result_persisted && result_payload.empty())
             return false;
         if (operation_state == OperationState::accepted && result_payload.empty())
+            return false;
+        if (!reconciliation_bindings.empty()) {
+            if (!reconciliation_descriptor ||
+                !journal_at_least_result_persisted(journal_state) ||
+                result_payload.empty())
+                return false;
+            for (std::size_t index = 0; index < reconciliation_bindings.size(); ++index) {
+                const auto &binding = reconciliation_bindings[index];
+                if (!binding.valid())
+                    return false;
+                for (std::size_t prior = 0; prior < index; ++prior) {
+                    if (reconciliation_bindings[prior].correlation_id ==
+                            binding.correlation_id ||
+                        reconciliation_bindings[prior].broker_ticket == binding.broker_ticket)
+                        return false;
+                }
+                const auto predicate = std::find_if(
+                    reconciliation_descriptor->predicates.begin(),
+                    reconciliation_descriptor->predicates.end(),
+                    [&binding](const auto &candidate) {
+                        return candidate.correlation_id == binding.correlation_id;
+                    });
+                if (predicate == reconciliation_descriptor->predicates.end() ||
+                    predicate->ticket != 0)
+                    return false;
+            }
+        }
+        if (reconciliation_descriptor &&
+            journal_at_least_result_persisted(journal_state) &&
+            !descriptor_bindings_complete(*reconciliation_descriptor,
+                                          reconciliation_bindings))
             return false;
         if (!journal_at_least_dispatching(journal_state))
             return fencing_token == 0;
@@ -230,7 +560,6 @@ constexpr bool valid_state_pair(JournalState journal_state,
                operation_state == OperationState::cancelled ||
                operation_state == OperationState::expired ||
                operation_state == OperationState::rejected ||
-               operation_state == OperationState::failed ||
                operation_state == OperationState::ambiguous;
     }
     return false;
@@ -490,25 +819,33 @@ public:
         return {JournalMutationStatus::accepted, std::move(candidate)};
     }
 
-    /// \brief Atomically persists a backend result and enters `result_persisted`.
+    /// \brief Durably attaches the immutable post-dispatch evidence contract.
     /// \param key Account and managed-operation identity.
-    /// \param result_payload Exact opaque backend result bytes.
-    /// \return Mutation status and the committed result-bearing record.
-    JournalMutationResult persist_result(
-        const OperationKey &key, std::vector<std::uint8_t> result_payload) {
+    /// \param descriptor Baseline, predicates, and settlement target to retain.
+    /// \return Mutation status and the descriptor-bearing record.
+    /// \note A descriptor can be attached only once and cannot be replaced.
+    JournalMutationResult persist_reconciliation_descriptor(
+        const OperationKey &key, ReconciliationDescriptor descriptor) {
         const auto it = records_.find(key);
         if (it == records_.end())
             return {JournalMutationStatus::not_found, std::nullopt};
-        if (it->second.journal_state != JournalState::dispatching ||
-            result_payload.empty() ||
-            it->second.operation_state != OperationState::submitting)
+        if (it->second.journal_state != JournalState::dispatch_intent_persisted ||
+            it->second.operation_state != OperationState::prechecking ||
+            it->second.reconciliation_descriptor ||
+            !descriptor.valid() || descriptor.account != key.account)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if ((descriptor.trade_id != 0 && descriptor.trade_id != key.trade_id) ||
+            (descriptor.operation_id != 0 && descriptor.operation_id != key.operation_id))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
         OperationRecord candidate = it->second;
-        candidate.journal_state = JournalState::result_persisted;
-        candidate.result_payload = std::move(result_payload);
+        if (descriptor.trade_id == 0)
+            descriptor.trade_id = key.trade_id;
+        if (descriptor.operation_id == 0)
+            descriptor.operation_id = key.operation_id;
+        candidate.reconciliation_descriptor = std::move(descriptor);
         candidate.revision += 1;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};
@@ -520,6 +857,21 @@ public:
                     std::nullopt};
         it->second = candidate;
         return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
+    /// \brief Atomically persists a backend result without identity bindings.
+    /// \param key Account and managed-operation identity.
+    /// \param result_payload Exact opaque backend result bytes.
+    /// \return Mutation status and the committed result-bearing record.
+    JournalMutationResult persist_result(
+        const OperationKey &key, std::vector<std::uint8_t> result_payload) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (it->second.reconciliation_descriptor &&
+            descriptor_requires_result_bindings(*it->second.reconciliation_descriptor))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        return persist_result_with_bindings(key, std::move(result_payload), {});
     }
 
     /// \brief Durably advances the managed operation lifecycle state.
@@ -615,7 +967,7 @@ public:
             return next == OperationState::partially_filled ||
                    next == OperationState::filled || next == OperationState::cancelled ||
                    next == OperationState::expired || next == OperationState::rejected ||
-                   next == OperationState::failed || next == OperationState::ambiguous;
+                   next == OperationState::ambiguous;
         case OperationState::partially_filled:
             return next == OperationState::reconciling ||
                    next == OperationState::filled || next == OperationState::cancelled ||
@@ -632,8 +984,50 @@ public:
     }
 
 private:
+    /// \brief Atomically persists a backend result and its identity bindings.
+    /// \param key Account and managed-operation identity.
+    /// \param result_payload Exact opaque backend result bytes.
+    /// \param bindings Broker identities extracted from the same validated result.
+    /// \return Mutation status and the committed result-bearing record.
+    /// \note This mutation is private to the one-shot backend so application code
+    /// cannot invent broker identity bindings.
+    JournalMutationResult persist_result_with_bindings(
+        const OperationKey &key, std::vector<std::uint8_t> result_payload,
+        std::vector<ReconciliationBinding> bindings) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (it->second.journal_state != JournalState::dispatching ||
+            result_payload.empty() ||
+            it->second.operation_state != OperationState::submitting)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.reconciliation_descriptor &&
+            !descriptor_bindings_complete(*it->second.reconciliation_descriptor, bindings))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+
+        OperationRecord candidate = it->second;
+        candidate.journal_state = JournalState::result_persisted;
+        candidate.result_payload = std::move(result_payload);
+        candidate.reconciliation_bindings = std::move(bindings);
+        candidate.revision += 1;
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
+        it->second = candidate;
+        return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
     DurableJournalStore &store_;
     std::map<OperationKey, OperationRecord> records_;
+
+    friend class runtime::OneShotDispatchBackend;
 };
 
 /// \class SingleWriterLease
@@ -758,7 +1152,8 @@ public:
     /// \brief Binds the barrier to one owner-loop journal, graph, and scope.
     /// \param journal Journal that owns the operation state transitions.
     /// \param graph Current graph whose revision must match the proof.
-    /// \param required_scope Domains and history range required for admission.
+    /// \param required_scope Caller-requested domains and history range. The
+    /// descriptor predicates are merged into this scope before proof checking.
     DispatchAdmissionBarrier(OperationJournal &journal, const ObservationGraph &graph,
                              EnvironmentConsistencyRequest required_scope)
         : journal_(journal), graph_(graph), required_scope_(std::move(required_scope)) {}
@@ -782,22 +1177,30 @@ public:
             return {DispatchAdmissionStatus::event_gap, std::nullopt};
         if (request.current_account != key.account)
             return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
+        const auto record = journal_.find(key);
+        if (!record)
+            return {DispatchAdmissionStatus::operation_not_found, std::nullopt};
+        if (record->journal_state != JournalState::dispatch_intent_persisted ||
+            record->operation_state != OperationState::prechecking ||
+            !record->reconciliation_descriptor)
+            return {DispatchAdmissionStatus::invalid_state, std::nullopt};
+        if (!reconciliation_descriptor_matches_graph(*record->reconciliation_descriptor,
+                                                      graph_))
+            return {DispatchAdmissionStatus::invalid_state, std::nullopt};
+        const auto effective_scope = effective_dispatch_scope(
+            *record->reconciliation_descriptor, required_scope_);
+        if (!effective_scope)
+            return {DispatchAdmissionStatus::invalid_state, std::nullopt};
         if (!request.environment_proof || !request.environment_proof->valid())
             return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
         if (request.environment_proof->account() != key.account)
             return {DispatchAdmissionStatus::account_mismatch, std::nullopt};
-        if (!request.environment_proof->covers(required_scope_))
+        if (!request.environment_proof->covers(*effective_scope))
             return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
         if (request.environment_proof->graph_instance_id() != graph_.instance_id() ||
             request.environment_proof->last_graph_revision() != graph_.revision())
             return {DispatchAdmissionStatus::environment_not_ready, std::nullopt};
 
-        const auto record = journal_.find(key);
-        if (!record)
-            return {DispatchAdmissionStatus::operation_not_found, std::nullopt};
-        if (record->journal_state != JournalState::dispatch_intent_persisted ||
-            record->operation_state != OperationState::prechecking)
-            return {DispatchAdmissionStatus::invalid_state, std::nullopt};
         const auto fencing_token = lease.held_fencing_token(key.account);
         if (!fencing_token || *fencing_token == 0)
             return {DispatchAdmissionStatus::lease_not_held, std::nullopt};

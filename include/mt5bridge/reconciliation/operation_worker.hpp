@@ -4,7 +4,7 @@
 /// \brief Defines journal-aware operation reconciliation and startup recovery.
 
 #include <mt5bridge/dispatch/journal.hpp>
-#include <mt5bridge/observation/worker.hpp>
+#include <mt5bridge/reconciliation/worker.hpp>
 
 #include <algorithm>
 #include <cstddef>

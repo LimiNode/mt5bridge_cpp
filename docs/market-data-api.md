@@ -17,8 +17,11 @@ ABI 8 does not expose a side-effecting JSON order helper. The historical
 `open_market_buy` method is rejected before reaching MetaTrader; order sending
 is reserved for the durable Stage 2 journal.
 
-The public types live in [include/mt5bridge/data.h](../include/mt5bridge/data.h)
-and are C-compatible. `mt5bridge::Client` exposes `copy_ticks_range()` and
+The public types live under
+[`include/mt5bridge/market/`](../include/mt5bridge/market/) and are available
+through the C-compatible
+[`market.h`](../include/mt5bridge/market.h) umbrella. `mt5bridge::Client`
+exposes `copy_ticks_range()` and
 strict-by-default `copy_rates_range()` returning ordinary C++ vectors. The
 explicit `query_rates_range()` method returns best-effort values with
 diagnostics and coverage, while the C API exposes

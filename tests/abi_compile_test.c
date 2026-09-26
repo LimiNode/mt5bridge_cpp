@@ -2,7 +2,7 @@
  * \brief Verifies that the public ABI headers compile as C11.
  */
 #include <mt5bridge/abi.h>
-#include <mt5bridge/data.h>
+#include <mt5bridge/market.h>
 #include <mt5bridge/trade.h>
 
 int main(void) {

@@ -3,7 +3,7 @@
 /// \file reconciliation/engine.hpp
 /// \brief Defines observation-only reconciliation predicates over the graph.
 
-#include <mt5bridge/observation/graph.hpp>
+#include <mt5bridge/reconciliation/graph.hpp>
 
 #include <cstddef>
 #include <cstdint>

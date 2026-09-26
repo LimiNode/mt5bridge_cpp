@@ -3,7 +3,7 @@
 /// \file dispatch/journal.hpp
 /// \brief Defines the durable operation journal and pre-side-effect admission barrier.
 
-#include <mt5bridge/observation/environment_consistency.hpp>
+#include <mt5bridge/reconciliation/environment_consistency.hpp>
 #include <mt5bridge/reconciliation/engine.hpp>
 
 #include <algorithm>

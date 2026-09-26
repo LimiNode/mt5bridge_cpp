@@ -169,7 +169,7 @@ state; callers must serialize access.
 
 ## Observation-only reconciliation predicates
 
-The header [`reconciliation_engine.hpp`](../include/mt5bridge/reconciliation_engine.hpp)
+The header [`engine.hpp`](../include/mt5bridge/reconciliation/engine.hpp)
 provides `ReconciliationEngine` for evaluating evidence without side effects.
 Capture a `ReconciliationBaseline` before the operation, collect fresh
 authoritative observations into `ObservationGraph`, and evaluate explicit
@@ -222,7 +222,7 @@ as a final outcome.
 
 ## Observation coordinator and pre-dispatch gate
 
-The header [`reconciliation_coordinator.hpp`](../include/mt5bridge/reconciliation_coordinator.hpp)
+The header [`coordinator.hpp`](../include/mt5bridge/reconciliation/coordinator.hpp)
 provides the next observation-only layer. `ObservationProvider` is a narrow
 test seam that assembles one `ObservationBatch`; `ClientObservationProvider`
 uses unfiltered active queries and bounded history windows. The coordinator
@@ -250,7 +250,7 @@ journal, WAL, and `order_send` remain a later stage.
 
 ## Bounded environment consistency
 
-The header [`environment_consistency.hpp`](../include/mt5bridge/environment_consistency.hpp)
+The header [`environment_consistency.hpp`](../include/mt5bridge/reconciliation/environment_consistency.hpp)
 adds the next observation-only layer. `ObservationCoordinator::refresh()` now
 returns an accepted `ObservationSample` only after the batch has passed shape
 validation and graph admission. `EnvironmentConsistencyPolicy` accepts a
@@ -287,7 +287,7 @@ authorize `order_send`. The full contract is recorded in
 
 ## Caller-driven reconciliation worker
 
-`observation/worker.hpp` adds a small owner-loop seam above the coordinator.
+`reconciliation/worker.hpp` adds a small owner-loop seam above the coordinator.
 `ReconciliationWorker::step()` performs exactly one authoritative refresh and
 then evaluates the caller-supplied baseline and predicates. It returns both
 the accepted `ObservationSample` provenance and the pure
@@ -526,7 +526,7 @@ at-most-once dispatch, not exactly-once delivery. After the call it records
 the raw result before moving to `reconciling`.
 
 The current C++ implementation contains this pre-side-effect slice in
-`mt5bridge/dispatch_journal.hpp`. `OperationJournal` separates the durable
+`mt5bridge/dispatch/journal.hpp`. `OperationJournal` separates the durable
 write-ahead states (`created`, `prechecked`, `dispatch_intent_persisted`,
 `dispatching`, `result_persisted`, `reconciling`) from the canonical
 `OperationState` vocabulary. Every accepted mutation is committed through a

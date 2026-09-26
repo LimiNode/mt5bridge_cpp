@@ -2,8 +2,8 @@
 /// \brief Implements the CPython-backed mt5_bridge.dll runtime.
 
 #include <mt5bridge/abi.h>
-#include <mt5bridge/market/data.h>
-#include <mt5bridge/trade/observation.h>
+#include <mt5bridge/market.h>
+#include <mt5bridge/trade.h>
 #include "python_dispatch_transport.hpp"
 #include "runtime_lane.hpp"
 

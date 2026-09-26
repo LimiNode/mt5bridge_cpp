@@ -1,6 +1,6 @@
 #pragma once
 
-/// \file observation/coordinator.hpp
+/// \file reconciliation/coordinator.hpp
 /// \brief Defines synchronous observation collection and pre-dispatch checks.
 
 #include <mt5bridge/client.hpp>

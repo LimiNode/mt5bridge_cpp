@@ -20,3 +20,27 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  formal-dispatch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Download pinned TLC
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            --output tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          echo 'AB4694601923FD5AC06452ABBF847C366A5054A3D739552085EDD6ED986C29EC  tla2tools.jar' \
+            | sha256sum --check
+      - name: Check dispatch recovery model
+        run: |
+          pushd formal/dispatch
+          java -cp ../../tla2tools.jar tlc2.TLC \
+            -config DispatchRecovery.cfg \
+            DispatchRecovery.tla
+          popd

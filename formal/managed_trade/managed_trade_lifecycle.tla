@@ -386,8 +386,8 @@ AcknowledgeAmbiguous ==
                     observationEpoch,
                     lastAttemptEpoch, operationId>>
 
-Next ==
-    /\ (\E volume \in 1..MaxSliceVolume : StartOpenSlice(volume)
+LifecycleNext ==
+    \/ \E volume \in 1..MaxSliceVolume : StartOpenSlice(volume)
     \/ \E volume \in 1..TargetVolume : StartClose(volume)
     \/ StartCancel
     \/ EnterSubmitting
@@ -411,7 +411,10 @@ Next ==
     \/ StopPlan
     \/ \E open \in 0..TargetVolume, pending \in 0..TargetVolume :
            FreshSnapshot(open, pending)
-    \/ AcknowledgeAmbiguous)
+    \/ AcknowledgeAmbiguous
+
+Next ==
+    /\ LifecycleNext
     /\ obligationEver' = (obligationEver \/ closeObligation')
 
 TypeOK ==

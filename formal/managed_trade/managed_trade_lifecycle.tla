@@ -22,12 +22,12 @@ TradeStates == {"pending", "partially_open", "open", "reducing", "closing",
                 "closed"}
 
 VARIABLES planState, sliceCount, openVolume, pendingRemainderVolume,
-          closeObligation, obligationSatisfied, observationEpoch,
+          closeObligation, obligationEver, obligationSatisfied, observationEpoch,
           lastAttemptEpoch, operationId, operationKind, operationState,
           operationVolume, resultVolume, brokerOutcome, sendCount
 
 vars == <<planState, sliceCount, openVolume, pendingRemainderVolume,
-           closeObligation, obligationSatisfied, observationEpoch,
+           closeObligation, obligationEver, obligationSatisfied, observationEpoch,
            lastAttemptEpoch, operationId, operationKind, operationState,
            operationVolume, resultVolume, brokerOutcome, sendCount>>
 
@@ -37,6 +37,7 @@ Init ==
     /\ openVolume = 0
     /\ pendingRemainderVolume = 0
     /\ closeObligation = FALSE
+    /\ obligationEver = FALSE
     /\ obligationSatisfied = FALSE
     /\ observationEpoch = 0
     /\ lastAttemptEpoch = 0
@@ -139,7 +140,6 @@ EnterSubmitting ==
 BrokerFill(volume) ==
     /\ operationState = "submitting"
     /\ operationKind \in {"open", "close"}
-    /\ sendCount = 0
     /\ volume \in 1..operationVolume
     /\ operationState' = "reconciling"
     /\ resultVolume' = volume
@@ -154,7 +154,6 @@ BrokerFill(volume) ==
 BrokerCancelAccepted ==
     /\ operationState = "submitting"
     /\ operationKind = "cancel"
-    /\ sendCount = 0
     /\ operationState' = "reconciling"
     /\ resultVolume' = 0
     /\ brokerOutcome' = "full"
@@ -168,7 +167,6 @@ BrokerCancelAccepted ==
 BrokerReject ==
     /\ operationState = "submitting"
     /\ operationKind \in {"open", "close", "cancel"}
-    /\ sendCount = 0
     /\ operationState' = "reconciling"
     /\ resultVolume' = 0
     /\ brokerOutcome' = "rejected"
@@ -182,7 +180,6 @@ BrokerReject ==
 BrokerUnknown ==
     /\ operationState = "submitting"
     /\ operationKind \in {"open", "close", "cancel"}
-    /\ sendCount = 0
     /\ operationState' = "reconciling"
     /\ resultVolume' = 0
     /\ brokerOutcome' = "unknown"
@@ -328,8 +325,6 @@ ReconcileCancelUnknown ==
                     operationVolume, resultVolume, brokerOutcome, sendCount>>
 
 ObservePendingRemainder(volume) ==
-    /\ operationState = "partially_filled"
-    /\ operationKind = "open"
     /\ pendingRemainderVolume > 0
     /\ volume \in 1..pendingRemainderVolume
     /\ openVolume + volume <= TargetVolume
@@ -344,9 +339,6 @@ ObservePendingRemainder(volume) ==
 CreateCloseObligation ==
     /\ ~closeObligation
     /\ ~obligationSatisfied
-    /\ openVolume > 0
-    /\ pendingRemainderVolume = 0
-    /\ CanStartOperation
     /\ closeObligation' = TRUE
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, obligationSatisfied,
@@ -386,13 +378,16 @@ AcknowledgeAmbiguous ==
     /\ resultVolume' = 0
     /\ brokerOutcome' = "none"
     /\ sendCount' = 0
+    /\ obligationSatisfied' =
+        obligationSatisfied \/
+        (closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0)
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
-                    obligationSatisfied, observationEpoch,
+                    observationEpoch,
                     lastAttemptEpoch, operationId>>
 
 Next ==
-    \/ \E volume \in 1..MaxSliceVolume : StartOpenSlice(volume)
+    /\ (\E volume \in 1..MaxSliceVolume : StartOpenSlice(volume)
     \/ \E volume \in 1..TargetVolume : StartClose(volume)
     \/ StartCancel
     \/ EnterSubmitting
@@ -416,15 +411,16 @@ Next ==
     \/ StopPlan
     \/ \E open \in 0..TargetVolume, pending \in 0..TargetVolume :
            FreshSnapshot(open, pending)
-    \/ AcknowledgeAmbiguous
+    \/ AcknowledgeAmbiguous)
+    /\ obligationEver' = (obligationEver \/ closeObligation')
 
 TypeOK ==
     /\ planState \in PlanStates
     /\ sliceCount \in 0..MaxOperations
     /\ openVolume \in 0..TargetVolume
     /\ pendingRemainderVolume \in 0..TargetVolume
-    /\ openVolume + pendingRemainderVolume <= TargetVolume
     /\ closeObligation \in BOOLEAN
+    /\ obligationEver \in BOOLEAN
     /\ obligationSatisfied \in BOOLEAN
     /\ observationEpoch \in 0..MaxObservationEpoch
     /\ lastAttemptEpoch \in 0..MaxObservationEpoch
@@ -434,7 +430,7 @@ TypeOK ==
     /\ operationVolume \in 0..TargetVolume
     /\ resultVolume \in 0..TargetVolume
     /\ brokerOutcome \in BrokerOutcomes
-    /\ sendCount \in 0..1
+    /\ sendCount \in 0..2
     /\ (operationState = "idle" => operationKind = "none")
     /\ (operationKind = "none" => operationState = "idle")
     /\ (operationState = "submitting" => operationVolume > 0)
@@ -452,6 +448,9 @@ ObligationOnlyAfterExposureGone ==
 
 SatisfiedObligationIsDurable ==
     obligationSatisfied => closeObligation
+
+CloseObligationIsDurable ==
+    obligationEver => closeObligation
 
 AmbiguousAttemptIsNonResendable ==
     operationState = "ambiguous" => sendCount = 1

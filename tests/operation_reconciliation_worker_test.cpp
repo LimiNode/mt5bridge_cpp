@@ -399,6 +399,49 @@ int main() {
                     foreign_recovery_provider.calls == 0,
                 "recovered operation was re-anchored to a foreign account");
 
+        const auto unbound_key = mt5bridge::OperationKey{account(), 102, 202};
+        require(journal.create(unbound_key, {0x0a}).accepted(),
+                "unbound recovery operation create failed");
+        enter_dispatching(
+            journal, unbound_key,
+            mt5bridge::ReconciliationDescriptor{
+                unbound_key.account, *reanchor_request.baseline,
+                reanchor_request.predicates, mt5bridge::OperationState::filled});
+        FakeProvider unbound_recovery_provider(
+            {batch(unbound_key.account, false), batch(unbound_key.account, true)});
+        mt5bridge::ObservationCoordinator unbound_recovery_coordinator(
+            unbound_recovery_provider);
+        mt5bridge::OperationReconciliationWorker unbound_recovery_worker(
+            journal, unbound_key, unbound_recovery_coordinator, reanchor_collection);
+        const auto unbound_cycle = unbound_recovery_worker.step();
+        require(unbound_cycle.status ==
+                    mt5bridge::OperationReconciliationStatus::account_mismatch &&
+                    unbound_cycle.record &&
+                    unbound_cycle.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    unbound_cycle.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    unbound_recovery_provider.calls == 0,
+                "unbound recovery was allowed to evaluate an invalid baseline");
+
+        FakeProvider bootstrapped_recovery_provider(
+            {batch(unbound_key.account, false), batch(unbound_key.account, true)});
+        mt5bridge::ObservationCoordinator bootstrapped_recovery_coordinator(
+            bootstrapped_recovery_provider, unbound_key.account);
+        mt5bridge::OperationReconciliationWorker bootstrapped_recovery_worker(
+            journal, unbound_key, bootstrapped_recovery_coordinator, reanchor_collection);
+        const auto bootstrapped_first = bootstrapped_recovery_worker.step();
+        const auto bootstrapped_second = bootstrapped_recovery_worker.step();
+        require(bootstrapped_first.status ==
+                    mt5bridge::OperationReconciliationStatus::pending &&
+                    bootstrapped_second.status ==
+                        mt5bridge::OperationReconciliationStatus::progressed &&
+                    bootstrapped_second.record &&
+                    bootstrapped_second.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    bootstrapped_recovery_provider.calls == 2,
+                "bound recovery did not resume after explicit account bootstrap");
+
         FakeProvider restored_account_provider(
             {batch(reanchor_key.account, false), batch(reanchor_key.account, true)});
         mt5bridge::ObservationCoordinator restored_account_coordinator(

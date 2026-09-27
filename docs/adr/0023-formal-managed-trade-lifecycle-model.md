@@ -17,9 +17,15 @@ tickets:
   plan prevents new slices without erasing exposure or an active remainder;
 - a partial open records filled volume and a separate pending remainder, which
   can later be observed or explicitly cancelled;
-- a `CloseObligation` is durable desired state, not another operation ID;
+- a `CloseObligation` is durable desired state, not another operation ID, and
+  may be created while an entry operation is still dispatching, submitting,
+  reconciling, or carrying a pending remainder;
 - closing is satisfied only after reconciled close evidence reduces exposure to
-  zero; a partial close leaves the obligation active;
+  zero; a partial close leaves the obligation active, while an authoritative
+  zero snapshot may satisfy it after an ambiguous attempt;
+- a pending entry remainder is independent of the current cancel operation, so
+  a late fill may arrive before cancellation is reconciled and is included in
+  the resulting exposure;
 - an unknown broker outcome becomes `ambiguous`, and a new decision requires a
   fresh authoritative snapshot before the ambiguous attempt can be retired;
   and
@@ -40,6 +46,8 @@ test before any public asynchronous API is added.
   executable and reviewable.
 - Partial fills and pending remainders cannot silently overshoot the target or
   be treated as a completed close.
+- A close request prevents new entry slices immediately, but does not discard
+  an in-flight entry or its late-fill race.
 - Ambiguous outcomes are explicitly non-resendable until a fresh observation
   supplies a new decision point.
 - The model remains finite and independent from broker-specific transport

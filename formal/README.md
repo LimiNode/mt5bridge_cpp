@@ -84,9 +84,13 @@ It sits above one-shot dispatch and models the logical lifecycle decisions:
   already observed exposure or a pending remainder;
 - partial fills preserve both filled volume and the active remainder, which can
   later be observed or explicitly cancelled;
-- `CloseObligation` is durable desired state rather than another operation;
+- `CloseObligation` is durable desired state rather than another operation and
+  may be created while an entry is still in flight;
 - a close is satisfied only after reconciled evidence reduces exposure to zero;
-  and
+  an authoritative zero snapshot can also satisfy it after an ambiguous
+  attempt; and
+- a pending remainder remains independent of its cancel operation, so a late
+  fill can arrive before cancellation is reconciled; and
 - an unknown outcome is ambiguous and cannot be retired for a new decision
   without a fresh snapshot.
 

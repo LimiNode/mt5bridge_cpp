@@ -44,7 +44,11 @@ result remains a hint and is never used to manufacture identity. The durable
 predicate/baseline contract is retained in the operation record as specified by
 [ADR-0020](0020-durable-reconciliation-descriptor.md); a worker reconstructed
 against a new graph instance re-anchors only its in-memory baseline before the
-first refresh.
+first refresh, and only after the coordinator graph is already bound to the
+operation's immutable account. An unbound or foreign graph returns
+`account_mismatch` before provider collection; account bootstrap therefore
+happens before worker construction rather than adopting the first account seen
+during recovery.
 
 The mapping is deliberately fail-closed:
 

@@ -246,7 +246,80 @@ int main() {
                 mt5bridge::ReconciliationPredicateKind::active_order_present,
                 std::nullopt, false,
                 mt5bridge::ReconciliationTransition::absent_to_present, 12001)},
-            mt5bridge::OperationState::filled};
+                mt5bridge::OperationState::filled};
+
+        const auto rejected_unknown_key = key(16);
+        require(journal.create(rejected_unknown_key, {0x05}).accepted(),
+                "unknown-ticket rejection operation create failed");
+        prepare_for_admission(journal, rejected_unknown_key, unknown_descriptor);
+        FakeLease rejected_unknown_lease{operation_account};
+        auto rejected_unknown_permit =
+            admit(journal, coordinator.graph(), rejected_unknown_key,
+                  *consistency.proof, rejected_unknown_lease);
+        require(rejected_unknown_permit.has_value(),
+                "unknown-ticket rejection permit setup failed");
+        FakeTransport rejected_unknown_transport;
+        rejected_unknown_transport.next.retcode =
+            mt5bridge::runtime::kTradeRetcodeMarketClosed;
+        rejected_unknown_transport.next.disposition =
+            mt5bridge::runtime::BrokerResultDisposition::rejected;
+        FakeAccountProbe rejected_unknown_probe({operation_account, operation_account});
+        const auto rejected_unknown_result = backend.execute(
+            journal, rejected_unknown_key, std::move(*rejected_unknown_permit),
+            rejected_unknown_probe, rejected_unknown_lease,
+            rejected_unknown_transport);
+        require(rejected_unknown_result.completed() && rejected_unknown_result.record &&
+                    rejected_unknown_result.record->operation_state ==
+                        mt5bridge::OperationState::rejected &&
+                    rejected_unknown_result.record->journal_state ==
+                        mt5bridge::JournalState::result_persisted &&
+                    rejected_unknown_result.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}) &&
+                    rejected_unknown_result.record->reconciliation_bindings.empty() &&
+                    rejected_unknown_transport.calls == 1,
+                "deterministic rejection with unknown ticket was not terminally persisted");
+        mt5bridge::OperationJournal rejected_unknown_recovered(store);
+        const auto recovered_rejected =
+            rejected_unknown_recovered.recover(rejected_unknown_key);
+        require(recovered_rejected.accepted() && recovered_rejected.record &&
+                    recovered_rejected.record->operation_state ==
+                        mt5bridge::OperationState::rejected &&
+                    recovered_rejected.record->result_payload ==
+                        std::vector<std::uint8_t>({0xA0, 0x01}) &&
+                    !admit(rejected_unknown_recovered, coordinator.graph(),
+                           rejected_unknown_key, *consistency.proof,
+                           rejected_unknown_lease),
+                "rejected unknown-ticket operation became resendable after recovery");
+
+        const auto unsupported_position_descriptor =
+            mt5bridge::ReconciliationDescriptor{
+                operation_account, coordinator.capture_baseline(),
+                {mt5bridge::expect_reconciliation_transition(
+                    mt5bridge::ReconciliationPredicateKind::position_present,
+                    std::nullopt, false,
+                    mt5bridge::ReconciliationTransition::absent_to_present, 14001)},
+                mt5bridge::OperationState::filled};
+        require(!unsupported_position_descriptor.valid(),
+                "unknown position identity escaped descriptor validation");
+        const auto unsupported_position_key = key(15);
+        require(journal.create(unsupported_position_key, {0x05, 0x01}).accepted(),
+                "unknown-position operation create failed");
+        require(journal.transition_operation(unsupported_position_key,
+                                             mt5bridge::OperationState::prechecking)
+                    .accepted() &&
+                    journal.transition_journal(unsupported_position_key,
+                                               mt5bridge::JournalState::prechecked)
+                        .accepted() &&
+                    journal.transition_journal(
+                        unsupported_position_key,
+                        mt5bridge::JournalState::dispatch_intent_persisted)
+                        .accepted(),
+                "unknown-position descriptor setup failed");
+        require(journal.persist_reconciliation_descriptor(
+                    unsupported_position_key, unsupported_position_descriptor)
+                    .status == mt5bridge::JournalMutationStatus::invalid_transition,
+                "unknown position identity became durably admissible");
+
         prepare_for_admission(journal, binding_key, unknown_descriptor);
         FakeLease binding_lease{operation_account};
         auto binding_permit = admit(journal, coordinator.graph(), binding_key,

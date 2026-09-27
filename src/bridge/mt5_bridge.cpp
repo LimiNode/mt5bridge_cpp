@@ -3226,6 +3226,27 @@ MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_
                 reinterpret_cast<const std::uint8_t *>(request_payload),
                 reinterpret_cast<const std::uint8_t *>(request_payload) +
                     std::strlen(request_payload));
+            const auto test_baseline = mt5bridge::ReconciliationBaseline::restore(
+                record.key.account, 1, 0, 0, 0, 0, 0);
+            if (!test_baseline) {
+                set_error("test reconciliation baseline could not be created");
+                return -1;
+            }
+            record.reconciliation_descriptor = mt5bridge::ReconciliationDescriptor{
+                record.key.account,
+                *test_baseline,
+                {mt5bridge::expect_reconciliation_transition(
+                    mt5bridge::ReconciliationPredicateKind::active_order_present,
+                    std::nullopt, false,
+                    mt5bridge::ReconciliationTransition::absent_to_present, 7001),
+                 mt5bridge::expect_reconciliation_transition(
+                     mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                     std::nullopt, false,
+                     mt5bridge::ReconciliationTransition::absent_to_present, 7002,
+                     mt5bridge::ObservationWindow{0, 0})},
+                mt5bridge::OperationState::filled,
+                record.key.trade_id,
+                record.key.operation_id};
 
             mt5bridge::runtime::Mt5PythonAccountProbe account_probe(mt5.get());
             mt5bridge::runtime::Mt5PythonDispatchTransport transport(
@@ -3269,6 +3290,37 @@ MT5BRIDGE_API int mt5bridge_eval_json(const char *request_json, char **response_
                 PyDict_SetItemString(response.get(), "disposition",
                                      disposition_value.get()) != 0 ||
                 PyDict_SetItemString(response.get(), "retcode", retcode_value.get()) != 0) {
+                set_python_error();
+                return -1;
+            }
+            PyRef bindings(PyList_New(static_cast<Py_ssize_t>(
+                call.reconciliation_bindings.size())));
+            if (!bindings) {
+                set_python_error();
+                return -1;
+            }
+            for (std::size_t index = 0; index < call.reconciliation_bindings.size(); ++index) {
+                const auto &binding = call.reconciliation_bindings[index];
+                PyRef item(PyDict_New());
+                PyRef correlation_id(
+                    PyLong_FromUnsignedLongLong(binding.correlation_id));
+                PyRef broker_ticket(PyLong_FromUnsignedLongLong(binding.broker_ticket));
+                if (!item || !correlation_id || !broker_ticket ||
+                    PyDict_SetItemString(item.get(), "correlation_id",
+                                         correlation_id.get()) != 0 ||
+                    PyDict_SetItemString(item.get(), "broker_ticket",
+                                         broker_ticket.get()) != 0) {
+                    set_python_error();
+                    return -1;
+                }
+                if (PyList_SetItem(bindings.get(), static_cast<Py_ssize_t>(index),
+                                   item.release()) != 0) {
+                    set_python_error();
+                    return -1;
+                }
+            }
+            if (PyDict_SetItemString(response.get(), "reconciliation_bindings",
+                                     bindings.get()) != 0) {
                 set_python_error();
                 return -1;
             }

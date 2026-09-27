@@ -76,5 +76,34 @@ primary ordering run unbounded. History absence still requires authoritative
 coverage, making the model explicit about the difference between a
 stale/lagging view and proof of absence.
 
-The next planned model is the managed trade lifecycle (`CloseObligation`,
-partial fills, cancellation, and slicing).
+The third model is
+[managed_trade/managed_trade_lifecycle.tla](managed_trade/managed_trade_lifecycle.tla).
+It sits above one-shot dispatch and models the logical lifecycle decisions:
+
+- a running plan creates bounded open slices, while stopping it does not erase
+  already observed exposure or a pending remainder;
+- partial fills preserve both filled volume and the active remainder, which can
+  later be observed or explicitly cancelled;
+- `CloseObligation` is durable desired state rather than another operation and
+  may be created while an entry is still in flight;
+- a close is satisfied only after reconciled evidence reduces exposure to zero;
+  an authoritative zero snapshot can also satisfy it after an ambiguous
+  attempt; and
+- a pending remainder remains independent of its cancel operation, so a late
+  fill can arrive before cancellation is reconciled; and
+- an unknown outcome is ambiguous and cannot be retired for a new decision
+  without a fresh snapshot.
+
+Run it with the same pinned TLC artifact:
+
+```text
+pushd formal/managed_trade
+java -cp ../../tla2tools.jar tlc2.TLC \
+    -config managed_trade_lifecycle.cfg \
+    managed_trade_lifecycle.tla
+popd
+```
+
+The model intentionally does not expose a public `TradeManager` or invoke a
+terminal side effect. A counterexample becomes a focused native lifecycle
+test before the asynchronous trading API is added.

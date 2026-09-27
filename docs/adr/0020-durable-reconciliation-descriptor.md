@@ -17,13 +17,16 @@ Every operation must persist an immutable reconciliation descriptor before the
   expected causal transition; and
 - the lifecycle state that confirmed evidence is allowed to settle.
 
-Broker-assigned identities are not required to exist before `order_send`. A
-predicate may instead carry a non-zero client correlation id with a zero broker
-ticket. Such a predicate is durable and valid, but remains pending until a
-trusted transport result binds the broker ticket; an unknown ticket can never
-confirm either presence or absence by itself. Known-ticket predicates retain
-the same explicit baseline transition contract, preventing a pre-existing
-ticket from being mistaken for a post-dispatch effect.
+Broker-assigned order and deal identities are not required to exist before
+`order_send`. An order/deal presence predicate may instead carry a non-zero
+client correlation id with a zero broker ticket. Such a predicate is durable
+and valid, but remains pending until a trusted transport result binds the
+broker ticket; an unknown ticket can never confirm either presence or absence
+by itself. A `position_present` predicate with an unknown ticket is currently
+rejected because `MqlTradeResult` has no position ticket and the observation-
+derived `deal.position_id` resolver is a later slice. Known-ticket predicates
+retain the same explicit baseline transition contract, preventing a
+pre-existing ticket from being mistaken for a post-dispatch effect.
 
 Ticket enrichment is not caller-authoritative. The journal stores a separate
 single-assignment `correlation_id -> broker_ticket` binding. Only the private
@@ -43,6 +46,11 @@ silently broaden or replace the durable contract. The one controlled enrichment
 is replacing a zero broker ticket with a non-zero ticket while retaining the
 same non-zero client correlation id. This resolves a pre-send unknown identity
 from a trusted broker result without changing the causal contract.
+
+Deterministic broker rejections are an explicit exception to the binding
+requirement: when the transport proves that no execution effect was created,
+the backend commits the complete raw result and terminal `rejected` state in
+one compare-and-commit, with no ticket binding.
 
 Before opening `dispatching`, `DispatchAdmissionBarrier` requires the
 descriptor baseline to match the admission graph account, graph instance, and

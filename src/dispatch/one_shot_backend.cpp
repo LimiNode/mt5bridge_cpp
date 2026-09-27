@@ -76,6 +76,18 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
         return {OneShotExecutionStatus::result_not_durable, call.retcode,
                 journal.find(key)};
 
+    const bool deterministic_rejection =
+        call.retcode == kTradeRetcodeMarketClosed ||
+        call.disposition == BrokerResultDisposition::rejected;
+    if (deterministic_rejection) {
+        const auto persisted =
+            journal.persist_rejected_result(key, std::move(call.raw_result));
+        if (!persisted.accepted())
+            return {OneShotExecutionStatus::result_not_durable, call.retcode,
+                    journal.find(key)};
+        return {OneShotExecutionStatus::completed, call.retcode, persisted.record};
+    }
+
     const auto current_record = journal.find(key);
     const bool requires_bindings =
         current_record && current_record->reconciliation_descriptor &&
@@ -90,10 +102,7 @@ OneShotExecutionResult OneShotDispatchBackend::execute(
                 call.retcode, journal.find(key)};
 
     OperationState final_state = OperationState::reconciling;
-    if (call.retcode == kTradeRetcodeMarketClosed ||
-        call.disposition == BrokerResultDisposition::rejected)
-        final_state = OperationState::rejected;
-    else if (call.disposition == BrokerResultDisposition::accepted)
+    if (call.disposition == BrokerResultDisposition::accepted)
         final_state = OperationState::accepted;
 
     const auto advanced = journal.transition_operation(key, final_state);

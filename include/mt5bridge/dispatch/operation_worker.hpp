@@ -171,10 +171,10 @@ public:
     /// \param key Immutable operation identity.
     /// \param coordinator Coordinator used for authoritative refreshes.
     /// \param collection_request Domains refreshed on each cycle.
-    /// \note A graph from a new process is re-anchored before the first refresh
-    ///       only when it is unbound or scoped to the operation account. A
-    ///       foreign bound graph is rejected without provider collection; the
-    ///       durable descriptor itself remains unchanged.
+    /// \note A graph from a new process must already be bound to the operation
+    ///       account before recovery starts. A foreign or unbound graph is
+    ///       rejected without provider collection; the durable descriptor
+    ///       itself remains unchanged.
     OperationReconciliationWorker(
         OperationJournal &journal, OperationKey key,
         ObservationCoordinator &coordinator,
@@ -299,7 +299,7 @@ private:
             // baseline. A foreign bound graph keeps the durable baseline and
             // is rejected by the owner loop before any provider refresh.
             request.baseline =
-                graph.bound() && graph.account_key() != descriptor->account
+                !graph.bound() || graph.account_key() != descriptor->account
                     ? std::optional<ReconciliationBaseline>(descriptor->baseline)
                     : std::optional<ReconciliationBaseline>(
                           capture_reconciliation_baseline(graph));
@@ -345,14 +345,14 @@ private:
     static ReconciliationRequest rebase_request(ReconciliationRequest request,
                                                 const ObservationGraph &graph) {
         if (request.baseline && !baseline_usable(*request.baseline, graph) &&
-            (!graph.bound() || graph.account_key() == request.baseline->account()))
+            (graph.bound() && graph.account_key() == request.baseline->account()))
             request.baseline = capture_reconciliation_baseline(graph);
         return request;
     }
 
     static bool graph_matches_operation(const ObservationGraph &graph,
                                         const OperationKey &key) {
-        return !graph.bound() || graph.account_key() == key.account;
+        return graph.bound() && graph.account_key() == key.account;
     }
 
     static bool same_window(const std::optional<ObservationWindow> &left,

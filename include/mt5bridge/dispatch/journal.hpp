@@ -93,6 +93,12 @@ struct ReconciliationDescriptor {
                 predicate.kind == ReconciliationPredicateKind::history_deal_absent;
             if (predicate.ticket == 0 && absence)
                 return false;
+            // A broker result has no position ticket. Until the observation
+            // layer can resolve deal.position_id into a position identity,
+            // fail closed instead of creating an unresolvable durable contract.
+            if (predicate.ticket == 0 &&
+                predicate.kind == ReconciliationPredicateKind::position_present)
+                return false;
             switch (predicate.kind) {
             case ReconciliationPredicateKind::active_order_present:
             case ReconciliationPredicateKind::active_order_absent:
@@ -516,6 +522,8 @@ struct OperationRecord {
         }
         if (reconciliation_descriptor &&
             journal_at_least_result_persisted(journal_state) &&
+            !(journal_state == JournalState::result_persisted &&
+              operation_state == OperationState::rejected) &&
             !descriptor_bindings_complete(*reconciliation_descriptor,
                                           reconciliation_bindings))
             return false;
@@ -984,6 +992,42 @@ public:
     }
 
 private:
+    /// \brief Atomically persists a deterministic broker rejection.
+    /// \param key Account and managed-operation identity.
+    /// \param result_payload Complete opaque broker result bytes.
+    /// \return Mutation status and the terminal rejected record.
+    /// \note A deterministic no-effect rejection does not need broker ticket
+    ///       bindings because no post-dispatch identity can have been created.
+    JournalMutationResult persist_rejected_result(
+        const OperationKey &key, std::vector<std::uint8_t> result_payload) {
+        const auto it = records_.find(key);
+        if (it == records_.end())
+            return {JournalMutationStatus::not_found, std::nullopt};
+        if (it->second.journal_state != JournalState::dispatching ||
+            it->second.operation_state != OperationState::submitting ||
+            result_payload.empty())
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+
+        OperationRecord candidate = it->second;
+        candidate.journal_state = JournalState::result_persisted;
+        candidate.operation_state = OperationState::rejected;
+        candidate.result_payload = std::move(result_payload);
+        candidate.reconciliation_bindings.clear();
+        candidate.revision += 1;
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
+        it->second = candidate;
+        return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
     /// \brief Atomically persists a backend result and its identity bindings.
     /// \param key Account and managed-operation identity.
     /// \param result_payload Exact opaque backend result bytes.

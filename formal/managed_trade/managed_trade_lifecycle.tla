@@ -379,8 +379,8 @@ AcknowledgeAmbiguous ==
     /\ brokerOutcome' = "none"
     /\ sendCount' = 0
     /\ obligationSatisfied' =
-        obligationSatisfied \/
-        (closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0)
+        (obligationSatisfied \/
+         (closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0))
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
                     observationEpoch,

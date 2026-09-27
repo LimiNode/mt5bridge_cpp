@@ -144,7 +144,7 @@ BrokerFill(volume) ==
     /\ operationState' = "reconciling"
     /\ resultVolume' = volume
     /\ brokerOutcome' = IF volume = operationVolume THEN "full" ELSE "partial"
-    /\ sendCount' = 1
+    /\ sendCount' = sendCount + 1
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
                     obligationSatisfied, observationEpoch,
@@ -157,7 +157,7 @@ BrokerCancelAccepted ==
     /\ operationState' = "reconciling"
     /\ resultVolume' = 0
     /\ brokerOutcome' = "full"
-    /\ sendCount' = 1
+    /\ sendCount' = sendCount + 1
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
                     obligationSatisfied, observationEpoch,
@@ -170,7 +170,7 @@ BrokerReject ==
     /\ operationState' = "reconciling"
     /\ resultVolume' = 0
     /\ brokerOutcome' = "rejected"
-    /\ sendCount' = 1
+    /\ sendCount' = sendCount + 1
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
                     obligationSatisfied, observationEpoch,
@@ -183,7 +183,7 @@ BrokerUnknown ==
     /\ operationState' = "reconciling"
     /\ resultVolume' = 0
     /\ brokerOutcome' = "unknown"
-    /\ sendCount' = 1
+    /\ sendCount' = sendCount + 1
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
                     obligationSatisfied, observationEpoch,
@@ -223,9 +223,12 @@ ReconcileOpenRejected ==
     /\ operationState = "reconciling"
     /\ brokerOutcome = "rejected"
     /\ operationState' = "rejected"
+    /\ obligationSatisfied' =
+        obligationSatisfied \/
+        (closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0)
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
-                    obligationSatisfied, observationEpoch,
+                    observationEpoch,
                     lastAttemptEpoch, operationId, operationKind,
                     operationVolume, resultVolume, brokerOutcome, sendCount>>
 
@@ -297,8 +300,11 @@ ReconcileCancelFull ==
     /\ brokerOutcome = "full"
     /\ operationState' = "cancelled"
     /\ pendingRemainderVolume' = 0
+    /\ obligationSatisfied' =
+        obligationSatisfied \/
+        (closeObligation /\ openVolume = 0)
     /\ UNCHANGED <<planState, sliceCount, openVolume, closeObligation,
-                    obligationSatisfied, observationEpoch,
+                    observationEpoch,
                     lastAttemptEpoch, operationId, operationKind,
                     operationVolume, resultVolume, brokerOutcome, sendCount>>
 
@@ -339,6 +345,7 @@ ObservePendingRemainder(volume) ==
 CreateCloseObligation ==
     /\ ~closeObligation
     /\ ~obligationSatisfied
+    /\ (openVolume > 0 \/ pendingRemainderVolume > 0)
     /\ closeObligation' = TRUE
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, obligationSatisfied,
@@ -468,6 +475,10 @@ ClosedTradeHasNoExposure ==
 CloseObligationHasReducingState ==
     closeObligation /\ ~obligationSatisfied /\ openVolume > 0 =>
         TradeState \in {"reducing", "closing"}
+
+ZeroExposureObligationIsSatisfied ==
+    closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0 /\
+        operationState \in TerminalOperationStates => obligationSatisfied
 
 Spec == Init /\ [][Next]_vars
 

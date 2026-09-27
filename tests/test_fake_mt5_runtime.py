@@ -595,6 +595,7 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "broker_result")
         self.assertEqual(payload["retcode"], 10018)
         self.assertEqual(payload["disposition"], "rejected")
+        self.assertEqual(payload["reconciliation_bindings"], [])
         self.assertEqual(payload["raw_result"], valid_order_result(10018))
 
     def test_private_dispatch_transport_extracts_result_bindings(self) -> None:

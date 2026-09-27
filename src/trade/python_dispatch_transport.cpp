@@ -270,8 +270,8 @@ std::vector<ReconciliationBinding> extract_bindings(
             broker_ticket = fields.deal;
             break;
         case ReconciliationPredicateKind::position_present:
-            // MqlTradeResult has no assigned position ticket. The position
-            // identity must be learned from later authoritative observations.
+            // Durable unknown position predicates are rejected by descriptor
+            // validation until an observation-derived resolver exists.
             return {};
         case ReconciliationPredicateKind::active_order_absent:
         case ReconciliationPredicateKind::position_absent:

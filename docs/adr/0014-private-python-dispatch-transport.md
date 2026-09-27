@@ -39,10 +39,14 @@ For one `OperationRecord` it performs:
 
 The adapter maps an unknown active/history-order predicate to the validated
 `order` ticket and an unknown history-deal predicate to the validated `deal`
-ticket. A position ticket is not present in `MqlTradeResult`, so a position
-identity remains pending for later authoritative observation. Missing or zero
-required tickets produce no binding; the one-shot backend then rejects the
-atomic result-plus-binding commit and leaves the operation non-resendable.
+ticket. A position ticket is not present in `MqlTradeResult`; durable unknown
+`position_present` predicates are therefore rejected until an observation-
+derived position resolver exists. Missing or zero required order/deal tickets
+produce no binding for a result that still needs reconciliation; the one-shot
+backend then rejects the atomic result-plus-binding commit and leaves the
+operation non-resendable. A deterministic no-effect rejection is different:
+the backend atomically persists the raw result together with terminal
+`rejected`, without requiring a ticket binding.
 
 The adapter never retries. A valid result is returned as broker evidence:
 
@@ -92,4 +96,6 @@ Python exceptions, `None`, malformed results, and account mismatch through the
 test-only method. It also verifies that a validated order ticket is converted
 into durable reconciliation bindings for the descriptor correlations. The fake
 module records the exact number of `order_send` calls and the complete JSON
-result returned by the adapter.
+result returned by the adapter. The native one-shot regression additionally
+covers an unknown-ticket `10018` result with zero `order`/`deal`: raw evidence
+and terminal `rejected` survive recovery without a binding or resend.

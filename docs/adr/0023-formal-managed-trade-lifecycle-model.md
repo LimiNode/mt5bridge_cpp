@@ -29,7 +29,11 @@ tickets:
 - an unknown broker outcome becomes `ambiguous`, and a new decision requires a
   fresh authoritative snapshot before the ambiguous attempt can be retired;
   and
-- each logical operation has at most one broker send.
+- each logical operation has at most one broker send, with the model counter
+  incremented by every broker action so the invariant detects a second send;
+- a close obligation cannot be created without open or pending exposure, and
+  authoritative zero exposure after a terminal/reconciled entry outcome
+  satisfies the obligation.
 
 The model does not represent broker ticket identity, Python result payloads,
 lease fencing, or the C++ journal; those contracts remain covered by the

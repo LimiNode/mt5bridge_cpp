@@ -224,8 +224,8 @@ ReconcileOpenRejected ==
     /\ brokerOutcome = "rejected"
     /\ operationState' = "rejected"
     /\ obligationSatisfied' =
-        obligationSatisfied \/
-        (closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0)
+        (obligationSatisfied \/
+         (closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0))
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, closeObligation,
                     observationEpoch,
@@ -301,8 +301,8 @@ ReconcileCancelFull ==
     /\ operationState' = "cancelled"
     /\ pendingRemainderVolume' = 0
     /\ obligationSatisfied' =
-        obligationSatisfied \/
-        (closeObligation /\ openVolume = 0)
+        (obligationSatisfied \/
+         (closeObligation /\ openVolume = 0))
     /\ UNCHANGED <<planState, sliceCount, openVolume, closeObligation,
                     observationEpoch,
                     lastAttemptEpoch, operationId, operationKind,

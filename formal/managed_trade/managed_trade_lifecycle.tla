@@ -342,10 +342,19 @@ ObservePendingRemainder(volume) ==
                     operationState, operationVolume, resultVolume,
                     brokerOutcome, sendCount>>
 
+OpenMayStillFill ==
+    operationKind = "open" /\
+    operationState \in {"dispatching", "submitting", "reconciling", "ambiguous"}
+
+CanCreateCloseObligation ==
+    openVolume > 0 \/
+    pendingRemainderVolume > 0 \/
+    OpenMayStillFill
+
 CreateCloseObligation ==
     /\ ~closeObligation
     /\ ~obligationSatisfied
-    /\ (openVolume > 0 \/ pendingRemainderVolume > 0)
+    /\ CanCreateCloseObligation
     /\ closeObligation' = TRUE
     /\ UNCHANGED <<planState, sliceCount, openVolume,
                     pendingRemainderVolume, obligationSatisfied,
@@ -479,6 +488,10 @@ CloseObligationHasReducingState ==
 ZeroExposureObligationIsSatisfied ==
     closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0 /\
         operationState \in TerminalOperationStates => obligationSatisfied
+
+UnsatisfiedZeroExposureObligationRequiresOpenMayStillFill ==
+    closeObligation /\ ~obligationSatisfied /\
+        openVolume = 0 /\ pendingRemainderVolume = 0 => OpenMayStillFill
 
 Spec == Init /\ [][Next]_vars
 

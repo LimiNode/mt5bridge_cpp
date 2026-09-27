@@ -19,7 +19,9 @@ tickets:
   can later be observed or explicitly cancelled;
 - a `CloseObligation` is durable desired state, not another operation ID, and
   may be created while an entry operation is still dispatching, submitting,
-  reconciling, or carrying a pending remainder;
+  reconciling, ambiguous, or carrying a pending remainder, even when no fill
+  has been observed yet; this protects against exposure that the in-flight
+  open may still create;
 - closing is satisfied only after reconciled close evidence reduces exposure to
   zero; a partial close leaves the obligation active, while an authoritative
   zero snapshot may satisfy it after an ambiguous attempt;
@@ -31,9 +33,17 @@ tickets:
   and
 - each logical operation has at most one broker send, with the model counter
   incremented by every broker action so the invariant detects a second send;
-- a close obligation cannot be created without open or pending exposure, and
-  authoritative zero exposure after a terminal/reconciled entry outcome
-  satisfies the obligation.
+- a close obligation cannot be created for an idle zero-exposure trade, but it
+  may be created for an in-flight open that can still fill; a rejected open
+  with zero exposure satisfies that obligation, as does authoritative zero
+  exposure after a terminal/reconciled entry outcome.
+
+The TLC invariants also pin down the corresponding regression boundary: an
+unsatisfied obligation with zero observed and pending exposure is only
+reachable while an `OPEN` is still dispatching, submitting, reconciling, or
+ambiguous. Thus the model covers close-request-before-fill, late-fill during
+close handling, and ambiguous-open recovery without making an idle
+zero-exposure trade closable by accident.
 
 The model does not represent broker ticket identity, Python result payloads,
 lease fencing, or the C++ journal; those contracts remain covered by the

@@ -5,4 +5,5 @@
 
 #include <mt5bridge/dispatch/journal.hpp>
 #include <mt5bridge/dispatch/file_journal_store.hpp>
+#include <mt5bridge/dispatch/operation_recovery.hpp>
 #include <mt5bridge/dispatch/operation_worker.hpp>

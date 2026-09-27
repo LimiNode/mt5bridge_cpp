@@ -33,7 +33,16 @@ For one `OperationRecord` it performs:
 4. exactly one `MetaTrader5.order_send(request)` call;
 5. strict validation of all durable `MqlTradeResult` fields, including the
    signed 32-bit `retcode_external` field;
-6. JSON serialization of the complete result as opaque `raw_result` bytes.
+6. extraction of result-derived reconciliation bindings from validated `order`
+   and `deal` tickets for the durable descriptor's unknown identities; and
+7. JSON serialization of the complete result as opaque `raw_result` bytes.
+
+The adapter maps an unknown active/history-order predicate to the validated
+`order` ticket and an unknown history-deal predicate to the validated `deal`
+ticket. A position ticket is not present in `MqlTradeResult`, so a position
+identity remains pending for later authoritative observation. Missing or zero
+required tickets produce no binding; the one-shot backend then rejects the
+atomic result-plus-binding commit and leaves the operation non-resendable.
 
 The adapter never retries. A valid result is returned as broker evidence:
 
@@ -80,5 +89,7 @@ existing runtime admission and GIL path; it is not a production API.
 `10023` and `10028` results, a signed external retcode, a missing-request
 regression, and a nested namedtuple request,
 Python exceptions, `None`, malformed results, and account mismatch through the
-test-only method. The fake module records the exact number of `order_send`
-calls and the complete JSON result returned by the adapter.
+test-only method. It also verifies that a validated order ticket is converted
+into durable reconciliation bindings for the descriptor correlations. The fake
+module records the exact number of `order_send` calls and the complete JSON
+result returned by the adapter.

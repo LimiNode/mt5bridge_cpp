@@ -222,24 +222,68 @@ bool validate_request_echo(PyObject *result) {
 
 /// \brief Validates the durable subset of one `MqlTradeResult`.
 /// \param result Borrowed result dictionary or namedtuple.
-/// \param[out] retcode Receives the validated return code.
+/// \param[out] fields Receives validated result fields needed by the journal.
 /// \return True only when every required result field is well-typed.
-bool validate_result(PyObject *result, std::uint32_t *retcode) {
-    std::uint32_t converted_retcode = 0;
-    std::uint64_t ignored = 0;
+struct ValidatedResultFields {
+    std::uint32_t retcode = 0;
+    std::uint64_t order = 0;
+    std::uint64_t deal = 0;
+};
+
+bool validate_result(PyObject *result, ValidatedResultFields *fields) {
     std::int32_t ignored_external = 0;
     std::uint32_t ignored_request_id = 0;
-    if (!read_uint32(result, "retcode", &converted_retcode) ||
+    if (!read_uint32(result, "retcode", &fields->retcode) ||
         !read_int32(result, "retcode_external", &ignored_external) ||
         !read_uint32(result, "request_id", &ignored_request_id) ||
-        !read_uint64(result, "order", &ignored) ||
-        !read_uint64(result, "deal", &ignored) ||
+        !read_uint64(result, "order", &fields->order) ||
+        !read_uint64(result, "deal", &fields->deal) ||
         !read_double(result, "volume") || !read_double(result, "price") ||
         !read_double(result, "bid") || !read_double(result, "ask") ||
         !read_text(result, "comment") || !validate_request_echo(result))
         return false;
-    *retcode = static_cast<std::uint32_t>(converted_retcode);
     return true;
+}
+
+/// \brief Extracts result-derived broker identities for unknown predicates.
+/// \param record Durable operation carrying the correlation contract.
+/// \param fields Validated order/deal tickets from one broker result.
+/// \return Complete bindings, or empty when a required identity is unavailable.
+std::vector<ReconciliationBinding> extract_bindings(
+    const OperationRecord &record, const ValidatedResultFields &fields) {
+    if (!record.reconciliation_descriptor || !record.reconciliation_descriptor->valid())
+        return {};
+
+    std::vector<ReconciliationBinding> bindings;
+    bindings.reserve(record.reconciliation_descriptor->predicates.size());
+    for (const auto &predicate : record.reconciliation_descriptor->predicates) {
+        if (predicate.ticket != 0)
+            continue;
+
+        std::uint64_t broker_ticket = 0;
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::history_order_present:
+            broker_ticket = fields.order;
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+            broker_ticket = fields.deal;
+            break;
+        case ReconciliationPredicateKind::position_present:
+            // MqlTradeResult has no assigned position ticket. The position
+            // identity must be learned from later authoritative observations.
+            return {};
+        case ReconciliationPredicateKind::active_order_absent:
+        case ReconciliationPredicateKind::position_absent:
+        case ReconciliationPredicateKind::history_order_absent:
+        case ReconciliationPredicateKind::history_deal_absent:
+            return {};
+        }
+        if (broker_ticket == 0)
+            return {};
+        bindings.push_back({predicate.correlation_id, broker_ticket});
+    }
+    return bindings;
 }
 
 /// \brief Converts a result dictionary or namedtuple to a JSON-ready mapping.
@@ -356,16 +400,17 @@ BackendCallResult Mt5PythonDispatchTransport::submit_once(const OperationRecord 
         if (!result || result.get() == Py_None)
             return transport_failure();
 
-        std::uint32_t retcode = 0;
-        if (!validate_result(result.get(), &retcode))
+        ValidatedResultFields fields;
+        if (!validate_result(result.get(), &fields))
             return transport_failure();
         const auto raw = serialize_result(result.get());
         if (!raw || raw->empty())
             return transport_failure();
         return {BackendCallStatus::broker_result,
-                deterministic_rejection(retcode) ? BrokerResultDisposition::rejected
-                                                 : BrokerResultDisposition::reconciling,
-                retcode, *raw};
+                deterministic_rejection(fields.retcode)
+                    ? BrokerResultDisposition::rejected
+                    : BrokerResultDisposition::reconciling,
+                fields.retcode, *raw, extract_bindings(record, fields)};
     } catch (...) {
         return transport_failure();
     }

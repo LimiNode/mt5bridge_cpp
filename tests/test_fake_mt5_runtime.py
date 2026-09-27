@@ -426,13 +426,18 @@ _FAKE_TRADE_RESULT = namedtuple(
 
 
 def valid_order_result(
-    retcode: int, *, namedtuple_result: bool = False, retcode_external: int = 0
+    retcode: int,
+    *,
+    namedtuple_result: bool = False,
+    retcode_external: int = 0,
+    order: int = 0,
+    deal: int = 0,
 ) -> dict[str, object] | object:
     """Builds the complete MqlTradeResult-shaped payload required by the adapter."""
     values: dict[str, object] = {
         "retcode": retcode,
-        "deal": 0,
-        "order": 0,
+        "deal": deal,
+        "order": order,
         "volume": 0.01,
         "price": 1.1,
         "bid": 1.099,
@@ -591,6 +596,21 @@ class FakeMt5RuntimeTests(unittest.TestCase):
         self.assertEqual(payload["retcode"], 10018)
         self.assertEqual(payload["disposition"], "rejected")
         self.assertEqual(payload["raw_result"], valid_order_result(10018))
+
+    def test_private_dispatch_transport_extracts_result_bindings(self) -> None:
+        """Validated order and deal tickets become reconciliation bindings."""
+        result = valid_order_result(10009, order=81234, deal=45678)
+        fake = fake_module([], order_response=result)
+        status, payload, error = self.dispatch(fake)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(payload["status"], "broker_result")
+        self.assertEqual(
+            payload["reconciliation_bindings"],
+            [
+                {"correlation_id": 7001, "broker_ticket": 81234},
+                {"correlation_id": 7002, "broker_ticket": 45678},
+            ],
+        )
 
     def test_private_dispatch_transport_seeds_reconciliation_for_success(self) -> None:
         """Successful or partial results seed reconciliation instead of final fill."""

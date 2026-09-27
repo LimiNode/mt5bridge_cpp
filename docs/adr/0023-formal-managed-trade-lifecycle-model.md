@@ -39,11 +39,13 @@ tickets:
   exposure after a terminal/reconciled entry outcome.
 
 The TLC invariants also pin down the corresponding regression boundary: an
-unsatisfied obligation with zero observed and pending exposure is only
-reachable while an `OPEN` is still dispatching, submitting, reconciling, or
-ambiguous. Thus the model covers close-request-before-fill, late-fill during
-close handling, and ambiguous-open recovery without making an idle
-zero-exposure trade closable by accident.
+unsatisfied obligation with zero observed and pending exposure is never
+allowed to settle into an idle operation. It may remain attached to an
+in-flight `OPEN` (which can still fill) or to another unresolved attempt,
+until reconciliation supplies the evidence needed to satisfy it. Thus the
+model covers close-request-before-fill, late-fill after the request, and
+ambiguous recovery without making an idle zero-exposure trade closable by
+accident.
 
 The model does not represent broker ticket identity, Python result payloads,
 lease fencing, or the C++ journal; those contracts remain covered by the

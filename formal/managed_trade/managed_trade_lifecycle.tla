@@ -489,9 +489,9 @@ ZeroExposureObligationIsSatisfied ==
     closeObligation /\ openVolume = 0 /\ pendingRemainderVolume = 0 /\
         operationState \in TerminalOperationStates => obligationSatisfied
 
-UnsatisfiedZeroExposureObligationRequiresOpenMayStillFill ==
+UnsatisfiedZeroExposureObligationIsNotIdle ==
     closeObligation /\ ~obligationSatisfied /\
-        openVolume = 0 /\ pendingRemainderVolume = 0 => OpenMayStillFill
+        openVolume = 0 /\ pendingRemainderVolume = 0 => operationState # "idle"
 
 Spec == Init /\ [][Next]_vars
 

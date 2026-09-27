@@ -12,8 +12,6 @@
 #include <mt5bridge/abi.h>
 #include <mt5bridge/market.hpp>
 #include <mt5bridge/trade.hpp>
-#include <mt5bridge/observation.hpp>
-#include <mt5bridge/reconciliation/engine.hpp>
-#include <mt5bridge/reconciliation/operation_worker.hpp>
+#include <mt5bridge/reconciliation.hpp>
 #include <mt5bridge/dispatch.hpp>
 #include <mt5bridge/client.hpp>

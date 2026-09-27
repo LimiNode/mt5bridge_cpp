@@ -103,8 +103,8 @@ int main() {
 
 The `mt5bridge::Client` header dynamically loads the DLL and does not require
 Python, Jansson, or an import library. The plain C declarations are available
-in `mt5bridge/abi.h`; high-volume tick/rate POD contracts are in
-`mt5bridge/data.h`.
+in `mt5bridge/abi.h`; market-data and trade POD contracts are grouped under
+the `mt5bridge/market.h` and `mt5bridge/trade.h` umbrellas.
 
 See the `examples` directory for runnable DLL-loading examples and
 [`docs/architecture.md`](docs/architecture.md) for the layering and migration

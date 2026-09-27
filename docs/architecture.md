@@ -89,37 +89,44 @@ include/
 └── mt5bridge/
     ├── abi.h
     ├── client.hpp
+    ├── market.h
     ├── market.hpp
-    ├── market/data.h
+    ├── market/{common,ticks,rates,realtime}.h
+    ├── trade.h
     ├── trade.hpp
-    ├── trade/observation.h
-    ├── observation.hpp
-    ├── observation/{graph,coordinator,environment_consistency,worker}.hpp
-    ├── reconciliation/{engine,operation_worker}.hpp
-    └── dispatch/{journal,file_journal_store}.hpp
+    ├── trade/{common,account,symbol,order_check,orders,positions,deals}.h
+    ├── reconciliation.hpp
+    ├── reconciliation/{graph,engine,coordinator,worker,
+    │                  environment_consistency}.hpp
+    ├── dispatch.hpp
+    └── dispatch/{journal,file_journal_store,operation_worker}.hpp
 
 src/
-└── runtime/
-    └── mt5_bridge.cpp
+├── bridge/mt5_bridge.cpp
+├── runtime/{runtime_lane.*,python_ref.hpp}
+├── trade/python_dispatch_transport.*
+└── dispatch/{file_journal_store,one_shot_backend}.*
 ```
 
 The public dispatch domain is exposed through `dispatch.hpp` and its focused
 headers under `dispatch/`. The latter is implemented by the Python-free
-`src/runtime/file_journal_store.cpp` source in the separate
+`src/dispatch/file_journal_store.cpp` source in the separate
 `mt5bridge::journal` target. The private one-shot execution seam lives in
-`src/runtime/one_shot_backend.hpp/.cpp` and is built as
+`src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific
-`python_dispatch_transport.hpp/.cpp` adapter is compiled only into the DLL.
+`src/trade/python_dispatch_transport.hpp/.cpp` adapter is compiled only into
+the DLL. CPython-backed components share the narrow private
+`src/runtime/python_ref.hpp` ownership wrapper instead of defining local
+reference-counting helpers.
 Neither private seam is part of the consumer SDK.
 
 Everything below `include/mt5bridge*` is consumer-facing SDK/API. The source
-under `src/runtime/` is implementation owned by the native targets and must
-not be included by applications. When the runtime grows, private `.hpp` and
-`.cpp` files should live side by side in `src/runtime/`; do not create a
-second private include tree merely to mirror the public one. Keep
-`src/runtime/mt5_bridge.cpp` as one implementation unit until a real
-responsibility boundary justifies a split; directory shape alone is not a
-reason to add speculative wrappers or adapters.
+under `src/` is implementation owned by native targets and must not be
+included by applications. Private `.hpp` and `.cpp` files should live side by
+side in the directory owning their responsibility; do not create a second
+private include tree merely to mirror the public one. The bridge adapter is
+kept separate from runtime, market, trade, and dispatch implementation so new
+domain logic does not accumulate in the exported-entry translation unit.
 
 Bulk market-data contracts and MT5 recovery behavior are specified separately
 in [market-data-api.md](market-data-api.md) and [mt5-quirks.md](mt5-quirks.md).
@@ -146,18 +153,16 @@ The managed trade identity, close-obligation, scheduling, and exit-policy
 boundaries are specified in [ADR-0006](adr/0006-managed-trade-lifecycle.md).
 The read-only account-scoped evidence graph is specified in
 [ADR-0007](adr/0007-observation-graph.md) and exposed by
-`include/mt5bridge/observation/graph.hpp` (with the old path retained as a
-forwarding header).
+`include/mt5bridge/reconciliation/graph.hpp`.
 The observation-only predicate evaluator is specified in
 [ADR-0008](adr/0008-observation-reconciliation.md) and exposed by
-`include/mt5bridge/reconciliation/engine.hpp` (with the old path retained as a
-forwarding header).
+`include/mt5bridge/reconciliation/engine.hpp`.
 The synchronous observation coordinator and pre-dispatch consistency gate are
 specified in [ADR-0009](adr/0009-observation-coordinator.md) and exposed by
-`include/mt5bridge/observation/coordinator.hpp`.
+`include/mt5bridge/reconciliation/coordinator.hpp`.
 The bounded cross-view environment policy is specified in
 [ADR-0010](adr/0010-environment-consistency.md) and exposed by
-`include/mt5bridge/observation/environment_consistency.hpp`. It checks sequential
+`include/mt5bridge/reconciliation/environment_consistency.hpp`. It checks sequential
 observation batches for account continuity, direct identity-link conflicts,
 and a repeated stable evidence signature; it does not claim that MT5 supplied
 an atomic snapshot.
@@ -177,6 +182,20 @@ private and must preserve the same account and fencing checks. The embedded
 Python implementation of that seam is specified in
 [ADR-0014](adr/0014-private-python-dispatch-transport.md).
 The bridge never retries a side-effecting order implicitly.
+
+The dispatch/recovery interleavings are also specified by the finite TLC model
+in [ADR-0021](adr/0021-formal-dispatch-recovery-model.md). It checks the
+non-resendable barrier, writer/epoch fencing, atomic result-plus-binding
+persistence, and terminal-evidence requirements across crash/restart paths;
+the pinned TLC run is part of CI rather than a substitute for the focused C++
+tests.
+The independent reconciliation-evidence ordering is specified by the finite
+model in [ADR-0022](adr/0022-formal-reconciliation-evidence-model.md). It keeps
+active orders, positions, history orders, and history deals as independently
+refreshable views; stale domains, event gaps, account/graph changes, and
+restart re-anchoring therefore cannot manufacture a `confirmed` result. This
+model is also checked by the pinned TLC CI job and remains separate from the
+dispatch model.
 The planned single-file runtime distribution is fixed in
 [ADR-0002](adr/0002-self-contained-runtime-dll.md): a Python-free bootstrap DLL
 embeds a verified payload, extracts it to a content-addressed per-user cache,

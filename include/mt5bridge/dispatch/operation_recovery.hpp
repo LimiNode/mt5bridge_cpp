@@ -3,7 +3,7 @@
 /// \file dispatch/operation_recovery.hpp
 /// \brief Defines fail-closed classification of durable operation recovery.
 
-#include <mt5bridge/dispatch/journal.hpp>
+#include "journal.hpp"
 
 #include <vector>
 

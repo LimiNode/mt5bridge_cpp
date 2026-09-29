@@ -3,7 +3,7 @@
 /// \file reconciliation/environment_consistency.hpp
 /// \brief Defines bounded cross-view consistency checks for MT5 observations.
 
-#include <mt5bridge/reconciliation/coordinator.hpp>
+#include "coordinator.hpp"
 
 #include <algorithm>
 #include <array>

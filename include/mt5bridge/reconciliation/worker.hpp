@@ -3,7 +3,7 @@
 /// \file reconciliation/worker.hpp
 /// \brief Defines the caller-driven bounded reconciliation worker.
 
-#include <mt5bridge/reconciliation/coordinator.hpp>
+#include "coordinator.hpp"
 
 #include <cstdint>
 #include <optional>

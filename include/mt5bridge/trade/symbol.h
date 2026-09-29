@@ -3,7 +3,7 @@
 /// \file trade/symbol.h
 /// \brief Declares symbol execution and sizing capability observations.
 
-#include <mt5bridge/trade/common.h>
+#include "common.h"
 
 /// \def MT5BRIDGE_SYMBOL_KNOWN_TRADE_MODE
 /// \brief Bit identifying a present symbol trade mode field.

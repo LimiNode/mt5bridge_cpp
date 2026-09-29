@@ -3,7 +3,7 @@
 /// \file dispatch/operation_worker.hpp
 /// \brief Defines journal-aware operation reconciliation.
 
-#include <mt5bridge/dispatch/operation_recovery.hpp>
+#include "operation_recovery.hpp"
 #include <mt5bridge/reconciliation/worker.hpp>
 
 #include <algorithm>

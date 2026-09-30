@@ -3,7 +3,7 @@
 /// \file market/realtime.h
 /// \brief Declares realtime tick subscription and delivery contracts.
 
-#include <mt5bridge/market/ticks.h>
+#include "ticks.h"
 
 /// \brief Enables tick-batch delivery for a subscription.
 #define MT5_DELIVERY_TICK_BATCH 0x01u

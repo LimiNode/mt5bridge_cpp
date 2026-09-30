@@ -3,7 +3,7 @@
 /// \file trade/orders.h
 /// \brief Declares active and historical order observation contracts.
 
-#include <mt5bridge/trade/common.h>
+#include "common.h"
 
 /// \name Order snapshot known-field masks
 /// \brief Bits distinguish an absent MT5 field from a valid zero value.

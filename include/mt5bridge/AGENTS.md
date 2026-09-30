@@ -24,6 +24,11 @@ remain self-contained and none pulls in the heavy runtime.
 - `trade/*.h` contains typed account, symbol, order-check, order, position, and
   deal PODs. Use `known_fields` masks to distinguish an absent MT5 field from
   a valid zero; never infer trading permissions from a related enum.
+- Include public headers by ownership: an umbrella includes its own domain
+  descendants with relative quotes, a header includes another header in the
+  same domain with relative quotes, and cross-domain or consumer-facing
+  dependencies use the canonical `<mt5bridge/...>` path. Do not use `..`
+  traversal in installed public headers.
 
 When the ABI changes, update the C++ examples, `python/mt5bridge_py.py`, and
 `docs/architecture.md` in the same change.

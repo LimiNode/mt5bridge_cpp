@@ -3,7 +3,7 @@
 /// \file dispatch/file_journal_store.hpp
 /// \brief Defines the Windows-backed durable operation journal store.
 
-#include <mt5bridge/dispatch/journal.hpp>
+#include "journal.hpp"
 
 #include <filesystem>
 #include <memory>

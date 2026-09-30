@@ -3,7 +3,7 @@
 /// \file market/rates.h
 /// \brief Declares rate-history data, coverage evidence, and query operations.
 
-#include <mt5bridge/market/common.h>
+#include "common.h"
 
 #ifdef __cplusplus
 extern "C" {

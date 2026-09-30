@@ -3,7 +3,7 @@
 /// \file market/ticks.h
 /// \brief Declares tick-history data and query operations.
 
-#include <mt5bridge/market/common.h>
+#include "common.h"
 
 #ifdef __cplusplus
 extern "C" {

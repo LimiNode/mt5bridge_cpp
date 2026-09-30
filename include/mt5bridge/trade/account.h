@@ -3,7 +3,7 @@
 /// \file trade/account.h
 /// \brief Declares account identity and capability observations.
 
-#include <mt5bridge/trade/common.h>
+#include "common.h"
 
 /// \def MT5BRIDGE_ACCOUNT_KNOWN_SERVER
 /// \brief Bit identifying a present account server field.

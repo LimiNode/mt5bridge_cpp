@@ -4,7 +4,7 @@
 /// \brief Defines synchronous observation collection and pre-dispatch checks.
 
 #include <mt5bridge/client.hpp>
-#include <mt5bridge/reconciliation/engine.hpp>
+#include "engine.hpp"
 
 #include <cstdint>
 #include <optional>

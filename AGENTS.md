@@ -41,6 +41,12 @@ may load it dynamically; they must not depend on private C++ or Python objects.
   responsibility directory. Private headers stay beside their `.cpp` files;
   do not create a parallel private include tree or split a single
   implementation unit without a real responsibility boundary.
+- Use canonical include paths by ownership: public umbrellas include their
+  descendants with relative quotes (for example, `"dispatch/journal.hpp"`),
+  public headers use relative quotes for headers in the same domain and
+  `<mt5bridge/...>` for cross-domain or consumer-facing dependencies, and
+  private implementation files include sibling private headers with quotes.
+  Never use `..` traversal in public headers.
 - Use lowercase `snake_case` for project source/module files and directories,
   including C++, TLA+, and test files; reserve `CamelCase` for C++ type names.
   Repository-standard metadata such as `README.md`, `AGENTS.md`, and

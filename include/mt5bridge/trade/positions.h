@@ -3,7 +3,7 @@
 /// \file trade/positions.h
 /// \brief Declares active-position observation contracts.
 
-#include <mt5bridge/trade/common.h>
+#include "common.h"
 
 /// \name Position snapshot known-field masks
 /// \brief Bits distinguish an absent MT5 field from a valid zero value.

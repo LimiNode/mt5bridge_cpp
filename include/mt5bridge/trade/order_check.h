@@ -3,7 +3,7 @@
 /// \file trade/order_check.h
 /// \brief Declares the advisory order-check request and result ABI.
 
-#include <mt5bridge/trade/common.h>
+#include "common.h"
 
 #ifdef __cplusplus
 extern "C" {

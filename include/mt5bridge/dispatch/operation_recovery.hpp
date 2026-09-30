@@ -46,7 +46,7 @@ struct OperationRecoveryResult {
 ///
 /// This coordinator never resends and never mutates recovered records. Records
 /// at or beyond `dispatching` are explicitly reconciliation-only, including a
-/// crash between durable `submitting` and the backend call.
+/// crash after the durable `dispatching` barrier and before the backend call.
 class OperationRecoveryCoordinator {
 public:
     /// \brief Recovers and classifies the complete journal atomically.

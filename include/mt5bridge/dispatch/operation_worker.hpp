@@ -4,6 +4,7 @@
 /// \brief Defines journal-aware operation reconciliation.
 
 #include "journal.hpp"
+#include "operation_recovery.hpp" // Preserve the pre-extraction public include contract.
 #include <mt5bridge/reconciliation/worker.hpp>
 
 #include <algorithm>

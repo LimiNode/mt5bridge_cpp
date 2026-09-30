@@ -9,10 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
-#include <map>
 #include <optional>
-#include <utility>
 #include <vector>
 
 namespace mt5bridge {

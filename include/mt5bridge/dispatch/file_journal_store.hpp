@@ -3,7 +3,8 @@
 /// \file dispatch/file_journal_store.hpp
 /// \brief Defines the Windows-backed durable operation journal store.
 
-#include "journal.hpp"
+#include "journal_store.hpp"
+#include "lease.hpp"
 
 #include <filesystem>
 #include <memory>

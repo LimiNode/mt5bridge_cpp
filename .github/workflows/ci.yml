@@ -35,7 +35,7 @@ jobs:
           curl --fail --silent --show-error --location --retry 3 \
             --output tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo 'AB4694601923FD5AC06452ABBF847C366A5054A3D739552085EDD6ED986C29EC  tla2tools.jar' \
+          echo 'E6683A256BAB10D44F0E5C22063552E188B7D4A2E0AECD44E76F0B438046F3B5  tla2tools.jar' \
             | sha256sum --check
       - name: Check dispatch recovery model
         run: |
@@ -59,7 +59,7 @@ jobs:
           curl --fail --silent --show-error --location --retry 3 \
             --output tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo 'AB4694601923FD5AC06452ABBF847C366A5054A3D739552085EDD6ED986C29EC  tla2tools.jar' \
+          echo 'E6683A256BAB10D44F0E5C22063552E188B7D4A2E0AECD44E76F0B438046F3B5  tla2tools.jar' \
             | sha256sum --check
       - name: Check reconciliation evidence model
         run: |
@@ -86,7 +86,7 @@ jobs:
           curl --fail --silent --show-error --location --retry 3 \
             --output tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo 'AB4694601923FD5AC06452ABBF847C366A5054A3D739552085EDD6ED986C29EC  tla2tools.jar' \
+          echo 'E6683A256BAB10D44F0E5C22063552E188B7D4A2E0AECD44E76F0B438046F3B5  tla2tools.jar' \
             | sha256sum --check
       - name: Check managed trade lifecycle model
         run: |

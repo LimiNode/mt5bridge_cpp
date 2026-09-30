@@ -22,6 +22,159 @@ class OneShotDispatchBackend;
 /// \brief Contains the lightweight C++ consumer API.
 namespace mt5bridge {
 
+/// \brief Verifies descriptor provenance against the graph used for admission.
+/// \param descriptor Durable descriptor to validate.
+/// \param graph Graph whose current revision is about to be admitted.
+/// \return True only when the baseline is exact and known-ticket state agrees.
+inline bool reconciliation_descriptor_matches_graph(
+    const ReconciliationDescriptor &descriptor, const ObservationGraph &graph) {
+    if (!descriptor.valid() || !graph.bound() ||
+        descriptor.account != graph.account_key() ||
+        descriptor.baseline.account() != graph.account_key() ||
+        descriptor.baseline.graph_instance_id() != graph.instance_id() ||
+        descriptor.baseline.graph_revision() != graph.revision() ||
+        descriptor.baseline.active_orders_revision() !=
+            graph.domain_revision(ObservationDomain::active_orders) ||
+        descriptor.baseline.positions_revision() !=
+            graph.domain_revision(ObservationDomain::positions) ||
+        descriptor.baseline.history_orders_revision() !=
+            graph.domain_revision(ObservationDomain::history_orders) ||
+        descriptor.baseline.history_deals_revision() !=
+            graph.domain_revision(ObservationDomain::history_deals))
+        return false;
+
+    const auto contains = [](const auto &values, std::uint64_t ticket) {
+        for (const auto &value : values) {
+            if (value.ticket == ticket)
+                return true;
+        }
+        return false;
+    };
+    const auto active_orders = graph.active_orders();
+    const auto positions = graph.positions();
+    const auto history_orders = graph.history_orders();
+    const auto history_deals = graph.history_deals();
+    for (const auto &predicate : descriptor.predicates) {
+        const bool baseline_present = *predicate.baseline_present;
+        if (!baseline_present) {
+            switch (predicate.kind) {
+            case ReconciliationPredicateKind::active_order_present:
+            case ReconciliationPredicateKind::active_order_absent:
+                if (graph.domain_revision(ObservationDomain::active_orders) == 0)
+                    return false;
+                break;
+            case ReconciliationPredicateKind::position_present:
+            case ReconciliationPredicateKind::position_absent:
+                if (graph.domain_revision(ObservationDomain::positions) == 0)
+                    return false;
+                break;
+            case ReconciliationPredicateKind::history_order_present:
+            case ReconciliationPredicateKind::history_order_absent:
+                if (!predicate.history_window ||
+                    !graph.history_orders_covered_at(
+                        *predicate.history_window,
+                        descriptor.baseline.graph_revision()))
+                    return false;
+                break;
+            case ReconciliationPredicateKind::history_deal_present:
+            case ReconciliationPredicateKind::history_deal_absent:
+                if (!predicate.history_window ||
+                    !graph.history_deals_covered_at(
+                        *predicate.history_window,
+                        descriptor.baseline.graph_revision()))
+                    return false;
+                break;
+            }
+        }
+        if (predicate.ticket == 0)
+            continue;
+        bool present = false;
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::active_order_absent:
+            present = contains(active_orders, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::position_present:
+        case ReconciliationPredicateKind::position_absent:
+            present = contains(positions, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::history_order_present:
+        case ReconciliationPredicateKind::history_order_absent:
+            present = contains(history_orders, predicate.ticket);
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+        case ReconciliationPredicateKind::history_deal_absent:
+            present = contains(history_deals, predicate.ticket);
+            break;
+        }
+        if (present != baseline_present)
+            return false;
+    }
+    return true;
+}
+
+/// \brief Tests whether a descriptor contains broker identities still unknown at dispatch.
+/// \param descriptor Durable post-dispatch evidence contract.
+/// \return True when at least one predicate needs a result-derived binding.
+inline bool descriptor_requires_result_bindings(const ReconciliationDescriptor &descriptor) {
+    return std::any_of(descriptor.predicates.begin(), descriptor.predicates.end(),
+                       [](const ReconciliationPredicate &predicate) {
+                           return predicate.ticket == 0;
+                       });
+}
+
+/// \brief Builds the effective observation scope for one dispatch descriptor.
+/// \param descriptor Durable predicates whose evidence must be fresh.
+/// \param caller_scope Caller-requested admission scope.
+/// \return Union scope, or empty when either input is malformed.
+inline std::optional<EnvironmentConsistencyRequest> effective_dispatch_scope(
+    const ReconciliationDescriptor &descriptor,
+    EnvironmentConsistencyRequest caller_scope) {
+    if (!descriptor.valid() || !caller_scope.valid())
+        return std::nullopt;
+
+    const auto extend_window = [](std::optional<ObservationWindow> *target,
+                                  const std::optional<ObservationWindow> &source) {
+        if (!source)
+            return;
+        if (!*target) {
+            *target = *source;
+            return;
+        }
+        target->emplace(ObservationWindow{
+            (std::min)((*target)->from_msc, source->from_msc),
+            (std::max)((*target)->to_msc, source->to_msc)});
+    };
+
+    for (const auto &predicate : descriptor.predicates) {
+        switch (predicate.kind) {
+        case ReconciliationPredicateKind::active_order_present:
+        case ReconciliationPredicateKind::active_order_absent:
+            caller_scope.require_active_orders = true;
+            break;
+        case ReconciliationPredicateKind::position_present:
+        case ReconciliationPredicateKind::position_absent:
+            caller_scope.require_positions = true;
+            break;
+        case ReconciliationPredicateKind::history_order_present:
+        case ReconciliationPredicateKind::history_order_absent:
+            if (!predicate.history_window)
+                return std::nullopt;
+            extend_window(&caller_scope.history_orders_window, predicate.history_window);
+            break;
+        case ReconciliationPredicateKind::history_deal_present:
+        case ReconciliationPredicateKind::history_deal_absent:
+            if (!predicate.history_window)
+                return std::nullopt;
+            extend_window(&caller_scope.history_deals_window, predicate.history_window);
+            break;
+        }
+    }
+    return caller_scope.valid() ? std::optional<EnvironmentConsistencyRequest>(
+                                     std::move(caller_scope))
+                                : std::nullopt;
+}
+
 /// \enum JournalMutationStatus
 /// \brief Reports the result of a journal mutation or recovery operation.
 enum class JournalMutationStatus {

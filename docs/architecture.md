@@ -109,8 +109,9 @@ src/
 ```
 
 The public dispatch domain is exposed through `dispatch.hpp` and its focused
-headers under `dispatch/`. The latter is implemented by the Python-free
-`src/dispatch/file_journal_store.cpp` source in the separate
+headers under `dispatch/`. The durable admission and file-store contracts are
+implemented by the Python-free `src/dispatch/admission.cpp` and
+`src/dispatch/file_journal_store.cpp` sources in the separate
 `mt5bridge::journal` target. The private one-shot execution seam lives in
 `src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific

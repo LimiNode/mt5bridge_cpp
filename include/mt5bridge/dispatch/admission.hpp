@@ -1,0 +1,149 @@
+#pragma once
+
+/// \file dispatch/admission.hpp
+/// \brief Defines the durable pre-side-effect dispatch admission contract.
+
+#include "journal_types.hpp"
+#include "lease.hpp"
+
+#include <mt5bridge/reconciliation/environment_consistency.hpp>
+#include <mt5bridge/reconciliation/graph.hpp>
+
+#include <cstdint>
+#include <optional>
+#include <utility>
+
+namespace mt5bridge {
+
+class OperationJournal;
+
+/// \struct DispatchAdmissionRequest
+/// \brief Fresh evidence and blockers checked immediately before the barrier.
+struct DispatchAdmissionRequest {
+    AccountKey current_account; ///< Account read immediately before admission.
+    std::optional<EnvironmentConsistencyProof>
+        environment_proof; ///< Revision-bound topology proof.
+    bool unresolved_operation = false; ///< Another operation is unresolved.
+    bool event_gap = false; ///< A hint stream requires a fresh authoritative read.
+};
+
+/// \enum DispatchAdmissionStatus
+/// \brief Reports why the durable dispatch barrier did or did not open.
+enum class DispatchAdmissionStatus {
+    admitted,              ///< `dispatching` was durably committed.
+    invalid_request,       ///< Identity or admission evidence is malformed.
+    operation_not_found,   ///< This owner loop has not created/recovered the key.
+    invalid_state,         ///< The operation is not at the pre-side-effect edge.
+    environment_not_ready, ///< The bounded topology proof is not consistent.
+    account_mismatch,      ///< Current/evidence account differs from operation key.
+    unresolved_operation,  ///< A prior operation blocks new dispatch.
+    event_gap,             ///< An incomplete event hint stream blocks dispatch.
+    lease_not_held,        ///< The fencing lease is absent or has no token.
+    conflict,              ///< A stale owner lost the durable admission race.
+    not_durable,           ///< The dispatching barrier could not be committed.
+};
+
+/// \struct DispatchPermit
+/// \brief Non-resendable barrier evidence returned before a future backend call.
+struct DispatchPermit {
+public:
+    DispatchPermit(const DispatchPermit &) = delete;
+    DispatchPermit &operator=(const DispatchPermit &) = delete;
+
+    /// \brief Transfers the one-shot permit and invalidates the source.
+    /// \param other Permit whose capability is transferred.
+    DispatchPermit(DispatchPermit &&other)
+        : key_(std::move(other.key_)),
+          fencing_token_(std::exchange(other.fencing_token_, 0)),
+          journal_revision_(std::exchange(other.journal_revision_, 0)) {}
+
+    /// \brief Transfers a one-shot permit and invalidates the source.
+    /// \param other Permit whose capability is transferred.
+    DispatchPermit &operator=(DispatchPermit &&other) {
+        if (this != &other) {
+            key_ = std::move(other.key_);
+            fencing_token_ = std::exchange(other.fencing_token_, 0);
+            journal_revision_ = std::exchange(other.journal_revision_, 0);
+        }
+        return *this;
+    }
+
+    /// \brief Tests whether the permit carries usable barrier evidence.
+    /// \return True when identity, token, and revision are all present.
+    bool valid() const {
+        return key_.valid() && fencing_token_ != 0 && journal_revision_ != 0;
+    }
+
+    /// \brief Returns the protected operation identity.
+    /// \return Account-scoped operation key.
+    const OperationKey &key() const { return key_; }
+
+    /// \brief Returns the committed fencing token.
+    /// \return Non-zero writer token.
+    std::uint64_t fencing_token() const { return fencing_token_; }
+
+    /// \brief Returns the journal revision at the durable barrier.
+    /// \return Monotonic operation revision.
+    std::uint64_t journal_revision() const { return journal_revision_; }
+
+private:
+    DispatchPermit(OperationKey key, std::uint64_t fencing_token,
+                   std::uint64_t journal_revision)
+        : key_(std::move(key)), fencing_token_(fencing_token),
+          journal_revision_(journal_revision) {}
+
+    static DispatchPermit create(OperationKey key, std::uint64_t fencing_token,
+                                 std::uint64_t journal_revision) {
+        return DispatchPermit(std::move(key), fencing_token, journal_revision);
+    }
+
+    OperationKey key_;
+    std::uint64_t fencing_token_ = 0;
+    std::uint64_t journal_revision_ = 0;
+
+    friend class DispatchAdmissionBarrier;
+};
+
+/// \struct DispatchAdmissionResult
+/// \brief Reports the pre-side-effect admission decision.
+struct DispatchAdmissionResult {
+    DispatchAdmissionStatus status = DispatchAdmissionStatus::invalid_request;
+    std::optional<DispatchPermit> permit;
+
+    /// \brief Tests whether a durable non-resendable barrier was opened.
+    /// \return True only when a valid permit is present.
+    bool admitted() const {
+        return status == DispatchAdmissionStatus::admitted && permit.has_value() &&
+               permit->valid();
+    }
+};
+
+/// \class DispatchAdmissionBarrier
+/// \brief Opens the durable `dispatching` barrier without invoking `order_send`.
+class DispatchAdmissionBarrier {
+public:
+    /// \brief Binds the barrier to one owner-loop journal, graph, and scope.
+    /// \param journal Journal that owns the operation state transitions.
+    /// \param graph Current graph whose revision must match the proof.
+    /// \param required_scope Caller-requested domains and history range. The
+    /// descriptor predicates are merged into this scope before proof checking.
+    DispatchAdmissionBarrier(OperationJournal &journal, const ObservationGraph &graph,
+                             EnvironmentConsistencyRequest required_scope);
+
+    /// \brief Verifies all pre-side-effect invariants and commits `dispatching`.
+    /// \param key Account-scoped operation to admit.
+    /// \param request Fresh account, environment, and blocker evidence.
+    /// \param lease Continuously-held single-writer/fencing ownership.
+    /// \return Admission status and a permit for a future internal backend call.
+    /// \note This method never calls or authorizes a public `order_send` API.
+    DispatchAdmissionResult admit(const OperationKey &key,
+                                  const DispatchAdmissionRequest &request,
+                                  const SingleWriterLease &lease);
+
+private:
+    OperationJournal &journal_;
+    const ObservationGraph &graph_;
+    EnvironmentConsistencyRequest required_scope_;
+};
+
+} // namespace mt5bridge

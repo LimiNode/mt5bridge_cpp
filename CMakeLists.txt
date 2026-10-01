@@ -53,6 +53,14 @@ target_include_directories(mt5bridge_runtime_lane PRIVATE
                            ${PROJECT_SOURCE_DIR}/src/runtime)
 add_library(mt5bridge::runtime_lane ALIAS mt5bridge_runtime_lane)
 
+# Private logical managed-trade state stays separate from the public SDK and
+# from the CPython-backed transport.  It owns durable lifecycle decisions but
+# performs no broker or interpreter calls.
+add_library(mt5bridge_managed_trade STATIC src/trade/managed_trade.cpp)
+target_include_directories(mt5bridge_managed_trade PRIVATE
+                           ${PROJECT_SOURCE_DIR}/src/trade)
+add_library(mt5bridge::managed_trade ALIAS mt5bridge_managed_trade)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -153,6 +161,14 @@ if(BUILD_TESTING)
     target_link_libraries(mt5bridge_runtime_lane_test PRIVATE mt5bridge::runtime_lane)
     add_test(NAME mt5bridge_runtime_lane
              COMMAND mt5bridge_runtime_lane_test)
+    add_executable(mt5bridge_managed_trade_state_test
+                   tests/managed_trade_state_test.cpp)
+    target_include_directories(mt5bridge_managed_trade_state_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/trade)
+    target_link_libraries(mt5bridge_managed_trade_state_test PRIVATE
+                          mt5bridge::managed_trade)
+    add_test(NAME mt5bridge_managed_trade_state
+             COMMAND mt5bridge_managed_trade_state_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)

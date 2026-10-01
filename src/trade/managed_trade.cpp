@@ -9,6 +9,37 @@
 namespace mt5bridge::managed_trade {
 namespace {
 
+bool valid_plan_state(PlanState state) {
+    return state == PlanState::running || state == PlanState::stopped;
+}
+
+bool valid_operation_kind(OperationKind kind) {
+    return kind == OperationKind::none || kind == OperationKind::open ||
+           kind == OperationKind::close || kind == OperationKind::cancel;
+}
+
+bool valid_operation_state(OperationState state) {
+    switch (state) {
+    case OperationState::idle:
+    case OperationState::dispatching:
+    case OperationState::submitting:
+    case OperationState::reconciling:
+    case OperationState::partially_filled:
+    case OperationState::filled:
+    case OperationState::cancelled:
+    case OperationState::rejected:
+    case OperationState::ambiguous:
+        return true;
+    }
+    return false;
+}
+
+bool valid_broker_outcome(BrokerOutcome outcome) {
+    return outcome == BrokerOutcome::none || outcome == BrokerOutcome::partial ||
+           outcome == BrokerOutcome::full || outcome == BrokerOutcome::rejected ||
+           outcome == BrokerOutcome::unknown;
+}
+
 bool add_within(Volume left, Volume right, Volume limit) {
     return left <= limit && right <= limit - left;
 }
@@ -53,6 +84,8 @@ MutationStatus commit_candidate(ManagedTradeState *state,
 
 bool CloseObligation::valid(Volume open_volume, Volume pending_remainder_volume,
                             bool unresolved_operation) const {
+    if (requested && !ever_requested)
+        return false;
     if (ever_requested && !requested)
         return false;
     if (satisfied && (!requested || open_volume != 0 || pending_remainder_volume != 0 ||
@@ -65,6 +98,9 @@ bool CloseObligation::valid(Volume open_volume, Volume pending_remainder_volume,
 }
 
 bool ExecutionSlice::valid(Volume target_volume) const {
+    if (!valid_operation_kind(kind) || !valid_operation_state(state) ||
+        !valid_broker_outcome(broker_outcome))
+        return false;
     if (requested_volume > target_volume || result_volume > requested_volume ||
         send_count > 1)
         return false;
@@ -86,6 +122,13 @@ bool ExecutionSlice::valid(Volume target_volume) const {
     if (state == OperationState::reconciling && send_count != 1)
         return false;
     if (state == OperationState::reconciling && broker_outcome == BrokerOutcome::none)
+        return false;
+    if (state == OperationState::reconciling && broker_outcome == BrokerOutcome::partial &&
+        (kind != OperationKind::open && kind != OperationKind::close))
+        return false;
+    if (state == OperationState::reconciling && broker_outcome == BrokerOutcome::full &&
+        ((kind == OperationKind::cancel && result_volume != 0) ||
+         (kind != OperationKind::cancel && result_volume != requested_volume)))
         return false;
     if (state == OperationState::ambiguous && broker_outcome != BrokerOutcome::unknown)
         return false;
@@ -133,7 +176,7 @@ bool ExecutionSlice::open_may_fill() const {
 }
 
 bool ExecutionPlan::valid() const {
-    return target_volume != 0 && max_slice_volume != 0 &&
+    return valid_plan_state(state) && target_volume != 0 && max_slice_volume != 0 &&
            max_slice_volume <= target_volume && max_operations != 0 &&
            slice_count <= max_operations;
 }

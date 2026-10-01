@@ -11,7 +11,9 @@ namespace {
 using mt5bridge::managed_trade::BrokerOutcome;
 using mt5bridge::managed_trade::ManagedTradeState;
 using mt5bridge::managed_trade::MutationStatus;
+using mt5bridge::managed_trade::OperationKind;
 using mt5bridge::managed_trade::OperationState;
+using mt5bridge::managed_trade::PlanState;
 using mt5bridge::managed_trade::RecoveryAction;
 using mt5bridge::managed_trade::TradeId;
 using mt5bridge::managed_trade::TradeState;
@@ -131,6 +133,8 @@ void test_close_before_fill_and_ambiguous_recovery() {
             "ambiguous operation lost its non-resendable evidence");
     require(state.recovery_action() == RecoveryAction::refresh_observation,
             "ambiguous operation did not require a fresh observation");
+    require(state.start_open_slice(1) == MutationStatus::ambiguous,
+            "ambiguous operation became resendable before fresh evidence");
     require(state.apply_fresh_snapshot(0, 0) == MutationStatus::applied,
             "fresh zero snapshot was rejected");
     require(state.acknowledge_ambiguous() == MutationStatus::applied,
@@ -164,6 +168,41 @@ void test_plan_stop_and_limits() {
             "zero-exposure idle trade became closable");
 }
 
+void test_corrupt_durable_values_fail_closed() {
+    auto invalid_plan = make_trade();
+    invalid_plan.plan.state = static_cast<PlanState>(99);
+    require(!invalid_plan.valid(), "unknown plan state passed durable validation");
+
+    auto invalid_kind = make_trade();
+    invalid_kind.slice.kind = static_cast<OperationKind>(99);
+    require(!invalid_kind.valid(), "unknown operation kind passed durable validation");
+
+    auto invalid_state = make_trade();
+    invalid_state.slice.state = static_cast<OperationState>(99);
+    require(!invalid_state.valid(), "unknown operation state passed durable validation");
+
+    auto invalid_outcome = make_trade();
+    invalid_outcome.slice.broker_outcome = static_cast<BrokerOutcome>(99);
+    require(!invalid_outcome.valid(), "unknown broker outcome passed durable validation");
+
+    auto missing_history = make_trade();
+    missing_history.close_obligation.requested = true;
+    require(!missing_history.valid(),
+            "requested close without durable history passed validation");
+
+    auto invalid_cancel_result = make_trade();
+    invalid_cancel_result.pending_remainder_volume = 1;
+    invalid_cancel_result.slice.operation_id = 1;
+    invalid_cancel_result.slice.kind = OperationKind::cancel;
+    invalid_cancel_result.slice.state = OperationState::reconciling;
+    invalid_cancel_result.slice.requested_volume = 1;
+    invalid_cancel_result.slice.result_volume = 1;
+    invalid_cancel_result.slice.broker_outcome = BrokerOutcome::full;
+    invalid_cancel_result.slice.send_count = 1;
+    require(!invalid_cancel_result.valid(),
+            "cancel result with non-zero fill passed durable validation");
+}
+
 } // namespace
 
 int main() {
@@ -171,5 +210,6 @@ int main() {
     test_partial_remainder_cancel_and_close();
     test_close_before_fill_and_ambiguous_recovery();
     test_plan_stop_and_limits();
+    test_corrupt_durable_values_fail_closed();
     return 0;
 }

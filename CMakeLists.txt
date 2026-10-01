@@ -96,6 +96,12 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_file_journal_store
              COMMAND mt5bridge_file_journal_store_test)
+    add_executable(mt5bridge_dispatch_admission_header_only_test
+                   tests/dispatch_admission_header_only_test.cpp)
+    target_link_libraries(mt5bridge_dispatch_admission_header_only_test PRIVATE
+                          mt5bridge::client)
+    add_test(NAME mt5bridge_dispatch_admission_header_only
+             COMMAND mt5bridge_dispatch_admission_header_only_test)
     add_executable(mt5bridge_header_umbrellas_test
                    tests/header_umbrellas_test.cpp)
     target_link_libraries(mt5bridge_header_umbrellas_test PRIVATE
@@ -123,6 +129,7 @@ if(BUILD_TESTING)
                    tests/header_self_containment_dispatch_operation_recovery.cpp
                    tests/header_self_containment_dispatch_journal_store.cpp
                    tests/header_self_containment_dispatch_lease.cpp
+                   tests/header_self_containment_dispatch_admission.cpp
                    tests/header_self_containment_environment_consistency.cpp
                    tests/header_self_containment_dispatch_journal.cpp
                    tests/header_self_containment_file_journal_store.cpp)

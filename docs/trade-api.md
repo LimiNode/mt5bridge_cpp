@@ -528,7 +528,8 @@ at-most-once dispatch, not exactly-once delivery. After the call it records
 the raw result before moving to `reconciling`.
 
 The current C++ implementation contains this pre-side-effect slice in
-`mt5bridge/dispatch/journal.hpp`. `OperationJournal` separates the durable
+`mt5bridge/dispatch/journal.hpp` and
+`mt5bridge/dispatch/admission.hpp`. `OperationJournal` separates the durable
 write-ahead states (`created`, `prechecked`, `dispatch_intent_persisted`,
 `dispatching`, `result_persisted`, `reconciling`) from the canonical
 `OperationState` vocabulary. Every accepted mutation is committed through a

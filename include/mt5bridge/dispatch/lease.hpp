@@ -3,7 +3,7 @@
 /// \file dispatch/lease.hpp
 /// \brief Defines the account-scoped single-writer lease contract.
 
-#include "journal_types.hpp"
+#include <mt5bridge/reconciliation/graph.hpp>
 
 #include <cstdint>
 #include <optional>

@@ -29,9 +29,7 @@ set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 # The concrete journal store is Windows-specific but remains independent of
 # the CPython-backed runtime DLL. Consumers that need durable operation
 # persistence link this small native target alongside mt5bridge::client.
-add_library(mt5bridge_journal STATIC
-            src/dispatch/admission.cpp
-            src/dispatch/file_journal_store.cpp)
+add_library(mt5bridge_journal STATIC src/dispatch/file_journal_store.cpp)
 target_include_directories(mt5bridge_journal PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
@@ -98,6 +96,12 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_file_journal_store
              COMMAND mt5bridge_file_journal_store_test)
+    add_executable(mt5bridge_dispatch_admission_header_only_test
+                   tests/dispatch_admission_header_only_test.cpp)
+    target_link_libraries(mt5bridge_dispatch_admission_header_only_test PRIVATE
+                          mt5bridge::client)
+    add_test(NAME mt5bridge_dispatch_admission_header_only
+             COMMAND mt5bridge_dispatch_admission_header_only_test)
     add_executable(mt5bridge_header_umbrellas_test
                    tests/header_umbrellas_test.cpp)
     target_link_libraries(mt5bridge_header_umbrellas_test PRIVATE

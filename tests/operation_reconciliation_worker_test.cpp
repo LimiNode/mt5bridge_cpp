@@ -3,6 +3,7 @@
 
 #include <mt5bridge.hpp>
 
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -132,6 +133,41 @@ void enter_dispatching(mt5bridge::OperationJournal &journal,
             "dispatch barrier was not persisted");
 }
 
+void require_candidate_does_not_terminalize(
+    mt5bridge::OperationJournal &journal, std::uint64_t trade_id,
+    std::uint64_t operation_id, mt5bridge::OperationState candidate) {
+    const auto key = mt5bridge::OperationKey{account(), trade_id, operation_id};
+    require(journal.create(key, {0x0b, static_cast<std::uint8_t>(trade_id)}).accepted(),
+            "terminal-candidate operation create failed");
+
+    FakeProvider provider({batch(key.account, false), batch(key.account, false),
+                           batch(key.account, true)});
+    mt5bridge::ObservationCoordinator coordinator(provider, key.account);
+    mt5bridge::ObservationCollectionRequest collection;
+    collection.observe_positions = false;
+    require(coordinator.refresh(collection).apply.accepted(),
+            "terminal-candidate baseline refresh failed");
+    mt5bridge::ReconciliationRequest request;
+    request.baseline = coordinator.capture_baseline();
+    request.predicates = {mt5bridge::require_active_order(100)};
+    enter_dispatching(
+        journal, key,
+        mt5bridge::ReconciliationDescriptor{key.account, *request.baseline,
+                                             request.predicates, candidate});
+    mt5bridge::OperationReconciliationWorker worker(
+        journal, key, coordinator, collection, request, candidate);
+    require(worker.step().status ==
+                mt5bridge::OperationReconciliationStatus::pending,
+            "terminal-candidate observation did not remain pending");
+    const auto confirmed = worker.step();
+    require(confirmed.status ==
+                mt5bridge::OperationReconciliationStatus::confirmed &&
+                confirmed.record &&
+                confirmed.record->operation_state ==
+                    mt5bridge::OperationState::reconciling,
+            "generic predicate terminalized a caller-selected lifecycle state");
+}
+
 } // namespace
 
 /// \brief Runs startup and operation reconciliation checks.
@@ -176,11 +212,11 @@ int main() {
                         mt5bridge::OperationState::reconciling,
                 "pending reconciliation was not kept unresolved");
         const auto second = worker.step();
-        require(second.status == mt5bridge::OperationReconciliationStatus::progressed &&
+        require(second.status == mt5bridge::OperationReconciliationStatus::confirmed &&
                     second.record && second.record->operation_state ==
-                        mt5bridge::OperationState::filled &&
+                        mt5bridge::OperationState::reconciling &&
                     second.record->journal_state == mt5bridge::JournalState::reconciling,
-                "confirmed reconciliation was not durably settled");
+                "active-order observation became a terminal fill");
         require(provider.calls == 3, "worker did not perform baseline and two cycles");
 
         const auto enrichment_key = mt5bridge::OperationKey{account(), 70, 71};
@@ -242,12 +278,12 @@ int main() {
         require(restart_first.status ==
                     mt5bridge::OperationReconciliationStatus::pending &&
                     restart_second.status ==
-                        mt5bridge::OperationReconciliationStatus::progressed &&
+                        mt5bridge::OperationReconciliationStatus::confirmed &&
                     restart_second.record &&
                     restart_second.record->operation_state ==
-                        mt5bridge::OperationState::filled &&
+                        mt5bridge::OperationState::reconciling &&
                     restart_provider.calls == 2,
-                "recovered descriptor did not re-anchor to the new graph instance");
+                "recovered active-order observation became a terminal fill");
 
         const auto unresolved_key = mt5bridge::OperationKey{account(), 8, 12};
         require(journal.create(unresolved_key, {0x02}).accepted(),
@@ -320,8 +356,11 @@ int main() {
                 "event gap settled or changed the operation lifecycle");
         const auto gap_confirmation = gap_worker.step();
         require(gap_confirmation.status ==
-                    mt5bridge::OperationReconciliationStatus::progressed,
-                "authoritative refresh did not recover from an event gap");
+                    mt5bridge::OperationReconciliationStatus::confirmed &&
+                    gap_confirmation.record &&
+                    gap_confirmation.record->operation_state ==
+                        mt5bridge::OperationState::reconciling,
+                "authoritative refresh became a terminal fill after an event gap");
 
         const auto account_key = mt5bridge::OperationKey{account(), 10, 14};
         require(journal.create(account_key, {0x04}).accepted(),
@@ -435,12 +474,12 @@ int main() {
         require(bootstrapped_first.status ==
                     mt5bridge::OperationReconciliationStatus::pending &&
                     bootstrapped_second.status ==
-                        mt5bridge::OperationReconciliationStatus::progressed &&
+                        mt5bridge::OperationReconciliationStatus::confirmed &&
                     bootstrapped_second.record &&
                     bootstrapped_second.record->operation_state ==
-                        mt5bridge::OperationState::filled &&
+                        mt5bridge::OperationState::reconciling &&
                     bootstrapped_recovery_provider.calls == 2,
-                "bound recovery did not resume after explicit account bootstrap");
+                "bound recovery became a terminal fill after explicit account bootstrap");
 
         FakeProvider restored_account_provider(
             {batch(reanchor_key.account, false), batch(reanchor_key.account, true)});
@@ -453,12 +492,12 @@ int main() {
         require(restored_first.status ==
                     mt5bridge::OperationReconciliationStatus::pending &&
                     restored_second.status ==
-                        mt5bridge::OperationReconciliationStatus::progressed &&
+                        mt5bridge::OperationReconciliationStatus::confirmed &&
                     restored_second.record &&
                     restored_second.record->operation_state ==
-                        mt5bridge::OperationState::filled &&
+                        mt5bridge::OperationState::reconciling &&
                     restored_account_provider.calls == 2,
-                "matching-account re-anchor did not resume reconciliation");
+                "matching-account re-anchor became a terminal fill");
 
         const auto ambiguous_key = mt5bridge::OperationKey{account(), 11, 15};
         require(journal.create(ambiguous_key, {0x05}).accepted(),
@@ -523,11 +562,18 @@ int main() {
             partial_request, mt5bridge::OperationState::partially_filled);
         const auto partial_cycle = partial_worker.step();
         require(partial_cycle.status ==
-                    mt5bridge::OperationReconciliationStatus::progressed &&
+                    mt5bridge::OperationReconciliationStatus::confirmed &&
                     partial_cycle.record &&
                     partial_cycle.record->operation_state ==
-                        mt5bridge::OperationState::partially_filled,
-                "partial settlement state was not preserved");
+                        mt5bridge::OperationState::reconciling,
+                "partial active-order observation became terminal");
+
+        require_candidate_does_not_terminalize(
+            journal, 20, 24, mt5bridge::OperationState::rejected);
+        require_candidate_does_not_terminalize(
+            journal, 21, 25, mt5bridge::OperationState::cancelled);
+        require_candidate_does_not_terminalize(
+            journal, 22, 26, mt5bridge::OperationState::expired);
 
         MemoryStore restart_store = store;
         mt5bridge::OperationJournal restarted(restart_store);
@@ -535,8 +581,8 @@ int main() {
             mt5bridge::OperationRecoveryCoordinator::recover(restarted);
         require(restarted_recovery.accepted() &&
                     restarted_recovery.operations.front().action ==
-                        mt5bridge::OperationRecoveryAction::terminal,
-                "filled operation was not classified terminal after restart");
+                        mt5bridge::OperationRecoveryAction::reconcile_only,
+                "unproven filled operation was classified terminal after restart");
 
         std::cout << "operation reconciliation worker checks passed\n";
         return 0;

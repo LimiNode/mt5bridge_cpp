@@ -313,13 +313,17 @@ worker process.
    recovered post-dispatch record is observation-only and never resendable.
    The private `dispatch::ManagedTradeOwner` composition seam now binds one
    bounded open slice to that journal, the admission barrier, and the one-shot
-   backend. Accepted broker results remain unresolved until a later
-   `OperationReconciliationWorker` cycle supplies provenance-bearing
-   observation; the owner exposes no caller-supplied evidence bypass. It
+   backend. Accepted broker results remain unresolved until
+   `ManagedTradeOwner::settle_reconciliation()` drives an
+   `OperationReconciliationWorker` cycle that supplies provenance-bearing
+   observation; the owner exposes no caller-supplied evidence bypass. A
+   deterministic rejection or provenance-backed ambiguity may be applied,
+   while a confirmed order-presence observation leaves managed state unchanged
+   until executed-volume evidence exists. It
    converts uncertainty to durable `reconciling` with a non-resendable owner
-   outcome, and managed state alone never authorizes a send. Close/cancel
-   planning and restart reconstruction of aggregate managed exposure remain
-   later slices. The next public-facing layer
+   outcome, and managed state alone never authorizes a send. Partial fills,
+   close/cancel planning, and restart reconstruction of aggregate managed
+   exposure remain later slices. The next public-facing layer
    is the high-level asynchronous `TradeManager`; its side-effecting methods
    must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

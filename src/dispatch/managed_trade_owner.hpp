@@ -7,6 +7,7 @@
 #include "one_shot_backend.hpp"
 
 #include <mt5bridge/dispatch/admission.hpp>
+#include <mt5bridge/dispatch/operation_worker.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -103,6 +104,15 @@ public:
     /// \return Admission, execution, or unresolved outcome.
     OwnerStepResult execute_pending(const DispatchAdmissionRequest &request);
 
+    /// \brief Settles the current open slice through authoritative observation.
+    /// \param worker Provenance-bearing worker bound to the current operation.
+    /// \param trade_event_gap Whether the caller lost event continuity.
+    /// \param deadline_expired Whether the bounded observation deadline elapsed.
+    /// \return Settled, awaiting, ambiguous, or durable-failure outcome.
+    OwnerStepResult settle_reconciliation(
+        OperationReconciliationWorker &worker, bool trade_event_gap = false,
+        bool deadline_expired = false);
+
 private:
     /// \brief Derives the account-scoped key for the current logical slice.
     std::optional<OperationKey> current_key() const;
@@ -117,6 +127,12 @@ private:
 
     /// \brief Mirrors the backend's durable submitting edge in a candidate state.
     bool state_to_submitting(managed_trade::ManagedTradeState *candidate) const;
+
+    /// \brief Verifies that a worker cycle carries trusted observation provenance.
+    bool has_observation_provenance(
+        const OperationReconciliationCycle &cycle,
+        const OperationReconciliationWorker &worker, const OperationKey &key,
+        const OperationRecord &record) const;
 
     managed_trade::ManagedTradeState state_;
     AccountKey account_;

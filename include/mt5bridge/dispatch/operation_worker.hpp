@@ -19,6 +19,7 @@ namespace mt5bridge {
 /// \brief Reports one journal-aware reconciliation cycle.
 enum class OperationReconciliationStatus {
     progressed,          ///< Evidence settled and lifecycle was durably advanced.
+    confirmed,           ///< Predicates confirmed; lifecycle remains reconciling.
     pending,             ///< More authoritative observations are required.
     not_observed,        ///< Deadline elapsed without proof; operation remains open.
     trade_event_gap,     ///< Event continuity was lost; operation remains open.
@@ -43,6 +44,12 @@ struct OperationReconciliationCycle {
     bool progressed() const {
         return status == OperationReconciliationStatus::progressed;
     }
+
+    /// \brief Tests whether predicates were confirmed without a terminal write.
+    /// \return True for an observation-only confirmation.
+    bool confirmed() const {
+        return status == OperationReconciliationStatus::confirmed;
+    }
 };
 
 /// \class OperationReconciliationWorker
@@ -53,6 +60,8 @@ struct OperationReconciliationCycle {
 /// `not_observed`, and event gaps never become terminal and never permit a
 /// resend. The caller supplies explicit predicates and the lifecycle state
 /// that those predicates prove; broker result payloads remain hints only.
+/// `observe()` permanently keeps confirmed predicates in `reconciling` so an
+/// owner can wait for semantic settlement evidence such as executed volume.
 class OperationReconciliationWorker {
 public:
     /// \brief Binds one operation to a caller-driven observation worker.
@@ -100,12 +109,35 @@ public:
     OperationReconciliationWorker &operator=(const OperationReconciliationWorker &) =
         delete;
 
-    /// \brief Performs one refresh and applies only proven durable transitions.
+    /// \brief Performs one refresh and applies proven durable transitions.
     /// \param trade_event_gap True when event hints lost continuity.
     /// \param deadline_expired True when the bounded wait elapsed.
     /// \return Evidence and the resulting durable lifecycle status.
     OperationReconciliationCycle step(bool trade_event_gap = false,
                                       bool deadline_expired = false) {
+        return step_impl(trade_event_gap, deadline_expired, !observation_only_);
+    }
+
+    /// \brief Performs one refresh while leaving confirmed lifecycle unresolved.
+    /// \param trade_event_gap True when event hints lost continuity.
+    /// \param deadline_expired True when the bounded wait elapsed.
+    /// \return Observation evidence with a non-terminal confirmed result.
+    OperationReconciliationCycle observe(bool trade_event_gap = false,
+                                         bool deadline_expired = false) {
+        observation_only_ = true;
+        return step_impl(trade_event_gap, deadline_expired, false);
+    }
+
+    /// \brief Returns the effective graph-local baseline used by reconciliation.
+    /// \return Baseline rebased for the worker's current graph instance.
+    const std::optional<ReconciliationBaseline> &effective_baseline() const {
+        return worker_.baseline();
+    }
+
+private:
+    OperationReconciliationCycle step_impl(bool trade_event_gap,
+                                           bool deadline_expired,
+                                           bool apply_confirmed_transition) {
         const auto current = journal_.find(key_);
         if (!current)
             return {OperationReconciliationStatus::operation_not_found,
@@ -161,6 +193,10 @@ public:
             return {OperationReconciliationStatus::invalid_request, cycle,
                     journal_.find(key_)};
 
+        if (!apply_confirmed_transition)
+            return {OperationReconciliationStatus::confirmed, cycle,
+                    journal_.find(key_)};
+
         const auto advanced = journal_.transition_operation(key_, settled_state_);
         if (!advanced.accepted())
             return {OperationReconciliationStatus::persistence_failed, cycle,
@@ -168,6 +204,7 @@ public:
         return {OperationReconciliationStatus::progressed, cycle, advanced.record};
     }
 
+public:
     /// \brief Returns the latest observation worker cycle.
     /// \return Last cycle, or empty before the first step.
     const std::optional<ReconciliationWorkerCycle> &last_cycle() const {
@@ -358,6 +395,7 @@ private:
     std::optional<ReconciliationDescriptor> descriptor_;
     ReconciliationWorker worker_;
     OperationState settled_state_;
+    bool observation_only_ = false;
 };
 
 } // namespace mt5bridge

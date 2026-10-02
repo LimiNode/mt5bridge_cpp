@@ -89,6 +89,12 @@ public:
     /// \return Read-only graph provenance and account scope.
     const ObservationGraph &graph() const { return coordinator_.graph(); }
 
+    /// \brief Returns the baseline actually used for the current request.
+    /// \return Effective graph-local baseline, or empty for an invalid request.
+    const std::optional<ReconciliationBaseline> &baseline() const {
+        return reconciliation_request_.baseline;
+    }
+
     /// \brief Returns the number of provider refreshes performed.
     /// \return One-based cycle count, or zero before the first step.
     std::uint64_t cycle_count() const { return cycle_count_; }

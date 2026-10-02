@@ -316,9 +316,10 @@ worker process.
    backend. Accepted broker results remain unresolved until
    `ManagedTradeOwner::settle_reconciliation()` drives an
    `OperationReconciliationWorker` cycle that supplies provenance-bearing
-   observation; the owner exposes no caller-supplied evidence bypass. A full
-   open fill, deterministic rejection, or provenance-backed ambiguity may be
-   applied, while pending observations leave managed state unchanged. It
+   observation; the owner exposes no caller-supplied evidence bypass. A
+   deterministic rejection or provenance-backed ambiguity may be applied,
+   while a confirmed order-presence observation leaves managed state unchanged
+   until executed-volume evidence exists. It
    converts uncertainty to durable `reconciling` with a non-resendable owner
    outcome, and managed state alone never authorizes a send. Partial fills,
    close/cancel planning, and restart reconstruction of aggregate managed

@@ -192,7 +192,9 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
         settled_state != OperationState::rejected)
         return result_for(OwnerStepStatus::invalid_state, key, current);
 
-    const auto cycle = worker.step(trade_event_gap, deadline_expired);
+    const auto cycle = settled_state == OperationState::filled
+                           ? worker.observe(trade_event_gap, deadline_expired)
+                           : worker.step(trade_event_gap, deadline_expired);
     auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
     if (!result.record)
         result.record = journal_.find(*key);
@@ -232,6 +234,13 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
         return result;
     case OperationReconciliationStatus::persistence_failed:
         return result;
+    case OperationReconciliationStatus::confirmed:
+        if (settled_state != OperationState::filled || !cycle.record ||
+            cycle.record->operation_state != OperationState::reconciling ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record))
+            return result;
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
     }
 
     if (!cycle.record || !has_observation_provenance(cycle, worker, *key,
@@ -240,11 +249,11 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
     if (cycle.record->operation_state != settled_state)
         return result;
 
+    if (settled_state != OperationState::rejected)
+        return result;
+
     auto candidate = state_;
-    const auto recorded = settled_state == OperationState::rejected
-                              ? candidate.record_rejected()
-                              : candidate.record_fill(candidate.slice.requested_volume);
-    if (recorded != managed_trade::MutationStatus::applied ||
+    if (candidate.record_rejected() != managed_trade::MutationStatus::applied ||
         candidate.reconcile() != managed_trade::MutationStatus::applied)
         return result;
     state_ = std::move(candidate);
@@ -290,9 +299,10 @@ bool ManagedTradeOwner::has_observation_provenance(
         sample.graph_revision() != worker.graph().revision() ||
         sample.graph_revision() != cycle.observation->reconciliation.evaluated_revision)
         return false;
-    if (!record.reconciliation_descriptor ||
-        sample.graph_revision() <=
-            record.reconciliation_descriptor->baseline.graph_revision())
+    const auto &baseline = worker.effective_baseline();
+    if (!baseline || baseline->account() != key.account ||
+        baseline->graph_instance_id() != sample.graph_instance_id() ||
+        sample.graph_revision() <= baseline->graph_revision())
         return false;
 
     const auto durable = journal_.find(key);

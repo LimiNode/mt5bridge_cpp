@@ -34,13 +34,14 @@ or reconciling result leaves the managed slice unresolved and returns
 `awaiting_reconciliation`; this seam deliberately has no plain caller-supplied
 evidence API. Only `settle_reconciliation()` with an
 `OperationReconciliationWorker` cycle carrying provenance-bearing observation
-may settle the managed state and journal. A deterministic broker rejection may
-still settle immediately because
+may settle a supported managed outcome and journal. A deterministic broker
+rejection may still settle immediately because
 the backend has proved that no execution effect occurred. A transport failure,
 a result that cannot be durably bound, or a lease/account failure after the
 submitting edge is converted to durable `reconciling` with a non-resendable
 ambiguous owner outcome; the operation remains `submitting` for recovery and
-is never retried by this seam.
+is never retried by this seam. A confirmed order-presence predicate does not
+infer a full fill; executed-volume evidence remains a later settlement slice.
 
 This first slice prepares and executes `OPEN` operations. Close/cancel planning,
 restart reconstruction of aggregate managed exposure, and higher-level policy

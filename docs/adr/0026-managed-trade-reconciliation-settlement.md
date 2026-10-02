@@ -18,15 +18,19 @@ the returned cycle carries all of the following:
 - matching account, graph instance, and evaluated graph revision;
 - a durable journal record whose key, revision, and lifecycle state match the
   worker cycle; and
-- a post-dispatch graph revision newer than the durable descriptor baseline.
+- a post-baseline graph revision newer than the worker's effective baseline in
+  the same graph instance; numeric revisions from another process are never
+  compared.
 
-The current bounded implementation supports only an `OPEN` slice with a full
-fill or deterministic rejection. A confirmed full fill uses the slice's
-durable requested volume; it never accepts a caller-supplied volume. An
-authoritatively ambiguous cycle may record `unknown` only when the same
-provenance checks pass. Pending, not-observed, and event-gap cycles leave the
-managed slice unresolved. Account mismatch, missing provenance, and durable
-identity mismatch cannot settle the managed state.
+The current bounded implementation supports observation of an `OPEN` slice and
+the already-safe deterministic-rejection path, but it does not infer a fill
+volume from order presence. A confirmed full-fill predicate leaves both the
+managed slice and journal operation in `reconciling` until a later settlement
+evidence contract supplies executed volume. An authoritatively ambiguous cycle
+may record `unknown` only when the same provenance checks pass. Pending,
+not-observed, and event-gap cycles leave the managed slice unresolved.
+Account mismatch, missing provenance, and durable identity mismatch cannot
+settle the managed state.
 
 Partial fills, remainder handling, close/cancel settlement, late fills, and
 restart reconstruction of aggregate exposure remain later bounded slices. The
@@ -48,8 +52,9 @@ semantics are absent.
 
 ## Verification
 
-`tests/managed_trade_owner_test.cpp` covers a full open fill through a real
-`OperationReconciliationWorker` and verifies that the managed volume changes
-only after the worker observes the required order. It also covers a pending
-cycle: the journal is normalized for reconciliation while managed state stays
-`submitting` and no second backend call is possible.
+`tests/managed_trade_owner_test.cpp` proves that a real worker observation of a
+new active order does not imply a full fill: managed volume stays zero and the
+journal remains non-terminal. It also covers a pending cycle: the journal is
+normalized for reconciliation while managed state stays `submitting` and no
+second backend call is possible. A later slice must add provenance-bearing
+executed volume from history deals before applying full/partial fill state.

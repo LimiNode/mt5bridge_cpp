@@ -239,16 +239,16 @@ int main() {
             journal, *executed.key, coordinator, collection);
         const auto settled = owner.settle_reconciliation(settlement_worker);
         require(settled.status ==
-                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
                     settled.record &&
                     settled.record->journal_state ==
                         mt5bridge::JournalState::reconciling &&
                     settled.record->operation_state ==
-                        mt5bridge::OperationState::filled &&
+                        mt5bridge::OperationState::reconciling &&
                     owner.state().slice.state ==
-                        mt5bridge::managed_trade::OperationState::filled &&
-                    owner.state().open_volume == 5,
-                "owner loop did not settle through authoritative observation");
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    owner.state().open_volume == 0,
+                "active-order provenance was mistaken for a full fill");
 
         require(settlement_worker.last_cycle() &&
                     settlement_worker.last_cycle()->refresh.sample,
@@ -265,6 +265,52 @@ int main() {
                     post_settlement_consistency.proof,
                 "post-settlement environment proof setup failed");
         ready.environment_proof = post_settlement_consistency.proof;
+
+        auto recovered_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                observation_batch(operation_account),
+                observation_batch(operation_account, 999)});
+        mt5bridge::ObservationCoordinator recovered_coordinator(
+            *recovered_provider, operation_account);
+        require(recovered_coordinator.refresh(collection).sample.has_value(),
+                "recovered graph baseline refresh failed");
+        mt5bridge::OperationJournal restart_journal(store);
+        require(mt5bridge::OperationRecoveryCoordinator::recover(restart_journal)
+                    .accepted(),
+                "recovered journal scan failed");
+        mt5bridge::EnvironmentConsistencyRequest recovered_scope;
+        mt5bridge::DispatchAdmissionBarrier recovered_admission(
+            restart_journal, recovered_coordinator.graph(), recovered_scope);
+        mt5bridge::runtime::OneShotDispatchBackend recovered_backend;
+        FakeAccountProbe recovered_probe({operation_account});
+        FakeTransport recovered_transport;
+        mt5bridge::managed_trade::ManagedTradeState recovered_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &recovered_state, mt5bridge::managed_trade::TradeId{7}, 5, 5, 4) &&
+                    recovered_state.start_open_slice(5) ==
+                        mt5bridge::managed_trade::MutationStatus::applied &&
+                    recovered_state.enter_submitting() ==
+                        mt5bridge::managed_trade::MutationStatus::applied,
+                "recovered managed state setup failed");
+        mt5bridge::dispatch::ManagedTradeOwner recovered_owner(
+            recovered_state, operation_account, restart_journal, recovered_admission,
+            recovered_backend, recovered_probe, lease, recovered_transport);
+        const auto recovered_key = mt5bridge::OperationKey{operation_account, 7, 1};
+        mt5bridge::OperationReconciliationWorker recovered_worker(
+            restart_journal, recovered_key, recovered_coordinator, collection);
+        const auto recovered_settlement =
+            recovered_owner.settle_reconciliation(recovered_worker);
+        require(recovered_settlement.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    recovered_settlement.record &&
+                    recovered_settlement.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    recovered_settlement.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    recovered_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    recovered_owner.state().open_volume == 0,
+                "recovered graph provenance used the old graph revision namespace");
 
         mt5bridge::managed_trade::ManagedTradeState uncertain_initial;
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(

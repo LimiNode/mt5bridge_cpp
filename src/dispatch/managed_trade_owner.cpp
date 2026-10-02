@@ -13,24 +13,6 @@ bool is_result_pending(const OperationRecord &record) {
            record.journal_state == JournalState::reconciling;
 }
 
-std::optional<mt5bridge::OperationState> journal_state_for(
-    managed_trade::OperationState state) {
-    switch (state) {
-    case managed_trade::OperationState::partially_filled:
-        return mt5bridge::OperationState::partially_filled;
-    case managed_trade::OperationState::filled:
-        return mt5bridge::OperationState::filled;
-    case managed_trade::OperationState::cancelled:
-        return mt5bridge::OperationState::cancelled;
-    case managed_trade::OperationState::rejected:
-        return mt5bridge::OperationState::rejected;
-    case managed_trade::OperationState::ambiguous:
-        return mt5bridge::OperationState::ambiguous;
-    default:
-        return std::nullopt;
-    }
-}
-
 } // namespace
 
 ManagedTradeOwner::ManagedTradeOwner(
@@ -142,7 +124,7 @@ OwnerStepResult ManagedTradeOwner::execute_pending(
             if (!state_to_submitting(&candidate))
                 return result;
             state_ = std::move(candidate);
-            result.status = OwnerStepStatus::awaiting_evidence;
+            result.status = OwnerStepStatus::awaiting_reconciliation;
             return result;
         }
     }
@@ -166,20 +148,18 @@ OwnerStepResult ManagedTradeOwner::execute_pending(
         if (!state_to_submitting(&candidate))
             return result;
         state_ = std::move(candidate);
-        result.status = OwnerStepStatus::awaiting_evidence;
+        result.status = OwnerStepStatus::awaiting_reconciliation;
         return result;
     }
 
     if (uncertain_after_barrier) {
-        if (!mark_journal_ambiguous(*key)) {
+        if (!mark_journal_reconciling(*key)) {
             result.status = OwnerStepStatus::durable_failure;
             result.record = journal_.find(*key);
             return result;
         }
         auto candidate = state_;
-        if (!state_to_submitting(&candidate) ||
-            candidate.record_unknown() != managed_trade::MutationStatus::applied ||
-            candidate.reconcile() != managed_trade::MutationStatus::applied)
+        if (!state_to_submitting(&candidate))
             return result;
         state_ = std::move(candidate);
         result.status = OwnerStepStatus::ambiguous;
@@ -188,79 +168,19 @@ OwnerStepResult ManagedTradeOwner::execute_pending(
     return result;
 }
 
-OwnerStepResult ManagedTradeOwner::apply_evidence(BrokerEvidence evidence) {
-    if (!state_.valid())
-        return result_for(OwnerStepStatus::invalid_request);
-    if (state_.slice.state != managed_trade::OperationState::submitting)
-        return result_for(OwnerStepStatus::invalid_state, current_key());
-    if ((evidence.kind == BrokerEvidenceKind::fill && evidence.volume == 0) ||
-        (evidence.kind != BrokerEvidenceKind::fill && evidence.volume != 0))
-        return result_for(OwnerStepStatus::invalid_request, current_key());
-    const auto key = current_key();
-    if (!key)
-        return result_for(OwnerStepStatus::invalid_request);
-    const auto record = journal_.find(*key);
-    if (!record || !is_result_pending(*record) || record->result_payload.empty())
-        return result_for(OwnerStepStatus::invalid_state, key, record);
-
-    auto candidate = state_;
-    if (!apply_evidence_to_state(&candidate, evidence))
-        return result_for(OwnerStepStatus::invalid_state, key, record);
-    const auto final_state = journal_state_for(candidate.slice.state);
-    if (!final_state)
-        return result_for(OwnerStepStatus::invalid_state, key, record);
-
-    auto current = record;
-    if (current->operation_state == OperationState::accepted) {
-        const auto reconciling = journal_.transition_operation(
-            *key, OperationState::reconciling);
-        if (!reconciling.accepted())
-            return result_for(OwnerStepStatus::durable_failure, key,
-                              reconciling.record);
-        current = reconciling.record;
-    }
-    if (!current || current->journal_state != JournalState::reconciling) {
-        const auto journal_state = journal_.transition_journal(
-            *key, JournalState::reconciling);
-        if (!journal_state.accepted())
-            return result_for(OwnerStepStatus::durable_failure, key,
-                              journal_state.record);
-        current = journal_state.record;
-    }
-    const auto advanced = journal_.transition_operation(*key, *final_state);
-    if (!advanced.accepted())
-        return result_for(OwnerStepStatus::durable_failure, key, advanced.record);
-
-    const auto status = candidate.slice.state == managed_trade::OperationState::ambiguous
-                            ? OwnerStepStatus::ambiguous
-                            : OwnerStepStatus::completed;
-    state_ = std::move(candidate);
-    return result_for(status, key, advanced.record);
-}
-
-bool ManagedTradeOwner::mark_journal_ambiguous(const OperationKey &key) {
+bool ManagedTradeOwner::mark_journal_reconciling(const OperationKey &key) {
     auto record = journal_.find(key);
     if (!record || !journal_at_least_dispatching(record->journal_state))
         return false;
 
-    if (record->operation_state != OperationState::reconciling &&
-        record->operation_state != OperationState::ambiguous) {
-        const auto reconciling = journal_.transition_operation(
-            key, OperationState::reconciling);
-        if (!reconciling.accepted())
-            return false;
-        record = reconciling.record;
-    }
-    if (!record || record->journal_state != JournalState::reconciling) {
+    if (record->journal_state != JournalState::reconciling) {
         const auto journal_state = journal_.transition_journal(
             key, JournalState::reconciling);
         if (!journal_state.accepted())
             return false;
         record = journal_state.record;
     }
-    if (!record || record->operation_state == OperationState::ambiguous)
-        return record.has_value();
-    return journal_.transition_operation(key, OperationState::ambiguous).accepted();
+    return record.has_value();
 }
 
 bool ManagedTradeOwner::state_to_submitting(
@@ -268,29 +188,6 @@ bool ManagedTradeOwner::state_to_submitting(
     return candidate &&
            (candidate->slice.state == managed_trade::OperationState::submitting ||
             candidate->enter_submitting() == managed_trade::MutationStatus::applied);
-}
-
-bool ManagedTradeOwner::apply_evidence_to_state(
-    managed_trade::ManagedTradeState *candidate, BrokerEvidence evidence) const {
-    if (!candidate)
-        return false;
-    managed_trade::MutationStatus status = managed_trade::MutationStatus::invalid_state;
-    switch (evidence.kind) {
-    case BrokerEvidenceKind::fill:
-        status = candidate->record_fill(evidence.volume);
-        break;
-    case BrokerEvidenceKind::cancel_accepted:
-        status = candidate->record_cancel_accepted();
-        break;
-    case BrokerEvidenceKind::rejected:
-        status = candidate->record_rejected();
-        break;
-    case BrokerEvidenceKind::unknown:
-        status = candidate->record_unknown();
-        break;
-    }
-    return status == managed_trade::MutationStatus::applied &&
-           candidate->reconcile() == managed_trade::MutationStatus::applied;
 }
 
 } // namespace mt5bridge::dispatch

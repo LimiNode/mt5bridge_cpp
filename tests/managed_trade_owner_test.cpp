@@ -3,6 +3,7 @@
 
 #include "managed_trade_owner.hpp"
 
+#include <mt5bridge/dispatch/operation_recovery.hpp>
 #include <mt5bridge.hpp>
 
 #include <cstdlib>
@@ -206,7 +207,7 @@ int main() {
         ready.environment_proof = consistency.proof;
         const auto executed = owner.execute_pending(ready);
         require(executed.status ==
-                    mt5bridge::dispatch::OwnerStepStatus::awaiting_evidence &&
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
                     executed.execution_status ==
                         mt5bridge::runtime::OneShotExecutionStatus::completed &&
                     executed.retcode == 10009 && transport.calls == 1 &&
@@ -214,15 +215,21 @@ int main() {
                         mt5bridge::managed_trade::OperationState::submitting,
                 "owner loop did not require durable permit before one-shot execution");
 
-        const auto filled = owner.apply_evidence(
-            {mt5bridge::dispatch::BrokerEvidenceKind::fill, 5});
-        require(filled.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
+        const auto accepted_record =
+            executed.key ? journal.find(*executed.key) : std::nullopt;
+        require(executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    accepted_record &&
+                    (accepted_record->journal_state ==
+                         mt5bridge::JournalState::result_persisted ||
+                     accepted_record->journal_state ==
+                         mt5bridge::JournalState::reconciling) &&
+                    accepted_record->operation_state ==
+                        mt5bridge::OperationState::accepted &&
                     owner.state().slice.state ==
-                        mt5bridge::managed_trade::OperationState::filled &&
-                    owner.state().open_volume == 5 && filled.record &&
-                    filled.record->journal_state == mt5bridge::JournalState::reconciling &&
-                    filled.record->operation_state == mt5bridge::OperationState::filled,
-                "owner loop did not reconcile durable broker evidence");
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    owner.state().open_volume == 0,
+                "owner loop allowed unproven evidence to settle accepted operation");
 
         mt5bridge::managed_trade::ManagedTradeState uncertain_initial;
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(
@@ -248,18 +255,62 @@ int main() {
         require(uncertain_result.status ==
                     mt5bridge::dispatch::OwnerStepStatus::ambiguous &&
                     uncertain_owner.state().slice.state ==
-                        mt5bridge::managed_trade::OperationState::ambiguous &&
+                        mt5bridge::managed_trade::OperationState::submitting &&
                     uncertain_result.record &&
                     uncertain_result.record->journal_state ==
                         mt5bridge::JournalState::reconciling &&
                     uncertain_result.record->operation_state ==
-                        mt5bridge::OperationState::ambiguous &&
+                        mt5bridge::OperationState::submitting &&
+                    mt5bridge::OperationRecoveryCoordinator::classify(
+                        *uncertain_result.record) ==
+                        mt5bridge::OperationRecoveryAction::reconcile_only &&
                     uncertain_transport.calls == 1,
-                "transport uncertainty did not become durable ambiguous state");
+                "transport uncertainty did not become durable reconcile-only state");
         const auto retry = uncertain_owner.execute_pending(ready);
         require(retry.status == mt5bridge::dispatch::OwnerStepStatus::invalid_state &&
                     uncertain_transport.calls == 1,
-                "ambiguous owner state enabled a second backend call");
+                "unresolved owner state enabled a second backend call");
+
+        mt5bridge::managed_trade::ManagedTradeState pre_transport_initial;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &pre_transport_initial, mt5bridge::managed_trade::TradeId{9}, 5, 5, 4),
+                "pre-transport owner state initialization failed");
+        FakeTransport pre_transport;
+        FakeAccountProbe pre_transport_probe({operation_account,
+                                               mt5bridge::AccountKey{"Other-Terminal", 9}});
+        mt5bridge::dispatch::ManagedTradeOwner pre_transport_owner(
+            pre_transport_initial, operation_account, journal, admission, backend,
+            pre_transport_probe, lease, pre_transport);
+        mt5bridge::dispatch::ManagedTradeIntent pre_transport_intent{
+            {0x04},
+            {operation_account, coordinator.capture_baseline(),
+             {mt5bridge::require_active_order(997)},
+             mt5bridge::OperationState::filled}};
+        require(pre_transport_owner.prepare_open(5, std::move(pre_transport_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "pre-transport owner did not prepare intent");
+        const auto pre_transport_result = pre_transport_owner.execute_pending(ready);
+        require(pre_transport_result.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::ambiguous &&
+                    pre_transport_result.execution_status ==
+                        mt5bridge::runtime::OneShotExecutionStatus::account_mismatch &&
+                    pre_transport_result.record &&
+                    pre_transport_result.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    pre_transport_result.record->operation_state ==
+                        mt5bridge::OperationState::submitting &&
+                    mt5bridge::OperationRecoveryCoordinator::classify(
+                        *pre_transport_result.record) ==
+                        mt5bridge::OperationRecoveryAction::reconcile_only &&
+                    pre_transport_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    pre_transport.calls == 0,
+                "post-barrier account failure reached transport or remained resendable");
+        const auto pre_transport_retry = pre_transport_owner.execute_pending(ready);
+        require(pre_transport_retry.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::invalid_state &&
+                    pre_transport.calls == 0,
+                "post-barrier failure enabled a second send");
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

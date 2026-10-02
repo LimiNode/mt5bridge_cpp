@@ -18,7 +18,7 @@ namespace mt5bridge::dispatch {
 /// \brief Reports one bounded owner-loop progression step.
 enum class OwnerStepStatus {
     prepared,          ///< Intent and descriptor are durably ready for admission.
-    awaiting_evidence, ///< One broker result is durable; logical fill evidence is pending.
+    awaiting_reconciliation, ///< A durable result awaits authoritative observation.
     completed,          ///< The managed operation reached a terminal logical state.
     ambiguous,          ///< The outcome is non-resendable and needs fresh observation.
     invalid_request,    ///< Caller input or the managed state is malformed.
@@ -26,17 +26,6 @@ enum class OwnerStepStatus {
     durable_failure,    ///< A required journal mutation was not committed.
     admission_rejected, ///< The dispatch barrier did not open; transport was not called.
     execution_failed,   ///< The guarded backend did not complete its call path.
-};
-
-/// \enum BrokerEvidenceKind
-/// \brief Identifies the evidence supplied after a durable broker result.
-enum class BrokerEvidenceKind { fill, cancel_accepted, rejected, unknown };
-
-/// \struct BrokerEvidence
-/// \brief Minimal logical evidence needed to advance one managed operation.
-struct BrokerEvidence {
-    BrokerEvidenceKind kind = BrokerEvidenceKind::unknown;
-    managed_trade::Volume volume = 0;
 };
 
 /// \struct ManagedTradeIntent
@@ -61,7 +50,7 @@ struct OwnerStepResult {
     /// \return True for prepared, awaiting-evidence, completed, or ambiguous outcomes.
     bool applied() const {
         return status == OwnerStepStatus::prepared ||
-               status == OwnerStepStatus::awaiting_evidence ||
+               status == OwnerStepStatus::awaiting_reconciliation ||
                status == OwnerStepStatus::completed ||
                status == OwnerStepStatus::ambiguous;
     }
@@ -113,11 +102,6 @@ public:
     /// \return Admission, execution, or unresolved outcome.
     OwnerStepResult execute_pending(const DispatchAdmissionRequest &request);
 
-    /// \brief Applies logical evidence after a durable broker result.
-    /// \param evidence Fill/cancel/rejection/unknown evidence from reconciliation.
-    /// \return Terminal, ambiguous, invalid, or durable-failure result.
-    OwnerStepResult apply_evidence(BrokerEvidence evidence);
-
 private:
     /// \brief Derives the account-scoped key for the current logical slice.
     std::optional<OperationKey> current_key() const;
@@ -127,15 +111,11 @@ private:
                                std::optional<OperationKey> key = std::nullopt,
                                std::optional<OperationRecord> record = std::nullopt) const;
 
-    /// \brief Moves the durable journal record to non-resendable ambiguity.
-    bool mark_journal_ambiguous(const OperationKey &key);
+    /// \brief Moves the durable journal record to observation-only reconciliation.
+    bool mark_journal_reconciling(const OperationKey &key);
 
     /// \brief Mirrors the backend's durable submitting edge in a candidate state.
     bool state_to_submitting(managed_trade::ManagedTradeState *candidate) const;
-
-    /// \brief Applies one logical broker evidence item to a candidate state.
-    bool apply_evidence_to_state(managed_trade::ManagedTradeState *candidate,
-                                 BrokerEvidence evidence) const;
 
     managed_trade::ManagedTradeState state_;
     AccountKey account_;

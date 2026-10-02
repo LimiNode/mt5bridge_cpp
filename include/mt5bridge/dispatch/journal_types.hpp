@@ -51,7 +51,7 @@ struct ReconciliationDescriptor {
     AccountKey account; ///< Immutable account scope of the operation.
     ReconciliationBaseline baseline; ///< Graph baseline captured before dispatch.
     std::vector<ReconciliationPredicate> predicates; ///< Required evidence assertions.
-    OperationState settled_state = OperationState::filled; ///< State proven on confirmation.
+    OperationState settled_state = OperationState::filled; ///< Candidate state for settlement.
     std::uint64_t trade_id = 0; ///< Managed trade identity bound at persistence time.
     std::uint64_t operation_id = 0; ///< Side-effect identity bound at persistence time.
 

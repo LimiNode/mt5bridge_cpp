@@ -18,7 +18,6 @@ namespace mt5bridge {
 /// \enum OperationReconciliationStatus
 /// \brief Reports one journal-aware reconciliation cycle.
 enum class OperationReconciliationStatus {
-    progressed,          ///< Evidence settled and lifecycle was durably advanced.
     confirmed,           ///< Predicates confirmed; lifecycle remains reconciling.
     pending,             ///< More authoritative observations are required.
     not_observed,        ///< Deadline elapsed without proof; operation remains open.
@@ -38,12 +37,6 @@ struct OperationReconciliationCycle {
         OperationReconciliationStatus::operation_not_found;
     std::optional<ReconciliationWorkerCycle> observation;
     std::optional<OperationRecord> record;
-
-    /// \brief Tests whether this cycle durably settled the operation.
-    /// \return True only after a successful lifecycle transition.
-    bool progressed() const {
-        return status == OperationReconciliationStatus::progressed;
-    }
 
     /// \brief Tests whether predicates were confirmed without a terminal write.
     /// \return True for an observation-only confirmation.
@@ -74,9 +67,8 @@ public:
     /// \param coordinator Coordinator used for authoritative refreshes.
     /// \param collection_request Domains refreshed on each cycle.
     /// \param reconciliation_request Explicit evidence predicates and baseline.
-    /// \param settled_state Candidate state for confirmed predicates. Fill and
-    ///        partial-fill states remain `reconciling` until semantic settlement
-    ///        evidence is available.
+    /// \param settled_state Candidate lifecycle state retained in the durable
+    ///        descriptor. Generic confirmation never applies this state.
     OperationReconciliationWorker(
         OperationJournal &journal, OperationKey key,
         ObservationCoordinator &coordinator,
@@ -188,16 +180,8 @@ private:
             return {OperationReconciliationStatus::invalid_request, cycle,
                     journal_.find(key_)};
 
-        if (settled_state_ == OperationState::filled ||
-            settled_state_ == OperationState::partially_filled)
-            return {OperationReconciliationStatus::confirmed, cycle,
-                    journal_.find(key_)};
-
-        const auto advanced = journal_.transition_operation(key_, settled_state_);
-        if (!advanced.accepted())
-            return {OperationReconciliationStatus::persistence_failed, cycle,
-                    journal_.find(key_)};
-        return {OperationReconciliationStatus::progressed, cycle, advanced.record};
+        return {OperationReconciliationStatus::confirmed, cycle,
+                journal_.find(key_)};
     }
 
 public:

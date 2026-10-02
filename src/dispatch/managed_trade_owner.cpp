@@ -188,8 +188,7 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
     if (!current || !current->reconciliation_descriptor)
         return result_for(OwnerStepStatus::invalid_state, key, current);
     const auto settled_state = current->reconciliation_descriptor->settled_state;
-    if (settled_state != OperationState::filled &&
-        settled_state != OperationState::rejected)
+    if (settled_state != OperationState::filled)
         return result_for(OwnerStepStatus::invalid_state, key, current);
 
     const auto cycle = worker.step(trade_event_gap, deadline_expired);
@@ -221,8 +220,6 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
         }
         result.status = OwnerStepStatus::ambiguous;
         return result;
-    case OperationReconciliationStatus::progressed:
-        break;
     case OperationReconciliationStatus::invalid_request:
         result.status = OwnerStepStatus::invalid_request;
         return result;
@@ -241,21 +238,6 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
         return result;
     }
 
-    if (!cycle.record || !has_observation_provenance(cycle, worker, *key,
-                                                      *cycle.record))
-        return result;
-    if (cycle.record->operation_state != settled_state)
-        return result;
-
-    if (settled_state != OperationState::rejected)
-        return result;
-
-    auto candidate = state_;
-    if (candidate.record_rejected() != managed_trade::MutationStatus::applied ||
-        candidate.reconcile() != managed_trade::MutationStatus::applied)
-        return result;
-    state_ = std::move(candidate);
-    result.status = OwnerStepStatus::completed;
     return result;
 }
 

@@ -3,6 +3,7 @@
 
 #include <mt5bridge.hpp>
 
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -130,6 +131,41 @@ void enter_dispatching(mt5bridge::OperationJournal &journal,
     require(journal.transition_journal(key, mt5bridge::JournalState::dispatching, 77)
                 .accepted(),
             "dispatch barrier was not persisted");
+}
+
+void require_candidate_does_not_terminalize(
+    mt5bridge::OperationJournal &journal, std::uint64_t trade_id,
+    std::uint64_t operation_id, mt5bridge::OperationState candidate) {
+    const auto key = mt5bridge::OperationKey{account(), trade_id, operation_id};
+    require(journal.create(key, {0x0b, static_cast<std::uint8_t>(trade_id)}).accepted(),
+            "terminal-candidate operation create failed");
+
+    FakeProvider provider({batch(key.account, false), batch(key.account, false),
+                           batch(key.account, true)});
+    mt5bridge::ObservationCoordinator coordinator(provider, key.account);
+    mt5bridge::ObservationCollectionRequest collection;
+    collection.observe_positions = false;
+    require(coordinator.refresh(collection).apply.accepted(),
+            "terminal-candidate baseline refresh failed");
+    mt5bridge::ReconciliationRequest request;
+    request.baseline = coordinator.capture_baseline();
+    request.predicates = {mt5bridge::require_active_order(100)};
+    enter_dispatching(
+        journal, key,
+        mt5bridge::ReconciliationDescriptor{key.account, *request.baseline,
+                                             request.predicates, candidate});
+    mt5bridge::OperationReconciliationWorker worker(
+        journal, key, coordinator, collection, request, candidate);
+    require(worker.step().status ==
+                mt5bridge::OperationReconciliationStatus::pending,
+            "terminal-candidate observation did not remain pending");
+    const auto confirmed = worker.step();
+    require(confirmed.status ==
+                mt5bridge::OperationReconciliationStatus::confirmed &&
+                confirmed.record &&
+                confirmed.record->operation_state ==
+                    mt5bridge::OperationState::reconciling,
+            "generic predicate terminalized a caller-selected lifecycle state");
 }
 
 } // namespace
@@ -531,6 +567,13 @@ int main() {
                     partial_cycle.record->operation_state ==
                         mt5bridge::OperationState::reconciling,
                 "partial active-order observation became terminal");
+
+        require_candidate_does_not_terminalize(
+            journal, 20, 24, mt5bridge::OperationState::rejected);
+        require_candidate_does_not_terminalize(
+            journal, 21, 25, mt5bridge::OperationState::cancelled);
+        require_candidate_does_not_terminalize(
+            journal, 22, 26, mt5bridge::OperationState::expired);
 
         MemoryStore restart_store = store;
         mt5bridge::OperationJournal restarted(restart_store);

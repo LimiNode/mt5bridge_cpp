@@ -53,9 +53,8 @@ during recovery.
 The mapping is deliberately fail-closed:
 
 ```text
-confirmed       -> durable caller-selected safe terminal state; a
-                   `filled`/`partially_filled` candidate remains reconciling
-                   until semantic executed-volume evidence is supplied
+confirmed       -> leave `reconciling`; this is an observation result, not a
+                   caller-selected lifecycle transition
 ambiguous       -> durable ambiguous
 pending         -> leave reconciling
 not_observed    -> leave reconciling
@@ -64,12 +63,12 @@ account_mismatch-> leave reconciling and suspend this worker; the owner creates
                   a new worker only after the correct account is restored
 ```
 
-Only safe `confirmed` and contradictory-evidence paths mutate the lifecycle.
-No path creates a new `DispatchPermit` or invokes a transport. A partial or
-full fill candidate is represented as unresolved `reconciling` until a later
-settlement slice proves executed volume; a later remainder must be handled by
-a new caller-owned worker and a new operation identity after the remainder is
-proven.
+Only contradictory evidence may mutate the operation lifecycle in this generic
+worker. A confirmed predicate never applies the descriptor's candidate state;
+full and partial fill, cancellation, expiry, and rejection require a separate
+semantic settlement path. No path creates a new `DispatchPermit` or invokes a
+transport. A later remainder must be handled by a new caller-owned worker and
+a new operation identity after the remainder is proven.
 
 ## Consequences
 
@@ -85,7 +84,8 @@ proven.
 `tests/operation_reconciliation_worker_test.cpp` covers discovery without a
 known key, normalization of a recovered dispatching record, pending evidence,
 event gaps, account mismatch suspension, contradictory evidence settling to
-durable `ambiguous`, and direct worker confirmation that fill/partial-fill
-predicates remain unresolved. Existing journal,
+durable `ambiguous`, and direct worker confirmation that arbitrary predicates
+remain unresolved for fill, partial-fill, cancellation, expiry, and rejection.
+Existing journal,
 one-shot backend, observation, and header self-containment tests are unchanged
 and remain part of the focused runtime-off suite.

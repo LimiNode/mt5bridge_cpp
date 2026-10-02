@@ -61,6 +61,20 @@ target_include_directories(mt5bridge_managed_trade PRIVATE
                            ${PROJECT_SOURCE_DIR}/src/trade)
 add_library(mt5bridge::managed_trade ALIAS mt5bridge_managed_trade)
 
+# Private owner-loop orchestration composes managed logical state with the
+# durable journal, admission barrier, and one-shot backend.  It remains
+# Python-free and exposes no public send API.
+add_library(mt5bridge_managed_trade_owner STATIC
+            src/dispatch/managed_trade_owner.cpp)
+target_include_directories(mt5bridge_managed_trade_owner PRIVATE
+                           ${PROJECT_SOURCE_DIR}/include
+                           ${PROJECT_SOURCE_DIR}/src/dispatch
+                           ${PROJECT_SOURCE_DIR}/src/trade)
+target_link_libraries(mt5bridge_managed_trade_owner PRIVATE
+                      mt5bridge::managed_trade mt5bridge::journal
+                      mt5bridge::one_shot_backend)
+add_library(mt5bridge::managed_trade_owner ALIAS mt5bridge_managed_trade_owner)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -169,6 +183,16 @@ if(BUILD_TESTING)
                           mt5bridge::managed_trade)
     add_test(NAME mt5bridge_managed_trade_state
              COMMAND mt5bridge_managed_trade_state_test)
+    add_executable(mt5bridge_managed_trade_owner_test
+                   tests/managed_trade_owner_test.cpp)
+    target_include_directories(mt5bridge_managed_trade_owner_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/include
+                               ${PROJECT_SOURCE_DIR}/src/dispatch
+                               ${PROJECT_SOURCE_DIR}/src/trade)
+    target_link_libraries(mt5bridge_managed_trade_owner_test PRIVATE
+                          mt5bridge::managed_trade_owner)
+    add_test(NAME mt5bridge_managed_trade_owner
+             COMMAND mt5bridge_managed_trade_owner_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)

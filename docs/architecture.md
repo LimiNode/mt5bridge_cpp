@@ -311,8 +311,14 @@ worker process.
    owner-loop policy in
    [ADR-0017](adr/0017-operation-recovery-and-reconciliation-worker.md): every
    recovered post-dispatch record is observation-only and never resendable.
-   The next layer is the high-level asynchronous `TradeManager`; its
-   side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
+   The private `dispatch::ManagedTradeOwner` composition seam now binds one
+   bounded open slice to that journal, the admission barrier, and the one-shot
+   backend. It accepts logical broker evidence separately from the opaque raw
+   result and converts uncertainty to durable `ambiguous`; managed state alone
+   never authorizes a send. Close/cancel planning and restart reconstruction of
+   aggregate managed exposure remain later slices. The next public-facing layer
+   is the high-level asynchronous `TradeManager`; its side-effecting methods
+   must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
 10. Add hybrid virtual/broker exit policies and a risk engine only after the

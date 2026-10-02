@@ -316,14 +316,15 @@ are always `reconcile_only`. Already terminal lifecycle states remain terminal.
 `OperationReconciliationWorker` combines one such journal record with the
 caller-driven observation worker. It durably normalizes post-dispatch records
 to `reconciling`, then applies only explicit predicates over fresh graph
-evidence. A confirmed predicate set advances to the caller-selected state
-(normally `filled`); contradictory evidence becomes `ambiguous`. `pending`,
-`not_observed`, event gaps, and account mismatch leave the operation unresolved
-and never authorize a resend. Recovery workers require the coordinator graph
-to be already bound to the operation's `AccountKey`; an unbound or foreign
-graph returns `ACCOUNT_MISMATCH` before provider collection. A partial fill is selected explicitly as
-`partially_filled`; a later remainder is a new operation decision, not a blind
-retry of the old side effect.
+evidence. A confirmed predicate set may advance a safe caller-selected state;
+`filled` and `partially_filled` remain `reconciling` until a separate
+provenance-bearing settlement slice proves executed volume. Contradictory
+evidence becomes `ambiguous`. `pending`, `not_observed`, event gaps, and
+account mismatch leave the operation unresolved and never authorize a resend.
+Recovery workers require the coordinator graph to be already bound to the
+operation's `AccountKey`; an unbound or foreign graph returns
+`ACCOUNT_MISMATCH` before provider collection. A later remainder is a new
+operation decision, not a blind retry of the old side effect.
 
 ## Quickstart scenarios
 

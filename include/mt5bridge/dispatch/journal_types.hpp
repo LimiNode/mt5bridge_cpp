@@ -43,9 +43,10 @@ enum class OperationState {
 /// \brief Immutable post-dispatch evidence contract retained in the journal.
 ///
 /// The descriptor contains the pre-side-effect baseline, explicit predicates,
-/// and lifecycle state that a confirmed reconciliation may settle. Deadline
-/// and event-gap hints remain owner-loop inputs and are intentionally not
-/// durable evidence.
+/// and candidate lifecycle state for a confirmed reconciliation. Fill and
+/// partial-fill candidates still require a separate semantic settlement
+/// proof. Deadline and event-gap hints remain owner-loop inputs and are
+/// intentionally not durable evidence.
 struct ReconciliationDescriptor {
     AccountKey account; ///< Immutable account scope of the operation.
     ReconciliationBaseline baseline; ///< Graph baseline captured before dispatch.

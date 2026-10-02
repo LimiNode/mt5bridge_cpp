@@ -192,9 +192,7 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
         settled_state != OperationState::rejected)
         return result_for(OwnerStepStatus::invalid_state, key, current);
 
-    const auto cycle = settled_state == OperationState::filled
-                           ? worker.observe(trade_event_gap, deadline_expired)
-                           : worker.step(trade_event_gap, deadline_expired);
+    const auto cycle = worker.step(trade_event_gap, deadline_expired);
     auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
     if (!result.record)
         result.record = journal_.find(*key);

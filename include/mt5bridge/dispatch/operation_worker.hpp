@@ -58,10 +58,14 @@ struct OperationReconciliationCycle {
 /// The worker normalizes any recovered post-dispatch record to the
 /// `reconciling` journal state before collecting evidence. `pending`,
 /// `not_observed`, and event gaps never become terminal and never permit a
-/// resend. The caller supplies explicit predicates and the lifecycle state
-/// that those predicates prove; broker result payloads remain hints only.
-/// `observe()` permanently keeps confirmed predicates in `reconciling` so an
-/// owner can wait for semantic settlement evidence such as executed volume.
+/// resend. The caller supplies explicit predicates and a candidate lifecycle
+/// state; broker result payloads remain hints only. Fill states stay unresolved
+/// until a separate provenance-bearing settlement path supplies semantic
+/// executed-volume evidence.
+/// Confirmation of `filled` or `partially_filled` is deliberately observation
+/// only.  Those states require semantic settlement evidence (for example an
+/// attributed executed-volume history), so a predicate such as
+/// `active_order_present` cannot terminalize the journal by itself.
 class OperationReconciliationWorker {
 public:
     /// \brief Binds one operation to a caller-driven observation worker.
@@ -70,7 +74,9 @@ public:
     /// \param coordinator Coordinator used for authoritative refreshes.
     /// \param collection_request Domains refreshed on each cycle.
     /// \param reconciliation_request Explicit evidence predicates and baseline.
-    /// \param settled_state State proven when all predicates are confirmed.
+    /// \param settled_state Candidate state for confirmed predicates. Fill and
+    ///        partial-fill states remain `reconciling` until semantic settlement
+    ///        evidence is available.
     OperationReconciliationWorker(
         OperationJournal &journal, OperationKey key,
         ObservationCoordinator &coordinator,
@@ -109,23 +115,13 @@ public:
     OperationReconciliationWorker &operator=(const OperationReconciliationWorker &) =
         delete;
 
-    /// \brief Performs one refresh and applies proven durable transitions.
+    /// \brief Performs one refresh and applies safe durable transitions.
     /// \param trade_event_gap True when event hints lost continuity.
     /// \param deadline_expired True when the bounded wait elapsed.
     /// \return Evidence and the resulting durable lifecycle status.
     OperationReconciliationCycle step(bool trade_event_gap = false,
                                       bool deadline_expired = false) {
-        return step_impl(trade_event_gap, deadline_expired, !observation_only_);
-    }
-
-    /// \brief Performs one refresh while leaving confirmed lifecycle unresolved.
-    /// \param trade_event_gap True when event hints lost continuity.
-    /// \param deadline_expired True when the bounded wait elapsed.
-    /// \return Observation evidence with a non-terminal confirmed result.
-    OperationReconciliationCycle observe(bool trade_event_gap = false,
-                                         bool deadline_expired = false) {
-        observation_only_ = true;
-        return step_impl(trade_event_gap, deadline_expired, false);
+        return step_impl(trade_event_gap, deadline_expired);
     }
 
     /// \brief Returns the effective graph-local baseline used by reconciliation.
@@ -136,8 +132,7 @@ public:
 
 private:
     OperationReconciliationCycle step_impl(bool trade_event_gap,
-                                           bool deadline_expired,
-                                           bool apply_confirmed_transition) {
+                                           bool deadline_expired) {
         const auto current = journal_.find(key_);
         if (!current)
             return {OperationReconciliationStatus::operation_not_found,
@@ -193,7 +188,8 @@ private:
             return {OperationReconciliationStatus::invalid_request, cycle,
                     journal_.find(key_)};
 
-        if (!apply_confirmed_transition)
+        if (settled_state_ == OperationState::filled ||
+            settled_state_ == OperationState::partially_filled)
             return {OperationReconciliationStatus::confirmed, cycle,
                     journal_.find(key_)};
 
@@ -395,7 +391,6 @@ private:
     std::optional<ReconciliationDescriptor> descriptor_;
     ReconciliationWorker worker_;
     OperationState settled_state_;
-    bool observation_only_ = false;
 };
 
 } // namespace mt5bridge

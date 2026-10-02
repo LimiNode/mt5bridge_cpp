@@ -477,6 +477,13 @@ AmbiguousAttemptIsNonResendable ==
 SliceBound ==
     sliceCount <= MaxOperations
 
+OperationHistoryBound ==
+    sliceCount <= operationId
+
+OperationHistoryOrigin ==
+    (sliceCount = 0 => operationId = 0) /\
+    (operationId = 0 => sliceCount = 0)
+
 ClosedTradeHasNoExposure ==
     TradeState = "closed" =>
         obligationSatisfied /\ openVolume = 0 /\ pendingRemainderVolume = 0

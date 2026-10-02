@@ -201,6 +201,22 @@ void test_corrupt_durable_values_fail_closed() {
     invalid_cancel_result.slice.send_count = 1;
     require(!invalid_cancel_result.valid(),
             "cancel result with non-zero fill passed durable validation");
+
+    auto impossible_history = make_trade();
+    impossible_history.plan.slice_count = 1;
+    require(!impossible_history.valid(),
+            "slice history without an operation id passed durable validation");
+
+    auto impossible_operation_history = make_trade();
+    impossible_operation_history.slice.operation_id = 1;
+    require(!impossible_operation_history.valid(),
+            "operation history without a slice passed durable validation");
+
+    auto impossible_counter_order = make_trade();
+    impossible_counter_order.plan.slice_count = 2;
+    impossible_counter_order.slice.operation_id = 1;
+    require(!impossible_counter_order.valid(),
+            "slice count beyond operation history passed durable validation");
 }
 
 } // namespace

@@ -36,6 +36,9 @@ and close management.
 Durable validation is fail-closed: unknown enum values, a close request without
 its durable history bit, and broker evidence that is inconsistent with the
 operation kind are rejected before the state can be recovered or acted upon.
+Every operation sequence originates with an open slice, so `slice_count` never
+exceeds `operation_id`, and zero in one counter is equivalent to zero in the
+other.
 
 The implementation uses logical integer volume units. Broker volume scaling,
 ticket identity, result payloads, leases, dispatch permits, and observation

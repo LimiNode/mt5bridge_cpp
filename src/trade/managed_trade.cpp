@@ -200,6 +200,8 @@ bool ManagedTradeState::valid() const {
     if (!trade_id.valid() || !plan.valid() || open_volume > plan.target_volume ||
         pending_remainder_volume > plan.target_volume ||
         !add_within(open_volume, pending_remainder_volume, plan.target_volume) ||
+        plan.slice_count > slice.operation_id ||
+        ((plan.slice_count == 0) != (slice.operation_id == 0)) ||
         slice.operation_id > plan.max_operations ||
         !slice.valid(plan.target_volume) ||
         !close_obligation.valid(open_volume, pending_remainder_volume,

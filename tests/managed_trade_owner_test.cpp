@@ -306,6 +306,27 @@ int main() {
                         mt5bridge::managed_trade::OperationState::submitting &&
                     pre_transport.calls == 0,
                 "post-barrier account failure reached transport or remained resendable");
+
+        mt5bridge::OperationJournal recovered_journal(store);
+        const auto recovered =
+            mt5bridge::OperationRecoveryCoordinator::recover(recovered_journal);
+        const auto recovered_entry =
+            pre_transport_result.key
+                ? recovered_journal.find(*pre_transport_result.key)
+                : std::nullopt;
+        const auto recovered_classification =
+            recovered_entry
+                ? mt5bridge::OperationRecoveryCoordinator::classify(*recovered_entry)
+                : mt5bridge::OperationRecoveryAction::terminal;
+        require(recovered.accepted() && recovered_entry &&
+                    recovered_entry->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    recovered_entry->operation_state ==
+                        mt5bridge::OperationState::submitting &&
+                    recovered_classification ==
+                        mt5bridge::OperationRecoveryAction::reconcile_only,
+                "post-barrier record did not survive restart as reconcile-only");
+
         const auto pre_transport_retry = pre_transport_owner.execute_pending(ready);
         require(pre_transport_retry.status ==
                     mt5bridge::dispatch::OwnerStepStatus::invalid_state &&

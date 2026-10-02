@@ -63,7 +63,8 @@ struct OwnerStepResult {
 /// managed state never authorizes a broker call by itself: `execute_pending`
 /// must obtain a fresh `DispatchPermit`, and only the guarded one-shot backend
 /// receives that permit. Broker result payloads remain owned by the journal;
-/// the owner accepts only small logical evidence for the managed state.
+/// the owner does not accept caller-supplied settlement evidence. Authoritative
+/// managed settlement is delegated to provenance-bearing reconciliation.
 class ManagedTradeOwner {
 public:
     /// \brief Binds one managed state to the dispatch/reconciliation seams.

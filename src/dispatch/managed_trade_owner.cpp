@@ -168,6 +168,90 @@ OwnerStepResult ManagedTradeOwner::execute_pending(
     return result;
 }
 
+OwnerStepResult ManagedTradeOwner::settle_reconciliation(
+    OperationReconciliationWorker &worker, bool trade_event_gap,
+    bool deadline_expired) {
+    if (!state_.valid())
+        return result_for(OwnerStepStatus::invalid_request);
+    if (state_.slice.state != managed_trade::OperationState::submitting)
+        return result_for(OwnerStepStatus::invalid_state, current_key());
+    if (state_.slice.kind != managed_trade::OperationKind::open)
+        return result_for(OwnerStepStatus::invalid_state, current_key());
+
+    const auto key = current_key();
+    if (!key)
+        return result_for(OwnerStepStatus::invalid_request);
+    if (worker.key() != *key)
+        return result_for(OwnerStepStatus::invalid_request, key,
+                          journal_.find(*key));
+    const auto current = journal_.find(*key);
+    if (!current || !current->reconciliation_descriptor)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+    const auto settled_state = current->reconciliation_descriptor->settled_state;
+    if (settled_state != OperationState::filled &&
+        settled_state != OperationState::rejected)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+
+    const auto cycle = worker.step(trade_event_gap, deadline_expired);
+    auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
+    if (!result.record)
+        result.record = journal_.find(*key);
+
+    switch (cycle.status) {
+    case OperationReconciliationStatus::pending:
+    case OperationReconciliationStatus::not_observed:
+    case OperationReconciliationStatus::trade_event_gap:
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    case OperationReconciliationStatus::account_mismatch:
+    case OperationReconciliationStatus::ambiguous:
+        if (!cycle.record ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record)) {
+            result.status = OwnerStepStatus::ambiguous;
+            return result;
+        }
+        if (cycle.record->operation_state != OperationState::ambiguous)
+            return result;
+        {
+            auto candidate = state_;
+            if (candidate.record_unknown() != managed_trade::MutationStatus::applied ||
+                candidate.reconcile() != managed_trade::MutationStatus::applied)
+                return result;
+            state_ = std::move(candidate);
+        }
+        result.status = OwnerStepStatus::ambiguous;
+        return result;
+    case OperationReconciliationStatus::progressed:
+        break;
+    case OperationReconciliationStatus::invalid_request:
+        result.status = OwnerStepStatus::invalid_request;
+        return result;
+    case OperationReconciliationStatus::operation_not_found:
+    case OperationReconciliationStatus::invalid_state:
+        result.status = OwnerStepStatus::invalid_state;
+        return result;
+    case OperationReconciliationStatus::persistence_failed:
+        return result;
+    }
+
+    if (!cycle.record || !has_observation_provenance(cycle, worker, *key,
+                                                      *cycle.record))
+        return result;
+    if (cycle.record->operation_state != settled_state)
+        return result;
+
+    auto candidate = state_;
+    const auto recorded = settled_state == OperationState::rejected
+                              ? candidate.record_rejected()
+                              : candidate.record_fill(candidate.slice.requested_volume);
+    if (recorded != managed_trade::MutationStatus::applied ||
+        candidate.reconcile() != managed_trade::MutationStatus::applied)
+        return result;
+    state_ = std::move(candidate);
+    result.status = OwnerStepStatus::completed;
+    return result;
+}
+
 bool ManagedTradeOwner::mark_journal_reconciling(const OperationKey &key) {
     auto record = journal_.find(key);
     if (!record || !journal_at_least_dispatching(record->journal_state))
@@ -188,6 +272,34 @@ bool ManagedTradeOwner::state_to_submitting(
     return candidate &&
            (candidate->slice.state == managed_trade::OperationState::submitting ||
             candidate->enter_submitting() == managed_trade::MutationStatus::applied);
+}
+
+bool ManagedTradeOwner::has_observation_provenance(
+    const OperationReconciliationCycle &cycle,
+    const OperationReconciliationWorker &worker, const OperationKey &key,
+    const OperationRecord &record) const {
+    if (!record.valid() || record.key != key || !cycle.observation ||
+        !cycle.observation->refresh.apply.accepted() ||
+        !cycle.observation->refresh.sample)
+        return false;
+
+    const auto &sample = *cycle.observation->refresh.sample;
+    if (sample.batch().account != key.account || sample.graph_instance_id() == 0 ||
+        sample.graph_revision() == 0 ||
+        sample.graph_instance_id() != worker.graph().instance_id() ||
+        sample.graph_revision() != worker.graph().revision() ||
+        sample.graph_revision() != cycle.observation->reconciliation.evaluated_revision)
+        return false;
+    if (!record.reconciliation_descriptor ||
+        sample.graph_revision() <=
+            record.reconciliation_descriptor->baseline.graph_revision())
+        return false;
+
+    const auto durable = journal_.find(key);
+    return durable && durable->key == record.key &&
+           durable->revision == record.revision &&
+           durable->journal_state == record.journal_state &&
+           durable->operation_state == record.operation_state;
 }
 
 } // namespace mt5bridge::dispatch

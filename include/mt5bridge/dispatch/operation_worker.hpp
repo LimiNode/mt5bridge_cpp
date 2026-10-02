@@ -174,6 +174,14 @@ public:
         return worker_.last_cycle();
     }
 
+    /// \brief Returns the immutable operation identity owned by this worker.
+    /// \return Account-scoped durable operation key.
+    const OperationKey &key() const { return key_; }
+
+    /// \brief Returns the graph used to produce worker provenance.
+    /// \return Read-only observation graph bound to this worker.
+    const ObservationGraph &graph() const { return worker_.graph(); }
+
 private:
     static std::optional<ReconciliationDescriptor> make_descriptor(
         const OperationKey &key, const ReconciliationRequest &request,

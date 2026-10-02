@@ -18,7 +18,7 @@ ManagedTradeState
   -> move-only DispatchPermit
   -> OneShotDispatchBackend
   -> durable raw result
-  -> reconciliation worker (later slice)
+  -> provenance-bearing reconciliation worker
   -> provenance-bearing lifecycle settlement
 ```
 
@@ -32,9 +32,10 @@ candidate becomes owner state only after those durable mutations succeed.
 The backend's raw result remains opaque and durable in the journal. An accepted
 or reconciling result leaves the managed slice unresolved and returns
 `awaiting_reconciliation`; this seam deliberately has no plain caller-supplied
-evidence API. Only a later `OperationReconciliationWorker` cycle with
-provenance-bearing confirmed observation may settle the managed state and
-journal. A deterministic broker rejection may still settle immediately because
+evidence API. Only `settle_reconciliation()` with an
+`OperationReconciliationWorker` cycle carrying provenance-bearing observation
+may settle the managed state and journal. A deterministic broker rejection may
+still settle immediately because
 the backend has proved that no execution effect occurred. A transport failure,
 a result that cannot be durably bound, or a lease/account failure after the
 submitting edge is converted to durable `reconciling` with a non-resendable
@@ -60,6 +61,7 @@ remain subsequent slices.
 
 `tests/managed_trade_owner_test.cpp` checks that an admission rejection never
 reaches the transport, an accepted result cannot be settled by an arbitrary
-caller-supplied fill, and both transport uncertainty and a post-barrier
-pre-transport account failure produce durable `reconciling`/`reconcile_only`
-state with no second backend call.
+caller-supplied fill, a full open fill is settled only through a real
+provenance-bearing worker cycle, and both transport uncertainty and a
+post-barrier pre-transport account failure produce durable
+`reconciling`/`reconcile_only` state with no second backend call.

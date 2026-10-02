@@ -79,13 +79,14 @@ private:
     std::size_t next_ = 0;
 };
 
-mt5bridge::ObservationBatch observation_batch(const mt5bridge::AccountKey &key) {
+mt5bridge::ObservationBatch observation_batch(const mt5bridge::AccountKey &key,
+                                              std::uint64_t ticket = 20) {
     mt5bridge::ObservationBatch batch;
     batch.account = key;
     batch.observed_domains = mt5bridge::ObservationDomain::active_orders |
                              mt5bridge::ObservationDomain::positions;
     Mt5OrderSnapshot order{};
-    order.ticket = 20;
+    order.ticket = ticket;
     order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
                          MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
     batch.active_orders.push_back(order);
@@ -146,7 +147,10 @@ int main() {
         const auto operation_account = account();
         auto provider = std::make_unique<FakeObservationProvider>(
             std::vector<mt5bridge::ObservationBatch>{
-                observation_batch(operation_account), observation_batch(operation_account)});
+                observation_batch(operation_account), observation_batch(operation_account),
+                observation_batch(operation_account, 999),
+                observation_batch(operation_account, 999),
+                observation_batch(operation_account, 999)});
         mt5bridge::ObservationCoordinator coordinator(*provider, operation_account);
         mt5bridge::ObservationCollectionRequest collection;
         const auto first = coordinator.refresh(collection);
@@ -231,6 +235,37 @@ int main() {
                     owner.state().open_volume == 0,
                 "owner loop allowed unproven evidence to settle accepted operation");
 
+        mt5bridge::OperationReconciliationWorker settlement_worker(
+            journal, *executed.key, coordinator, collection);
+        const auto settled = owner.settle_reconciliation(settlement_worker);
+        require(settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    settled.record &&
+                    settled.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    settled.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled &&
+                    owner.state().open_volume == 5,
+                "owner loop did not settle through authoritative observation");
+
+        require(settlement_worker.last_cycle() &&
+                    settlement_worker.last_cycle()->refresh.sample,
+                "settlement worker did not retain observation provenance");
+        const auto stabilized = coordinator.refresh(collection);
+        require(stabilized.sample.has_value(),
+                "post-settlement observation refresh failed");
+        const auto post_settlement_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*settlement_worker.last_cycle()->refresh.sample,
+                 *stabilized.sample},
+                consistency_request);
+        require(post_settlement_consistency.consistent() &&
+                    post_settlement_consistency.proof,
+                "post-settlement environment proof setup failed");
+        ready.environment_proof = post_settlement_consistency.proof;
+
         mt5bridge::managed_trade::ManagedTradeState uncertain_initial;
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(
                     &uncertain_initial, mt5bridge::managed_trade::TradeId{8}, 5, 5, 4),
@@ -266,6 +301,33 @@ int main() {
                         mt5bridge::OperationRecoveryAction::reconcile_only &&
                     uncertain_transport.calls == 1,
                 "transport uncertainty did not become durable reconcile-only state");
+
+        mt5bridge::OperationReconciliationWorker pending_worker(
+            journal, *uncertain_result.key, coordinator, collection);
+        const auto pending = uncertain_owner.settle_reconciliation(pending_worker);
+        require(pending.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    pending.record &&
+                    pending.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    pending.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    uncertain_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    uncertain_owner.state().open_volume == 0,
+                "pending reconciliation changed managed state without proof");
+        require(pending_worker.last_cycle() &&
+                    pending_worker.last_cycle()->refresh.sample,
+                "pending worker did not retain observation provenance");
+        const auto post_pending_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*stabilized.sample,
+                 *pending_worker.last_cycle()->refresh.sample},
+                consistency_request);
+        require(post_pending_consistency.consistent() &&
+                    post_pending_consistency.proof,
+                "post-pending environment proof setup failed");
+        ready.environment_proof = post_pending_consistency.proof;
         const auto retry = uncertain_owner.execute_pending(ready);
         require(retry.status == mt5bridge::dispatch::OwnerStepStatus::invalid_state &&
                     uncertain_transport.calls == 1,

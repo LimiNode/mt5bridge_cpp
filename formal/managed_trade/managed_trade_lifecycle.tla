@@ -68,7 +68,7 @@ CanStartOperation == operationState \in TerminalOperationStates
 StartOpenSlice(volume) ==
     /\ planState = "running"
     /\ CanStartOperation
-    /\ operationKind = "none" \/ operationState # "ambiguous"
+    /\ (operationKind = "none" \/ operationState # "ambiguous")
     /\ closeObligation = FALSE
     /\ openVolume < TargetVolume
     /\ pendingRemainderVolume = 0
@@ -93,7 +93,7 @@ StartClose(volume) ==
     /\ closeObligation
     /\ ~obligationSatisfied
     /\ CanStartOperation
-    /\ operationKind = "none" \/ operationState # "ambiguous"
+    /\ (operationKind = "none" \/ operationState # "ambiguous")
     /\ openVolume > 0
     /\ pendingRemainderVolume = 0
     /\ operationId < MaxOperations
@@ -113,7 +113,7 @@ StartClose(volume) ==
 StartCancel ==
     /\ pendingRemainderVolume > 0
     /\ CanStartOperation
-    /\ operationKind = "none" \/ operationState # "ambiguous"
+    /\ (operationKind = "none" \/ operationState # "ambiguous")
     /\ operationId < MaxOperations
     /\ operationId' = operationId + 1
     /\ operationKind' = "cancel"
@@ -476,6 +476,13 @@ AmbiguousAttemptIsNonResendable ==
 
 SliceBound ==
     sliceCount <= MaxOperations
+
+OperationHistoryBound ==
+    sliceCount <= operationId
+
+OperationHistoryOrigin ==
+    (sliceCount = 0 => operationId = 0) /\
+    (operationId = 0 => sliceCount = 0)
 
 ClosedTradeHasNoExposure ==
     TradeState = "closed" =>

@@ -116,7 +116,10 @@ the concrete file store is implemented by the Python-free
 `src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific
 `src/trade/python_dispatch_transport.hpp/.cpp` adapter is compiled only into
-the DLL. CPython-backed components share the narrow private
+the DLL. The private logical managed-trade state lives in
+`src/trade/managed_trade.hpp/.cpp` and is built as
+`mt5bridge::managed_trade`; it has no broker or interpreter side effects.
+CPython-backed components share the narrow private
 `src/runtime/python_ref.hpp` ownership wrapper instead of defining local
 reference-counting helpers.
 Neither private seam is part of the consumer SDK.

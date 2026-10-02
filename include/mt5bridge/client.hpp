@@ -405,21 +405,8 @@ public:
     /// \throws std::runtime_error If the snapshot cannot be read.
     std::vector<Mt5OrderSnapshot> orders(const Mt5OrdersRequest &request = {}) {
         check_loaded();
-        Mt5OrderBuffer *buffer = nullptr;
-        if (query_orders_(&request, &buffer) != 0)
-            throw std::runtime_error(error_message());
-        try {
-            const auto *data = order_buffer_data_(buffer);
-            const auto count = order_buffer_size_(buffer);
-            std::vector<Mt5OrderSnapshot> result;
-            if (count)
-                result.assign(data, data + count);
-            order_buffer_free_(buffer);
-            return result;
-        } catch (...) {
-            order_buffer_free_(buffer);
-            throw;
-        }
+        return copy_buffer<Mt5OrdersRequest, Mt5OrderBuffer, Mt5OrderSnapshot>(
+            request, query_orders_, order_buffer_data_, order_buffer_size_, order_buffer_free_);
     }
 
     /// \brief Retrieves active positions into application-owned storage.
@@ -428,21 +415,9 @@ public:
     /// \throws std::runtime_error If the snapshot cannot be read.
     std::vector<Mt5PositionSnapshot> positions(const Mt5PositionsRequest &request = {}) {
         check_loaded();
-        Mt5PositionBuffer *buffer = nullptr;
-        if (query_positions_(&request, &buffer) != 0)
-            throw std::runtime_error(error_message());
-        try {
-            const auto *data = position_buffer_data_(buffer);
-            const auto count = position_buffer_size_(buffer);
-            std::vector<Mt5PositionSnapshot> result;
-            if (count)
-                result.assign(data, data + count);
-            position_buffer_free_(buffer);
-            return result;
-        } catch (...) {
-            position_buffer_free_(buffer);
-            throw;
-        }
+        return copy_buffer<Mt5PositionsRequest, Mt5PositionBuffer, Mt5PositionSnapshot>(
+            request, query_positions_, position_buffer_data_, position_buffer_size_,
+            position_buffer_free_);
     }
 
     /// \brief Retrieves history orders for an inclusive UTC millisecond range.
@@ -451,21 +426,11 @@ public:
     /// \throws std::runtime_error If the snapshot cannot be read.
     std::vector<Mt5HistoryOrderSnapshot> history_orders(const Mt5HistoryOrdersRequest &request) {
         check_loaded();
-        Mt5HistoryOrderBuffer *buffer = nullptr;
-        if (query_history_orders_(&request, &buffer) != 0)
-            throw std::runtime_error(error_message());
-        try {
-            const auto *data = history_order_buffer_data_(buffer);
-            const auto count = history_order_buffer_size_(buffer);
-            std::vector<Mt5HistoryOrderSnapshot> result;
-            if (count)
-                result.assign(data, data + count);
-            history_order_buffer_free_(buffer);
-            return result;
-        } catch (...) {
-            history_order_buffer_free_(buffer);
-            throw;
-        }
+        return copy_buffer<Mt5HistoryOrdersRequest, Mt5HistoryOrderBuffer,
+                           Mt5HistoryOrderSnapshot>(request, query_history_orders_,
+                                                    history_order_buffer_data_,
+                                                    history_order_buffer_size_,
+                                                    history_order_buffer_free_);
     }
 
     /// \brief Retrieves history deals for an inclusive UTC millisecond range.
@@ -474,21 +439,8 @@ public:
     /// \throws std::runtime_error If the snapshot cannot be read.
     std::vector<Mt5DealSnapshot> history_deals(const Mt5HistoryDealsRequest &request) {
         check_loaded();
-        Mt5DealBuffer *buffer = nullptr;
-        if (query_history_deals_(&request, &buffer) != 0)
-            throw std::runtime_error(error_message());
-        try {
-            const auto *data = deal_buffer_data_(buffer);
-            const auto count = deal_buffer_size_(buffer);
-            std::vector<Mt5DealSnapshot> result;
-            if (count)
-                result.assign(data, data + count);
-            deal_buffer_free_(buffer);
-            return result;
-        } catch (...) {
-            deal_buffer_free_(buffer);
-            throw;
-        }
+        return copy_buffer<Mt5HistoryDealsRequest, Mt5DealBuffer, Mt5DealSnapshot>(
+            request, query_history_deals_, deal_buffer_data_, deal_buffer_size_, deal_buffer_free_);
     }
 
     /// \brief Copies diagnostics from the most recent market-data call on this thread.
@@ -691,6 +643,34 @@ public:
     }
 
 private:
+    /// \brief Copies and releases one typed DLL-owned snapshot buffer.
+    /// \param request Plain-C request passed to the query function.
+    /// \param query DLL query function that allocates the buffer.
+    /// \param data DLL accessor for the contiguous snapshot values.
+    /// \param size DLL accessor for the number of snapshot values.
+    /// \param release DLL function that releases the buffer.
+    /// \return Application-owned vector containing the copied values.
+    template <typename Request, typename Buffer, typename Value, typename Query,
+              typename Data, typename Size, typename Release>
+    std::vector<Value> copy_buffer(const Request &request, Query query, Data data,
+                                   Size size, Release release) const {
+        Buffer *buffer = nullptr;
+        if (query(&request, &buffer) != 0)
+            throw std::runtime_error(error_message());
+        try {
+            const auto *values = data(buffer);
+            const auto count = size(buffer);
+            std::vector<Value> result;
+            if (count)
+                result.assign(values, values + count);
+            release(buffer);
+            return result;
+        } catch (...) {
+            release(buffer);
+            throw;
+        }
+    }
+
     using AbiVersion = std::uint32_t (*)();
     using TradeApiVersion = std::uint32_t (*)();
     using Initialize = int (*)(const wchar_t *);

@@ -451,7 +451,12 @@ private:
         const auto it = records_.find(key);
         if (it == records_.end())
             return {JournalMutationStatus::not_found, std::nullopt};
-        if (!can_transition_operation(it->second.operation_state, next_state))
+        const bool late_partial_settlement =
+            it->second.operation_state == OperationState::partially_filled &&
+            next_state == OperationState::partially_filled && settled_volume &&
+            *settled_volume > it->second.settled_volume;
+        if (!can_transition_operation(it->second.operation_state, next_state) &&
+            !late_partial_settlement)
             return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (next_state == OperationState::submitting &&
             it->second.journal_state != JournalState::dispatching)

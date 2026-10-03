@@ -39,8 +39,10 @@ responsibility of the journal/reconciliation worker.
 - Legacy records without the new fields are read conservatively and cannot be
   used by this reconstruction helper until a fresh authoritative settlement is
   committed.
-- Close/cancel, late-fill aggregation, and reconstruction of an unresolved
-  operation remain later bounded slices.
+- Close/cancel settlement and reconstruction of an unresolved operation remain
+  later bounded slices. A partial OPEN may first advance through the bounded
+  late-remainder path in ADR-0026; restart then replays its cumulative durable
+  `settled_volume` just like any other settled OPEN record.
 - Version-3 reconstruction is currently valid only while provenance-bearing
   settled-volume records are emitted exclusively for OPEN operations. Before
   durable CLOSE settlement is introduced, the format must persist an operation

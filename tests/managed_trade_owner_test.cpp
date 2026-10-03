@@ -561,7 +561,24 @@ int main() {
                     operation_account, deal_window,
                     {history_deal(710, 910, 911, 1.0),
                      history_deal(711, 910, 911, 1.0),
-                     history_deal(712, 910, 911, 99.0, 1)})});
+                     history_deal(712, 910, 911, 99.0, 1)}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(710, 910, 911, 1.0)}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(711, 910, 911, 1.0),
+                     history_deal(712, 910, 911, 99.0, 1),
+                     history_deal(713, 910, 911, 2.0)}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(711, 910, 911, 1.0),
+                     history_deal(712, 910, 911, 99.0, 1),
+                     history_deal(713, 910, 911, 2.0),
+                     history_deal(714, 910, 911, 1.0)})});
         mt5bridge::ObservationCoordinator partial_deal_coordinator(
             *partial_provider, operation_account);
         const auto partial_first =
@@ -622,6 +639,74 @@ int main() {
                     partial_owner.state().open_volume == 2 &&
                     partial_owner.state().pending_remainder_volume == 3,
                 "aggregated entry deals did not prove a partial fill");
+
+        mt5bridge::OperationJournal partial_restart_journal(store);
+        const auto partial_recovered_records = partial_restart_journal.recover_all();
+        require(partial_recovered_records.accepted(),
+                "partial-fill restart scan did not recover durable records");
+        mt5bridge::managed_trade::ManagedTradeState partial_recovery_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &partial_recovery_seed, mt5bridge::managed_trade::TradeId{51}, 5, 5,
+                    4),
+                "partial-fill recovery seed initialization failed");
+        const auto partial_recovered =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
+                partial_recovery_seed, operation_account, partial_recovered_records);
+        require(partial_recovered && partial_recovered->valid() &&
+                    partial_recovered->slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled &&
+                    partial_recovered->open_volume == 2 &&
+                    partial_recovered->pending_remainder_volume == 3,
+                "durable partial fill did not reconstruct managed remainder");
+
+        mt5bridge::OperationReconciliationWorker ambiguous_late_worker(
+            journal, *partial_executed.key, partial_deal_coordinator, deal_collection);
+        const auto ambiguous_late =
+            partial_owner.settle_pending_remainder(ambiguous_late_worker);
+        require(ambiguous_late.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::ambiguous &&
+                    ambiguous_late.record &&
+                    ambiguous_late.record->operation_state ==
+                        mt5bridge::OperationState::partially_filled &&
+                    ambiguous_late.record->settled_volume == 2 &&
+                    partial_owner.state().open_volume == 2 &&
+                    partial_owner.state().pending_remainder_volume == 3 &&
+                    partial_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled,
+                "ambiguous remainder evidence discarded confirmed partial exposure");
+
+        mt5bridge::OperationReconciliationWorker late_worker(
+            journal, *partial_executed.key, partial_deal_coordinator, deal_collection);
+        const auto late_settled = partial_owner.settle_pending_remainder(late_worker);
+        require(late_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
+                    late_settled.record &&
+                    late_settled.record->operation_state ==
+                        mt5bridge::OperationState::partially_filled &&
+                    late_settled.record->settled_volume == 4 &&
+                    partial_owner.state().open_volume == 4 &&
+                    partial_owner.state().pending_remainder_volume == 1 &&
+                    partial_owner.state().slice.result_volume == 4 &&
+                    partial_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled,
+                "late remainder settlement did not advance the partial exposure");
+
+        mt5bridge::OperationReconciliationWorker final_late_worker(
+            journal, *partial_executed.key, partial_deal_coordinator, deal_collection);
+        const auto final_late_settled =
+            partial_owner.settle_pending_remainder(final_late_worker);
+        require(final_late_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    final_late_settled.record &&
+                    final_late_settled.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    final_late_settled.record->settled_volume == 5 &&
+                    partial_owner.state().open_volume == 5 &&
+                    partial_owner.state().pending_remainder_volume == 0 &&
+                    partial_owner.state().slice.result_volume == 5 &&
+                    partial_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled,
+                "late remainder settlement did not complete the open slice");
 
         auto prebound_provider = std::make_unique<FakeObservationProvider>(
             std::vector<mt5bridge::ObservationBatch>{
@@ -776,20 +861,20 @@ int main() {
                     recovered_full->pending_remainder_volume == 0,
                 "durable full fill did not reconstruct managed exposure");
 
-        mt5bridge::managed_trade::ManagedTradeState recovered_partial_seed;
+        mt5bridge::managed_trade::ManagedTradeState recovered_complete_seed;
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(
-                    &recovered_partial_seed, mt5bridge::managed_trade::TradeId{51}, 5, 5,
+                    &recovered_complete_seed, mt5bridge::managed_trade::TradeId{51}, 5, 5,
                     4),
-                "partial-fill recovery seed initialization failed");
-        const auto recovered_partial =
+                "completed-fill recovery seed initialization failed");
+        const auto recovered_complete =
             mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
-                recovered_partial_seed, operation_account, recovered_records);
-        require(recovered_partial && recovered_partial->valid() &&
-                    recovered_partial->slice.state ==
-                        mt5bridge::managed_trade::OperationState::partially_filled &&
-                    recovered_partial->open_volume == 2 &&
-                    recovered_partial->pending_remainder_volume == 3,
-                "durable partial fill did not reconstruct managed remainder");
+                recovered_complete_seed, operation_account, recovered_records);
+        require(recovered_complete && recovered_complete->valid() &&
+                    recovered_complete->slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled &&
+                    recovered_complete->open_volume == 5 &&
+                    recovered_complete->pending_remainder_volume == 0,
+                "durable completed fill did not reconstruct managed exposure");
 
         require(recovered_records.accepted() && !recovered_records.records().empty(),
                 "accepted recovery did not expose a complete read-only record view");

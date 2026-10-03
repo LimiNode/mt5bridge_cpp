@@ -457,6 +457,18 @@ MutationStatus ManagedTradeState::observe_pending_remainder(Volume volume) {
     auto candidate = *this;
     candidate.open_volume += volume;
     candidate.pending_remainder_volume -= volume;
+    if (candidate.slice.state != OperationState::partially_filled ||
+        candidate.slice.kind != OperationKind::open ||
+        candidate.slice.requested_volume == 0 ||
+        volume > candidate.slice.requested_volume ||
+        candidate.slice.result_volume >
+            candidate.slice.requested_volume - volume)
+        return MutationStatus::invalid_state;
+    candidate.slice.result_volume += volume;
+    if (candidate.pending_remainder_volume == 0) {
+        candidate.slice.broker_outcome = BrokerOutcome::full;
+        candidate.slice.state = OperationState::filled;
+    }
     return commit_candidate(this, std::move(candidate));
 }
 

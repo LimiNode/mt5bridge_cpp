@@ -124,6 +124,15 @@ public:
         OperationReconciliationWorker &worker, bool trade_event_gap = false,
         bool deadline_expired = false);
 
+    /// \brief Settles newly observed volume of a previously partial OPEN slice.
+    /// \param worker Fresh worker cycle bound to the partial operation.
+    /// \param trade_event_gap Whether the caller lost event continuity.
+    /// \param deadline_expired Whether the bounded observation deadline elapsed.
+    /// \return Updated partial/completed state, awaiting evidence, or ambiguity.
+    OwnerStepResult settle_pending_remainder(
+        OperationReconciliationWorker &worker, bool trade_event_gap = false,
+        bool deadline_expired = false);
+
 private:
     /// \brief Derives the account-scoped key for the current logical slice.
     std::optional<OperationKey> current_key() const;
@@ -154,7 +163,8 @@ private:
     std::optional<managed_trade::Volume> history_deal_volume(
         const OperationReconciliationCycle &cycle,
         const OperationReconciliationWorker &worker,
-        const OperationRecord &record) const;
+        const OperationRecord &record,
+        const std::vector<std::uint64_t> *prior_deal_tickets = nullptr) const;
 
     managed_trade::ManagedTradeState state_;
     AccountKey account_;

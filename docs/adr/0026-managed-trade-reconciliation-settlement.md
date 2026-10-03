@@ -50,9 +50,22 @@ provenance checks pass. Pending, not-observed, and event-gap cycles leave the
 managed slice unresolved. Account mismatch, missing provenance, and durable
 identity mismatch cannot settle the managed state.
 
-Remainder handling after the partial result, close/cancel settlement, and late
-fills remain later bounded slices. Restart reconstruction for settled OPEN
-records is defined separately in [ADR-0027](0027-managed-trade-restart-reconstruction.md);
+A partial OPEN with a pending remainder remains eligible for a fresh
+`OperationReconciliationWorker` cycle through
+`ManagedTradeOwner::settle_pending_remainder()`. The owner snapshots the deal
+tickets already present before that refresh, then attributes only newly
+observed entry deals linked to the durable result binding. The newly attributed
+volume is added to both managed `open_volume`/`slice.result_volume` and the
+durable `settled_volume` in one bounded update. A partial-to-partial update is
+therefore allowed only when the cumulative settled volume strictly increases;
+the final remainder transitions the same OPEN slice to `filled`. Repeated full
+history snapshots cannot re-count an earlier deal. Contradictory evidence in a
+remainder cycle leaves the confirmed partial exposure and durable partial
+record intact so a later fresh worker can retry.
+
+Close/cancel settlement remains a later bounded slice. Restart reconstruction
+for settled OPEN records is defined separately in
+[ADR-0027](0027-managed-trade-restart-reconstruction.md);
 unresolved, close, and cancel records remain non-resendable until their own
 recovery semantics exist. The worker and owner therefore keep the durable
 journal non-resendable while those semantics are absent.
@@ -78,5 +91,5 @@ journal remains non-terminal. It also covers a pending cycle: the journal is
 normalized for reconciliation while managed state stays `submitting` and no
 second backend call is possible. The history-deal regressions bind a broker
 deal identity, aggregate multiple fresh entry deals by their order, ignore an
-exit deal, and verify both full and partial transitions with a preserved
-remainder.
+exit deal, and verify full, partial, late-remainder, cumulative durable-volume,
+and ambiguous-retry transitions.

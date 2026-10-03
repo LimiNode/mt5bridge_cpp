@@ -90,6 +90,15 @@ public:
     ManagedTradeOwner(const ManagedTradeOwner &) = delete;
     ManagedTradeOwner &operator=(const ManagedTradeOwner &) = delete;
 
+    /// \brief Rebuilds settled OPEN exposure from durable operation records.
+    /// \param initial_state Empty initialized state carrying trade bounds.
+    /// \param account Account scope whose records may be replayed.
+    /// \param records Durable records recovered after a process restart.
+    /// \return Reconstructed state, or empty when records are incomplete or inconsistent.
+    static std::optional<managed_trade::ManagedTradeState> recover_settled_open(
+        managed_trade::ManagedTradeState initial_state, const AccountKey &account,
+        const std::vector<OperationRecord> &records);
+
     /// \brief Returns the current private logical state.
     /// \return Owner-loop state owned by this instance.
     const managed_trade::ManagedTradeState &state() const { return state_; }

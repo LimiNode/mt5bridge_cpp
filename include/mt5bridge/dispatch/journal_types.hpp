@@ -54,6 +54,7 @@ struct ReconciliationDescriptor {
     OperationState settled_state = OperationState::filled; ///< Candidate state for settlement.
     std::uint64_t trade_id = 0; ///< Managed trade identity bound at persistence time.
     std::uint64_t operation_id = 0; ///< Side-effect identity bound at persistence time.
+    std::uint64_t requested_volume = 0; ///< Managed logical volume requested by this slice.
 
     /// \brief Tests whether the descriptor is safe to persist and replay.
     /// \return True only for a valid account, baseline, predicates, and target state.
@@ -304,6 +305,7 @@ struct OperationRecord {
         reconciliation_descriptor; ///< Durable post-dispatch evidence contract.
     std::vector<ReconciliationBinding>
         reconciliation_bindings; ///< Durable broker identities derived from result evidence.
+    std::uint64_t settled_volume = 0; ///< Authoritative managed volume proved by settlement.
 
     /// \brief Tests whether the record can be persisted or recovered safely.
     /// \return True when identity, payload, state pair, revision, and fencing agree.
@@ -320,6 +322,31 @@ struct OperationRecord {
               reconciliation_descriptor->trade_id != key.trade_id) ||
              (reconciliation_descriptor->operation_id != 0 &&
               reconciliation_descriptor->operation_id != key.operation_id)))
+            return false;
+        if (reconciliation_descriptor &&
+            reconciliation_descriptor->requested_volume != 0 &&
+            settled_volume != 0 &&
+            settled_volume > reconciliation_descriptor->requested_volume)
+            return false;
+        if (settled_volume != 0 &&
+            (operation_state != OperationState::partially_filled &&
+             operation_state != OperationState::filled))
+            return false;
+        if (reconciliation_descriptor &&
+            reconciliation_descriptor->requested_volume != 0 &&
+            (operation_state == OperationState::partially_filled ||
+             operation_state == OperationState::filled) &&
+            settled_volume == 0)
+            return false;
+        if (operation_state == OperationState::partially_filled &&
+            reconciliation_descriptor &&
+            reconciliation_descriptor->requested_volume != 0 &&
+            settled_volume >= reconciliation_descriptor->requested_volume)
+            return false;
+        if (operation_state == OperationState::filled &&
+            reconciliation_descriptor &&
+            reconciliation_descriptor->requested_volume != 0 &&
+            settled_volume != reconciliation_descriptor->requested_volume)
             return false;
         if (journal_at_least_dispatching(journal_state) &&
             (!reconciliation_descriptor || reconciliation_descriptor->trade_id == 0 ||

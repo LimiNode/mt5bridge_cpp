@@ -50,10 +50,12 @@ provenance checks pass. Pending, not-observed, and event-gap cycles leave the
 managed slice unresolved. Account mismatch, missing provenance, and durable
 identity mismatch cannot settle the managed state.
 
-Remainder handling after the partial result, close/cancel settlement, late
-fills, and restart reconstruction of aggregate exposure remain later bounded
-slices. The worker and owner therefore keep the durable journal non-resendable
-while those semantics are absent.
+Remainder handling after the partial result, close/cancel settlement, and late
+fills remain later bounded slices. Restart reconstruction for settled OPEN
+records is defined separately in [ADR-0027](0027-managed-trade-restart-reconstruction.md);
+unresolved, close, and cancel records remain non-resendable until their own
+recovery semantics exist. The worker and owner therefore keep the durable
+journal non-resendable while those semantics are absent.
 
 ## Consequences
 

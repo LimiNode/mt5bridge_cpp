@@ -44,6 +44,7 @@ void prepare(mt5bridge::OperationJournal &journal,
         {mt5bridge::require_active_order(20),
          mt5bridge::require_history_order(21, history_window)},
         mt5bridge::OperationState::filled};
+    descriptor.requested_volume = 5;
     require(journal.persist_reconciliation_descriptor(operation_key,
                                                        std::move(descriptor))
                 .accepted(),
@@ -148,6 +149,32 @@ int main() {
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        const auto settled_reconciling = owner_a.transition_operation(
+            operation_key, mt5bridge::OperationState::reconciling);
+        require(settled_reconciling.accepted(),
+                "managed operation did not enter reconciliation");
+        require(owner_a.transition_journal(operation_key,
+                                           mt5bridge::JournalState::reconciling)
+                    .accepted(),
+                "settlement journal barrier was not committed");
+        const auto reconciling_record = owner_a.find(operation_key);
+        require(reconciling_record.has_value(), "reconciling record was not retained");
+        auto settled_record_value = *reconciling_record;
+        settled_record_value.operation_state = mt5bridge::OperationState::filled;
+        settled_record_value.settled_volume = 5;
+        ++settled_record_value.revision;
+        require(settled_record_value.valid() &&
+                    store.commit(settled_record_value, reconciling_record->revision) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "settled managed volume was not committed");
+        mt5bridge::WindowsFileJournalStore settled_store(directory);
+        const auto settled_record = settled_store.load(operation_key);
+        require(settled_record.found() && settled_record.record->operation_state ==
+                                       mt5bridge::OperationState::filled &&
+                    settled_record.record->settled_volume == 5 &&
+                    settled_record.record->reconciliation_descriptor &&
+                    settled_record.record->reconciliation_descriptor->requested_volume == 5,
+                "settled managed volume did not survive store reopen");
         require(result_store.load(key(99, 100)).status ==
                     mt5bridge::StoreLoadStatus::not_found,
                 "missing operation was not distinguished from storage failure");

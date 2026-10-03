@@ -19,6 +19,10 @@ namespace mt5bridge::runtime {
 class OneShotDispatchBackend;
 }
 
+namespace mt5bridge::dispatch {
+class ManagedTradeOwner;
+}
+
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
 namespace mt5bridge {
@@ -416,6 +420,13 @@ public:
     /// \return Mutation status and the committed next record.
     JournalMutationResult transition_operation(const OperationKey &key,
                                                OperationState next_state) {
+        return transition_operation(key, next_state, std::nullopt);
+    }
+
+private:
+    JournalMutationResult transition_operation(
+        const OperationKey &key, OperationState next_state,
+        std::optional<std::uint64_t> settled_volume) {
         const auto it = records_.find(key);
         if (it == records_.end())
             return {JournalMutationStatus::not_found, std::nullopt};
@@ -438,11 +449,23 @@ public:
             (!journal_at_least_result_persisted(it->second.journal_state) ||
              it->second.result_payload.empty()))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
+        const bool fill_state = next_state == OperationState::partially_filled ||
+                                next_state == OperationState::filled;
+        if (settled_volume && (!fill_state || *settled_volume == 0))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (fill_state && it->second.reconciliation_descriptor &&
+            it->second.reconciliation_descriptor->requested_volume != 0 &&
+            !settled_volume)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
         OperationRecord candidate = it->second;
         candidate.operation_state = next_state;
+        if (settled_volume)
+            candidate.settled_volume = *settled_volume;
+        else if (!fill_state)
+            candidate.settled_volume = 0;
         candidate.revision += 1;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};
@@ -456,6 +479,7 @@ public:
         return {JournalMutationStatus::accepted, std::move(candidate)};
     }
 
+public:
     /// \brief Tests whether a write-ahead transition is legal.
     /// \param current Current durable journal state.
     /// \param next Proposed next journal state.
@@ -600,6 +624,7 @@ private:
     std::map<OperationKey, OperationRecord> records_;
 
     friend class runtime::OneShotDispatchBackend;
+    friend class dispatch::ManagedTradeOwner;
 };
 
 } // namespace mt5bridge

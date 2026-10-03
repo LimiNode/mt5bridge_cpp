@@ -36,8 +36,8 @@ jobs:
             -H 'Accept: application/octet-stream' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             --output tla2tools.jar \
-            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/608535684
-          echo '05C69B0EAE0C9E8755ACB73A1C51A91CCC7DE76A0EFDEE22908C1A94D2C2515E  tla2tools.jar' \
+            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/608555156
+          echo 'B49964BD6367B9799475B14B24BC2DC97E6ED033B861D3C79CA068E76AE6ABEF  tla2tools.jar' \
             | sha256sum --check
       - name: Check dispatch recovery model
         run: |
@@ -62,8 +62,8 @@ jobs:
             -H 'Accept: application/octet-stream' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             --output tla2tools.jar \
-            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/608535684
-          echo '05C69B0EAE0C9E8755ACB73A1C51A91CCC7DE76A0EFDEE22908C1A94D2C2515E  tla2tools.jar' \
+            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/608555156
+          echo 'B49964BD6367B9799475B14B24BC2DC97E6ED033B861D3C79CA068E76AE6ABEF  tla2tools.jar' \
             | sha256sum --check
       - name: Check reconciliation evidence model
         run: |
@@ -91,8 +91,8 @@ jobs:
             -H 'Accept: application/octet-stream' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             --output tla2tools.jar \
-            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/608535684
-          echo '05C69B0EAE0C9E8755ACB73A1C51A91CCC7DE76A0EFDEE22908C1A94D2C2515E  tla2tools.jar' \
+            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/608555156
+          echo 'B49964BD6367B9799475B14B24BC2DC97E6ED033B861D3C79CA068E76AE6ABEF  tla2tools.jar' \
             | sha256sum --check
       - name: Check managed trade lifecycle model
         run: |

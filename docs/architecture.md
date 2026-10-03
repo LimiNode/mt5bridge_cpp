@@ -319,11 +319,16 @@ worker process.
    observation; the owner exposes no caller-supplied evidence bypass. A
    deterministic rejection or provenance-backed ambiguity may be applied,
    while a confirmed order-presence observation leaves managed state unchanged
-   until executed-volume evidence exists. It
-   converts uncertainty to durable `reconciling` with a non-resendable owner
-   outcome, and managed state alone never authorizes a send. Partial fills,
-   close/cancel planning, and restart reconstruction of aggregate managed
-   exposure remain later slices. The next public-facing layer
+   until executed-volume evidence exists. For an `OPEN` slice, the bounded
+   history-deal settlement path uses exactly one result-derived broker deal
+   binding, attributes all fresh entry deals by their `DEAL_ORDER`, and commits
+   either `partially_filled` or `filled` only for an exact, non-overfilled
+   aggregate; exit deals, missing fields, fractional logical totals, anomalous
+   overfills, and unproven rows remain unresolved. It converts
+   uncertainty to durable `reconciling` with a non-resendable owner outcome,
+   and managed state alone never authorizes a send. Remainder handling after a
+   partial result, close/cancel planning, and restart reconstruction of
+   aggregate managed exposure remain later slices. The next public-facing layer
    is the high-level asynchronous `TradeManager`; its side-effecting methods
    must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

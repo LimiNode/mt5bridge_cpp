@@ -93,6 +93,38 @@ mt5bridge::ObservationBatch observation_batch(const mt5bridge::AccountKey &key,
     return batch;
 }
 
+mt5bridge::ObservationBatch history_deals_batch(
+    const mt5bridge::AccountKey &key, mt5bridge::ObservationWindow window,
+    std::vector<Mt5DealSnapshot> deals) {
+    mt5bridge::ObservationBatch batch;
+    batch.account = key;
+    batch.observed_domains = mt5bridge::ObservationDomain::active_orders |
+                             mt5bridge::ObservationDomain::positions |
+                             mt5bridge::ObservationDomain::history_deals;
+    batch.history_deals_window = window;
+    batch.history_deals = std::move(deals);
+    return batch;
+}
+
+Mt5DealSnapshot history_deal(std::uint64_t ticket, std::uint64_t order_ticket,
+                             std::uint64_t position_id, double volume,
+                             std::uint32_t entry = 0) {
+    Mt5DealSnapshot deal{};
+    deal.ticket = ticket;
+    deal.order_ticket = order_ticket;
+    deal.position_id = position_id;
+    deal.entry = entry;
+    deal.volume = volume;
+    deal.time_msc = 1500;
+    deal.known_fields = MT5BRIDGE_DEAL_KNOWN_TICKET |
+                        MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+                        MT5BRIDGE_DEAL_KNOWN_POSITION_ID |
+                        MT5BRIDGE_DEAL_KNOWN_ENTRY |
+                        MT5BRIDGE_DEAL_KNOWN_VOLUME |
+                        MT5BRIDGE_DEAL_KNOWN_TIME;
+    return deal;
+}
+
 class FakeLease final : public mt5bridge::SingleWriterLease {
 public:
     explicit FakeLease(mt5bridge::AccountKey owned) : owned_account(std::move(owned)) {}
@@ -440,6 +472,282 @@ int main() {
                     mt5bridge::dispatch::OwnerStepStatus::invalid_state &&
                     pre_transport.calls == 0,
                 "post-barrier failure enabled a second send");
+
+        const mt5bridge::ObservationWindow deal_window{1000, 2000};
+        auto deal_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(700, 900, 901, 2.0),
+                     history_deal(701, 900, 901, 3.0)})});
+        mt5bridge::ObservationCoordinator deal_coordinator(
+            *deal_provider, operation_account);
+        mt5bridge::ObservationCollectionRequest deal_collection;
+        deal_collection.history_deals_window = deal_window;
+        const auto deal_first = deal_coordinator.refresh(deal_collection);
+        const auto deal_second = deal_coordinator.refresh(deal_collection);
+        require(deal_first.sample && deal_second.sample,
+                "history-deal settlement baseline setup failed");
+        mt5bridge::EnvironmentConsistencyRequest deal_consistency_request;
+        deal_consistency_request.history_deals_window = deal_window;
+        const auto deal_consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+            {*deal_first.sample, *deal_second.sample}, deal_consistency_request);
+        require(deal_consistency.consistent() && deal_consistency.proof,
+                "history-deal environment proof setup failed");
+
+        mt5bridge::DispatchAdmissionBarrier deal_admission(
+            journal, deal_coordinator.graph(), scope);
+        mt5bridge::runtime::OneShotDispatchBackend deal_backend;
+        FakeTransport deal_transport;
+        deal_transport.next.reconciliation_bindings = {{501, 700}};
+        FakeAccountProbe deal_probe({operation_account, operation_account});
+        mt5bridge::managed_trade::ManagedTradeState deal_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &deal_state, mt5bridge::managed_trade::TradeId{50}, 5, 5, 4),
+                "history-deal managed state initialization failed");
+        mt5bridge::dispatch::ManagedTradeOwner deal_owner(
+            deal_state, operation_account, journal, deal_admission, deal_backend,
+            deal_probe, lease, deal_transport);
+        const auto deal_predicate = mt5bridge::expect_reconciliation_transition(
+            mt5bridge::ReconciliationPredicateKind::history_deal_present,
+            std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+            501, deal_window);
+        mt5bridge::dispatch::ManagedTradeIntent deal_intent{
+            {0x50},
+            {operation_account, deal_coordinator.capture_baseline(),
+             {deal_predicate}, mt5bridge::OperationState::filled}};
+        const auto deal_prepared = deal_owner.prepare_open(5, std::move(deal_intent));
+        require(deal_prepared.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "history-deal owner did not prepare the open slice");
+        mt5bridge::DispatchAdmissionRequest deal_ready;
+        deal_ready.current_account = operation_account;
+        deal_ready.environment_proof = deal_consistency.proof;
+        const auto deal_executed = deal_owner.execute_pending(deal_ready);
+        require(deal_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    deal_executed.key,
+                "history-deal owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker deal_worker(
+            journal, *deal_executed.key, deal_coordinator, deal_collection);
+        const auto deal_settled = deal_owner.settle_reconciliation(deal_worker);
+        require(deal_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    deal_settled.record &&
+                    deal_settled.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    deal_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled &&
+                    deal_owner.state().open_volume == 5 &&
+                    deal_owner.state().pending_remainder_volume == 0,
+                "fresh attributed history deals did not prove a full fill");
+
+        auto partial_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(711, 910, 911, 1.0),
+                     history_deal(712, 910, 911, 99.0, 1)})});
+        mt5bridge::ObservationCoordinator partial_deal_coordinator(
+            *partial_provider, operation_account);
+        const auto partial_first =
+            partial_deal_coordinator.refresh(deal_collection);
+        const auto partial_second =
+            partial_deal_coordinator.refresh(deal_collection);
+        require(partial_first.sample && partial_second.sample,
+                "partial history-deal baseline setup failed");
+        const auto partial_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*partial_first.sample, *partial_second.sample},
+                deal_consistency_request);
+        require(partial_consistency.consistent() && partial_consistency.proof,
+                "partial history-deal environment proof setup failed");
+        mt5bridge::DispatchAdmissionBarrier partial_admission(
+            journal, partial_deal_coordinator.graph(), scope);
+        mt5bridge::runtime::OneShotDispatchBackend partial_backend;
+        FakeTransport partial_transport;
+        partial_transport.next.reconciliation_bindings = {{601, 710}};
+        FakeAccountProbe partial_probe({operation_account, operation_account});
+        mt5bridge::managed_trade::ManagedTradeState partial_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &partial_state, mt5bridge::managed_trade::TradeId{51}, 5, 5, 4),
+                "partial history-deal managed state initialization failed");
+        mt5bridge::dispatch::ManagedTradeOwner partial_owner(
+            partial_state, operation_account, journal, partial_admission,
+            partial_backend, partial_probe, lease, partial_transport);
+        const auto partial_predicate = mt5bridge::expect_reconciliation_transition(
+            mt5bridge::ReconciliationPredicateKind::history_deal_present,
+            std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+            601, deal_window);
+        mt5bridge::dispatch::ManagedTradeIntent partial_intent{
+            {0x51},
+            {operation_account, partial_deal_coordinator.capture_baseline(),
+             {partial_predicate}, mt5bridge::OperationState::filled}};
+        require(partial_owner.prepare_open(5, std::move(partial_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "partial history-deal owner did not prepare the open slice");
+        mt5bridge::DispatchAdmissionRequest partial_ready;
+        partial_ready.current_account = operation_account;
+        partial_ready.environment_proof = partial_consistency.proof;
+        const auto partial_executed = partial_owner.execute_pending(partial_ready);
+        require(partial_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    partial_executed.key,
+                "partial history-deal owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker partial_worker(
+            journal, *partial_executed.key, partial_deal_coordinator, deal_collection);
+        const auto partial_settled =
+            partial_owner.settle_reconciliation(partial_worker);
+        require(partial_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
+                    partial_settled.record &&
+                    partial_settled.record->operation_state ==
+                        mt5bridge::OperationState::partially_filled &&
+                    partial_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled &&
+                    partial_owner.state().open_volume == 2 &&
+                    partial_owner.state().pending_remainder_volume == 3,
+                "aggregated entry deals did not prove a partial fill");
+
+        auto prebound_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window,
+                                    {history_deal(720, 920, 921, 5.0)})});
+        mt5bridge::ObservationCoordinator prebound_coordinator(
+            *prebound_provider, operation_account);
+        const auto prebound_first =
+            prebound_coordinator.refresh(deal_collection);
+        const auto prebound_second =
+            prebound_coordinator.refresh(deal_collection);
+        require(prebound_first.sample && prebound_second.sample,
+                "pre-bound deal baseline setup failed");
+        const auto prebound_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*prebound_first.sample, *prebound_second.sample},
+                deal_consistency_request);
+        require(prebound_consistency.consistent() && prebound_consistency.proof,
+                "pre-bound deal environment proof setup failed");
+        mt5bridge::DispatchAdmissionBarrier prebound_admission(
+            journal, prebound_coordinator.graph(), scope);
+        mt5bridge::runtime::OneShotDispatchBackend prebound_backend;
+        FakeTransport prebound_transport;
+        FakeAccountProbe prebound_probe({operation_account, operation_account});
+        mt5bridge::managed_trade::ManagedTradeState prebound_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &prebound_state, mt5bridge::managed_trade::TradeId{52}, 5, 5, 4),
+                "pre-bound deal managed state initialization failed");
+        mt5bridge::dispatch::ManagedTradeOwner prebound_owner(
+            prebound_state, operation_account, journal, prebound_admission,
+            prebound_backend, prebound_probe, lease, prebound_transport);
+        const auto prebound_predicate =
+            mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                std::uint64_t{720}, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 0,
+                deal_window);
+        mt5bridge::dispatch::ManagedTradeIntent prebound_intent{
+            {0x52},
+            {operation_account, prebound_coordinator.capture_baseline(),
+             {prebound_predicate}, mt5bridge::OperationState::filled}};
+        require(prebound_owner.prepare_open(5, std::move(prebound_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "pre-bound deal owner did not prepare the open slice");
+        mt5bridge::DispatchAdmissionRequest prebound_ready;
+        prebound_ready.current_account = operation_account;
+        prebound_ready.environment_proof = prebound_consistency.proof;
+        const auto prebound_executed = prebound_owner.execute_pending(prebound_ready);
+        require(prebound_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    prebound_executed.key,
+                "pre-bound deal owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker prebound_worker(
+            journal, *prebound_executed.key, prebound_coordinator, deal_collection);
+        const auto prebound_settled =
+            prebound_owner.settle_reconciliation(prebound_worker);
+        require(prebound_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    prebound_settled.record &&
+                    prebound_settled.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    prebound_settled.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    prebound_owner.state().open_volume == 0,
+                "caller-chosen deal ticket incorrectly settled an open slice");
+
+        auto overfill_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(730, 930, 931, 3.0),
+                     history_deal(731, 930, 931, 3.0)})});
+        mt5bridge::ObservationCoordinator overfill_coordinator(
+            *overfill_provider, operation_account);
+        const auto overfill_first = overfill_coordinator.refresh(deal_collection);
+        const auto overfill_second = overfill_coordinator.refresh(deal_collection);
+        require(overfill_first.sample && overfill_second.sample,
+                "overfill baseline setup failed");
+        const auto overfill_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*overfill_first.sample, *overfill_second.sample},
+                deal_consistency_request);
+        require(overfill_consistency.consistent() && overfill_consistency.proof,
+                "overfill environment proof setup failed");
+        mt5bridge::DispatchAdmissionBarrier overfill_admission(
+            journal, overfill_coordinator.graph(), scope);
+        mt5bridge::runtime::OneShotDispatchBackend overfill_backend;
+        FakeTransport overfill_transport;
+        overfill_transport.next.reconciliation_bindings = {{701, 730}};
+        FakeAccountProbe overfill_probe({operation_account, operation_account});
+        mt5bridge::managed_trade::ManagedTradeState overfill_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &overfill_state, mt5bridge::managed_trade::TradeId{53}, 5, 5, 4),
+                "overfill managed state initialization failed");
+        mt5bridge::dispatch::ManagedTradeOwner overfill_owner(
+            overfill_state, operation_account, journal, overfill_admission,
+            overfill_backend, overfill_probe, lease, overfill_transport);
+        const auto overfill_predicate =
+            mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 701,
+                deal_window);
+        mt5bridge::dispatch::ManagedTradeIntent overfill_intent{
+            {0x53},
+            {operation_account, overfill_coordinator.capture_baseline(),
+             {overfill_predicate}, mt5bridge::OperationState::filled}};
+        require(overfill_owner.prepare_open(5, std::move(overfill_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "overfill owner did not prepare the open slice");
+        mt5bridge::DispatchAdmissionRequest overfill_ready;
+        overfill_ready.current_account = operation_account;
+        overfill_ready.environment_proof = overfill_consistency.proof;
+        const auto overfill_executed = overfill_owner.execute_pending(overfill_ready);
+        require(overfill_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    overfill_executed.key,
+                "overfill owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker overfill_worker(
+            journal, *overfill_executed.key, overfill_coordinator, deal_collection);
+        const auto overfill_settled =
+            overfill_owner.settle_reconciliation(overfill_worker);
+        require(overfill_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    overfill_settled.record &&
+                    overfill_settled.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    overfill_settled.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    overfill_owner.state().open_volume == 0,
+                "overfilled deal evidence was silently capped into a fill");
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

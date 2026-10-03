@@ -20,6 +20,7 @@ namespace mt5bridge::dispatch {
 enum class OwnerStepStatus {
     prepared,          ///< Intent and descriptor are durably ready for admission.
     awaiting_reconciliation, ///< A durable result awaits authoritative observation.
+    partially_filled,  ///< Fresh deal evidence proved a partial open slice.
     completed,          ///< The managed operation reached a terminal logical state.
     ambiguous,          ///< The outcome is non-resendable and needs fresh observation.
     invalid_request,    ///< Caller input or the managed state is malformed.
@@ -52,6 +53,7 @@ struct OwnerStepResult {
     bool applied() const {
         return status == OwnerStepStatus::prepared ||
                status == OwnerStepStatus::awaiting_reconciliation ||
+               status == OwnerStepStatus::partially_filled ||
                status == OwnerStepStatus::completed ||
                status == OwnerStepStatus::ambiguous;
     }
@@ -132,6 +134,17 @@ private:
     bool has_observation_provenance(
         const OperationReconciliationCycle &cycle,
         const OperationReconciliationWorker &worker, const OperationKey &key,
+        const OperationRecord &record) const;
+
+    /// \brief Aggregates fresh entry deals attributed to one operation.
+    /// \param cycle Confirmed observation cycle carrying the graph sample.
+    /// \param worker Worker that produced the cycle and its baseline.
+    /// \param record Durable operation record with result-derived bindings.
+    /// \return Logical executed volume, or empty when attribution/provenance
+    ///         is incomplete or the broker volume cannot be represented safely.
+    std::optional<managed_trade::Volume> history_deal_volume(
+        const OperationReconciliationCycle &cycle,
+        const OperationReconciliationWorker &worker,
         const OperationRecord &record) const;
 
     managed_trade::ManagedTradeState state_;

@@ -320,11 +320,11 @@ worker process.
    deterministic rejection or provenance-backed ambiguity may be applied,
    while a confirmed order-presence observation leaves managed state unchanged
    until executed-volume evidence exists. For an `OPEN` slice, the bounded
-   history-deal settlement path uses a durable broker deal ticket (normally a
-   result-derived binding), attributes all fresh entry deals by their
-   `DEAL_ORDER`, and commits either
-   `partially_filled` or `filled`; exit deals, missing fields, fractional
-   logical totals, and unproven rows remain unresolved. It converts
+   history-deal settlement path uses exactly one result-derived broker deal
+   binding, attributes all fresh entry deals by their `DEAL_ORDER`, and commits
+   either `partially_filled` or `filled` only for an exact, non-overfilled
+   aggregate; exit deals, missing fields, fractional logical totals, anomalous
+   overfills, and unproven rows remain unresolved. It converts
    uncertainty to durable `reconciling` with a non-resendable owner outcome,
    and managed state alone never authorizes a send. Remainder handling after a
    partial result, close/cancel planning, and restart reconstruction of

@@ -23,24 +23,27 @@ the returned cycle carries all of the following:
   compared.
 
 For an `OPEN` slice, the bounded semantic settlement path additionally
-requires a fresh `history_deal_present` predicate with a valid inclusive time
-window. The predicate's broker ticket must be either the durable ticket or a
-single-assignment result binding. The owner uses that ticket only as an anchor:
-it attributes all fresh history deals linked to the anchor's `DEAL_ORDER`,
-requires known `DEAL_ENTRY`, `DEAL_VOLUME`, and `DEAL_TIME`, ignores exit deals,
-and sums the remaining entry (`IN`/`INOUT`) volumes. Thus a raw broker deal
-ticket, active-order presence, or an unlinked arbitrary history row cannot
-settle the operation by itself. The logical managed-trade volume is intentionally an
+requires exactly one fresh `history_deal_present` predicate with a valid
+inclusive time window. That deal anchor must have an empty descriptor ticket,
+a non-zero correlation id, and exactly one durable result-derived binding for
+that correlation. A caller-chosen deal ticket is never semantic settlement
+evidence. The owner uses the bound ticket only as an anchor: it attributes all
+fresh history deals linked to the anchor's `DEAL_ORDER`, requires known
+`DEAL_ENTRY`, `DEAL_VOLUME`, and `DEAL_TIME`, ignores exit deals, and sums the
+remaining entry (`IN`/`INOUT`) volumes. Thus active-order presence, an
+unlinked arbitrary history row, or a pre-bound deal ticket cannot settle the
+operation by itself. The logical managed-trade volume is intentionally an
 integer in this slice; a non-integral or otherwise malformed broker total is
 left unresolved rather than rounded.
 
 When the attributed total is positive but below the requested slice volume,
-the owner commits `partially_filled`, preserving the remainder. When it is at
-least the requested volume, it commits `filled` and caps the recorded result
-at the requested amount. Both the managed state and the durable journal are
-advanced only after the candidate state validates and the journal transition
-commits. A confirmed predicate without this history-deal provenance leaves
-both in `reconciling`.
+the owner commits `partially_filled`, preserving the remainder. When it is
+exactly the requested volume, it commits `filled`. An aggregate above the
+requested volume is anomalous and remains unresolved; evidence is never capped
+to manufacture a normal fill. Both the managed state and the durable journal
+are advanced only after the candidate state validates and the journal
+transition commits. A confirmed predicate without this history-deal
+provenance leaves both in `reconciling`.
 
 An authoritatively ambiguous cycle may record `unknown` only when the same
 provenance checks pass. Pending, not-observed, and event-gap cycles leave the

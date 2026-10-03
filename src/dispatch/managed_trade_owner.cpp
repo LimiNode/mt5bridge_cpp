@@ -247,12 +247,11 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
             if (!executed || *executed == 0 || state_.slice.requested_volume == 0)
                 break;
 
-            const auto applied_volume =
-                *executed >= state_.slice.requested_volume
-                    ? state_.slice.requested_volume
-                    : *executed;
+            if (*executed > state_.slice.requested_volume)
+                break;
+            const auto applied_volume = *executed;
             const auto target_state =
-                *executed >= state_.slice.requested_volume
+                *executed == state_.slice.requested_volume
                     ? OperationState::filled
                     : OperationState::partially_filled;
             auto candidate = state_;
@@ -352,6 +351,7 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
 
     std::optional<ObservationWindow> requested_window;
     std::vector<std::uint64_t> anchor_tickets;
+    std::size_t history_deal_predicate_count = 0;
     constexpr std::uint32_t kDealEntryIn = 0;
     constexpr std::uint32_t kDealEntryInOut = 2;
     constexpr std::uint64_t kRequiredDealFields =
@@ -361,6 +361,10 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
     for (const auto &predicate : record.reconciliation_descriptor->predicates) {
         if (predicate.kind != ReconciliationPredicateKind::history_deal_present)
             continue;
+        ++history_deal_predicate_count;
+        if (history_deal_predicate_count != 1 || predicate.ticket != 0 ||
+            predicate.correlation_id == 0)
+            return std::nullopt;
         if (!predicate.history_window)
             return std::nullopt;
         if (!requested_window)
@@ -369,17 +373,17 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
                  requested_window->to_msc != predicate.history_window->to_msc)
             return std::nullopt;
 
-        std::uint64_t ticket = predicate.ticket;
-        if (ticket == 0) {
-            for (const auto &binding : record.reconciliation_bindings) {
-                if (binding.correlation_id == predicate.correlation_id) {
-                    if (ticket != 0 && ticket != binding.broker_ticket)
-                        return std::nullopt;
-                    ticket = binding.broker_ticket;
-                }
-            }
+        std::size_t matching_bindings = 0;
+        std::uint64_t ticket = 0;
+        for (const auto &binding : record.reconciliation_bindings) {
+            if (binding.correlation_id != predicate.correlation_id)
+                continue;
+            ++matching_bindings;
+            if (!binding.valid() || ticket != 0)
+                return std::nullopt;
+            ticket = binding.broker_ticket;
         }
-        if (ticket == 0)
+        if (matching_bindings != 1 || ticket == 0)
             return std::nullopt;
         anchor_tickets.push_back(ticket);
     }

@@ -319,12 +319,13 @@ to `reconciling`, then applies only explicit predicates over fresh graph
 evidence. A confirmed predicate set is an observation result only: it never
 applies the descriptor's caller-selected lifecycle state. The private owner
 now has one bounded semantic settlement path for an `OPEN` slice: a fresh
-`history_deal_present` predicate and result-derived deal binding anchor an
-order, all fresh entry deals for that order are aggregated, and the requested
-logical volume is classified as `partially_filled` or `filled`. Active-order
-presence, one arbitrary deal ticket, missing deal fields, and non-integral
-logical totals remain unresolved. Cancellation and expiry still require later
-settlement slices. Contradictory evidence becomes `ambiguous`. `pending`,
+`history_deal_present` predicate and exactly one result-derived deal binding
+anchor an order, all fresh entry deals for that order are aggregated, and the
+requested logical volume is classified as `partially_filled` or `filled` only
+when the aggregate does not overfill the request. Active-order presence, a
+caller-chosen deal ticket, one arbitrary deal ticket, missing deal fields,
+non-integral logical totals, and anomalous overfills remain unresolved.
+Cancellation and expiry still require later settlement slices. Contradictory evidence becomes `ambiguous`. `pending`,
 `not_observed`, event gaps, and account mismatch leave the operation unresolved
 and never authorize a resend. Recovery workers
 require the coordinator graph to be already bound to the operation's

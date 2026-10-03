@@ -29,8 +29,8 @@ single-assignment result binding. The owner uses that ticket only as an anchor:
 it attributes all fresh history deals linked to the anchor's `DEAL_ORDER`,
 requires known `DEAL_ENTRY`, `DEAL_VOLUME`, and `DEAL_TIME`, ignores exit deals,
 and sums the remaining entry (`IN`/`INOUT`) volumes. Thus a raw broker deal
-ticket, active-order presence, or one arbitrary history row cannot settle the
-operation by itself. The logical managed-trade volume is intentionally an
+ticket, active-order presence, or an unlinked arbitrary history row cannot
+settle the operation by itself. The logical managed-trade volume is intentionally an
 integer in this slice; a non-integral or otherwise malformed broker total is
 left unresolved rather than rounded.
 

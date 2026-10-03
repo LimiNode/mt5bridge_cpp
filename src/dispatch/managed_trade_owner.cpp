@@ -336,6 +336,101 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
     return result;
 }
 
+OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
+    OperationReconciliationWorker &worker, bool trade_event_gap,
+    bool deadline_expired) {
+    if (!state_.valid())
+        return result_for(OwnerStepStatus::invalid_request);
+    if (state_.slice.kind != managed_trade::OperationKind::open ||
+        state_.slice.state != managed_trade::OperationState::partially_filled ||
+        state_.pending_remainder_volume == 0)
+        return result_for(OwnerStepStatus::invalid_state, current_key());
+
+    const auto key = current_key();
+    if (!key)
+        return result_for(OwnerStepStatus::invalid_request);
+    if (worker.key() != *key)
+        return result_for(OwnerStepStatus::invalid_request, key,
+                          journal_.find(*key));
+    const auto current = journal_.find(*key);
+    if (!current || current->journal_state != JournalState::reconciling ||
+        current->operation_state != OperationState::partially_filled ||
+        !current->reconciliation_descriptor)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+
+    const auto before_deals = worker.graph().history_deals();
+    std::vector<std::uint64_t> prior_deal_tickets;
+    prior_deal_tickets.reserve(before_deals.size());
+    for (const auto &deal : before_deals)
+        prior_deal_tickets.push_back(deal.ticket);
+
+    const auto cycle = worker.step(trade_event_gap, deadline_expired);
+    auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
+    if (!result.record)
+        result.record = journal_.find(*key);
+
+    switch (cycle.status) {
+    case OperationReconciliationStatus::pending:
+    case OperationReconciliationStatus::not_observed:
+    case OperationReconciliationStatus::trade_event_gap:
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    case OperationReconciliationStatus::account_mismatch:
+    case OperationReconciliationStatus::ambiguous:
+        result.status = OwnerStepStatus::ambiguous;
+        return result;
+    case OperationReconciliationStatus::invalid_request:
+        result.status = OwnerStepStatus::invalid_request;
+        return result;
+    case OperationReconciliationStatus::operation_not_found:
+    case OperationReconciliationStatus::invalid_state:
+        result.status = OwnerStepStatus::invalid_state;
+        return result;
+    case OperationReconciliationStatus::persistence_failed:
+        return result;
+    case OperationReconciliationStatus::confirmed:
+        if (!cycle.record ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record) ||
+            cycle.record->settled_volume != state_.slice.result_volume)
+            break;
+        {
+            const auto executed = history_deal_volume(
+                cycle, worker, *cycle.record, &prior_deal_tickets);
+            if (!executed || *executed == 0 ||
+                *executed > state_.pending_remainder_volume ||
+                cycle.record->settled_volume >
+                    (std::numeric_limits<managed_trade::Volume>::max)() - *executed)
+                break;
+
+            const auto cumulative = cycle.record->settled_volume + *executed;
+            auto candidate = state_;
+            if (candidate.observe_pending_remainder(*executed) !=
+                managed_trade::MutationStatus::applied)
+                break;
+            const auto target_state = candidate.slice.state ==
+                                              managed_trade::OperationState::filled
+                                          ? OperationState::filled
+                                          : OperationState::partially_filled;
+            const auto transitioned =
+                journal_.transition_operation(*key, target_state, cumulative);
+            if (!transitioned.accepted())
+                break;
+            state_ = std::move(candidate);
+            result.record = transitioned.record;
+            result.status = target_state == OperationState::filled
+                                ? OwnerStepStatus::completed
+                                : OwnerStepStatus::partially_filled;
+            return result;
+        }
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    }
+
+    if (cycle.status == OperationReconciliationStatus::confirmed)
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+    return result;
+}
+
 bool ManagedTradeOwner::mark_journal_reconciling(const OperationKey &key) {
     auto record = journal_.find(key);
     if (!record || !journal_at_least_dispatching(record->journal_state))
@@ -390,7 +485,8 @@ bool ManagedTradeOwner::has_observation_provenance(
 std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
     const OperationReconciliationCycle &cycle,
     const OperationReconciliationWorker &worker,
-    const OperationRecord &record) const {
+    const OperationRecord &record,
+    const std::vector<std::uint64_t> *prior_deal_tickets) const {
     if (!cycle.observation || !cycle.observation->refresh.sample ||
         !record.reconciliation_descriptor)
         return std::nullopt;
@@ -489,6 +585,10 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
                 baseline->history_deals_revision() ||
             deal.time_msc < requested_window->from_msc ||
             deal.time_msc > requested_window->to_msc)
+            continue;
+        if (prior_deal_tickets &&
+            std::find(prior_deal_tickets->begin(), prior_deal_tickets->end(), deal.ticket) !=
+                prior_deal_tickets->end())
             continue;
         if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
             return std::nullopt;

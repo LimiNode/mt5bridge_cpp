@@ -91,7 +91,8 @@ void test_partial_remainder_cancel_and_close() {
             "close obligation with remainder was not created");
     require(state.observe_pending_remainder(3) == MutationStatus::applied,
             "late remainder fill was not observed");
-    require(state.open_volume == 5 && state.pending_remainder_volume == 1,
+    require(state.open_volume == 5 && state.pending_remainder_volume == 1 &&
+                state.slice.result_volume == 5,
             "late remainder fill changed exposure incorrectly");
     require(state.start_cancel() == MutationStatus::applied,
             "remainder cancel was not started");
@@ -113,6 +114,26 @@ void test_partial_remainder_cancel_and_close() {
     require(state.reconcile() == MutationStatus::applied &&
                 state.trade_state() == TradeState::closed,
             "close after cancellation did not settle the trade");
+}
+
+void test_late_remainder_completion() {
+    auto state = make_trade(6, 6);
+    require(state.start_open_slice(6) == MutationStatus::applied,
+            "late-completion open slice was not started");
+    require(state.enter_submitting() == MutationStatus::applied,
+            "late-completion open did not enter submitting");
+    require(state.record_fill(2) == MutationStatus::applied &&
+                state.reconcile() == MutationStatus::applied,
+            "late-completion partial open was not reconciled");
+    require(state.observe_pending_remainder(4) == MutationStatus::applied,
+            "late-completion remainder was not observed");
+    require(state.open_volume == 6 && state.pending_remainder_volume == 0 &&
+                state.slice.state == OperationState::filled &&
+                state.slice.result_volume == 6 &&
+                state.slice.broker_outcome == BrokerOutcome::full,
+            "late-completion remainder did not finish the open slice");
+    require(state.valid() && state.trade_state() == TradeState::open,
+            "late-completion state is not a valid open trade");
 }
 
 void test_close_before_fill_and_ambiguous_recovery() {
@@ -224,6 +245,7 @@ void test_corrupt_durable_values_fail_closed() {
 int main() {
     test_full_open_and_close();
     test_partial_remainder_cancel_and_close();
+    test_late_remainder_completion();
     test_close_before_fill_and_ambiguous_recovery();
     test_plan_stop_and_limits();
     test_corrupt_durable_values_fail_closed();

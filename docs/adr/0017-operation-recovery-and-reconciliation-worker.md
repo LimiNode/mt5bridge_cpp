@@ -67,8 +67,11 @@ Only contradictory evidence may mutate the operation lifecycle in this generic
 worker. A confirmed predicate never applies the descriptor's candidate state;
 full and partial fill, cancellation, expiry, and rejection require a separate
 semantic settlement path. No path creates a new `DispatchPermit` or invokes a
-transport. A later remainder must be handled by a new caller-owned worker and
-a new operation identity after the remainder is proven.
+transport. A later remainder is handled by a new caller-owned worker. For a
+partial OPEN, the managed owner may use that fresh worker to attribute newly
+observed volume on the existing operation; a new operation identity is needed
+only for a subsequent side effect, such as an explicitly reconciled cancel or
+replacement attempt.
 
 ## Consequences
 

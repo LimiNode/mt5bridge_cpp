@@ -330,11 +330,16 @@ Cancellation and expiry still require later settlement slices. Contradictory evi
 and never authorize a resend. Recovery workers
 require the coordinator graph to be already bound to the operation's
 `AccountKey`; an unbound or foreign graph returns `ACCOUNT_MISMATCH` before
-provider collection. A later remainder is a new operation decision, not a
-blind retry of the old side effect. After a full or partial OPEN settlement,
-the private owner can reconstruct confirmed exposure and pending remainder
-from durable requested/settled volume fields after restart; unresolved, close,
-and cancel reconstruction remain observation-only follow-up work.
+provider collection. A later fill of an existing OPEN remainder is observed
+through a fresh, provenance-bearing worker cycle, not by resending the old side
+effect. The owner snapshots already known deal tickets before each refresh and
+advances only newly observed entry volume, so repeated history snapshots cannot
+re-attribute earlier deals. The cumulative `settled_volume` is committed
+atomically with the managed exposure; the final remainder completes the same
+OPEN slice. After a full or partial OPEN settlement, the private owner can
+reconstruct confirmed exposure and pending remainder from durable
+requested/settled volume fields after restart; unresolved, close, and cancel
+reconstruction remain observation-only follow-up work.
 
 ## Quickstart scenarios
 

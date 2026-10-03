@@ -12,8 +12,17 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
+
+static_assert(!std::is_default_constructible_v<mt5bridge::JournalRecoveryResult>);
+static_assert(!std::is_constructible_v<mt5bridge::JournalRecoveryResult,
+                                      mt5bridge::JournalMutationStatus,
+                                      std::vector<mt5bridge::OperationRecord>, bool>);
+static_assert(std::is_same_v<
+              decltype(std::declval<const mt5bridge::JournalRecoveryResult &>().records()),
+              const std::vector<mt5bridge::OperationRecord> &>);
 
 namespace {
 
@@ -748,6 +757,42 @@ int main() {
                         mt5bridge::OperationState::reconciling &&
                     overfill_owner.state().open_volume == 0,
                 "overfilled deal evidence was silently capped into a fill");
+
+        mt5bridge::OperationJournal restarted_journal(store);
+        const auto recovered_records = restarted_journal.recover_all();
+        require(recovered_records.accepted(),
+                "managed-trade restart scan did not recover durable records");
+        mt5bridge::managed_trade::ManagedTradeState recovered_full_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &recovered_full_seed, mt5bridge::managed_trade::TradeId{50}, 5, 5, 4),
+                "full-fill recovery seed initialization failed");
+        const auto recovered_full =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
+                recovered_full_seed, operation_account, recovered_records);
+        require(recovered_full && recovered_full->valid() &&
+                    recovered_full->slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled &&
+                    recovered_full->open_volume == 5 &&
+                    recovered_full->pending_remainder_volume == 0,
+                "durable full fill did not reconstruct managed exposure");
+
+        mt5bridge::managed_trade::ManagedTradeState recovered_partial_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &recovered_partial_seed, mt5bridge::managed_trade::TradeId{51}, 5, 5,
+                    4),
+                "partial-fill recovery seed initialization failed");
+        const auto recovered_partial =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
+                recovered_partial_seed, operation_account, recovered_records);
+        require(recovered_partial && recovered_partial->valid() &&
+                    recovered_partial->slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled &&
+                    recovered_partial->open_volume == 2 &&
+                    recovered_partial->pending_remainder_volume == 3,
+                "durable partial fill did not reconstruct managed remainder");
+
+        require(recovered_records.accepted() && !recovered_records.records().empty(),
+                "accepted recovery did not expose a complete read-only record view");
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

@@ -23,7 +23,8 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'J', 'N', 'L', '0', '1'}};
 constexpr std::uint32_t kLegacyFormatVersion = 1;
-constexpr std::uint32_t kFormatVersion = 2;
+constexpr std::uint32_t kPreviousFormatVersion = 2;
+constexpr std::uint32_t kFormatVersion = 3;
 constexpr std::array<char, 8> kEpochMagic{{'M', 'T', '5', 'E', 'P', 'C', '0', '1'}};
 constexpr std::uint32_t kEpochFormatVersion = 1;
 constexpr std::size_t kMaxStringBytes = 1U << 20;
@@ -145,6 +146,7 @@ bool append_reconciliation_descriptor(
     append_u64(bytes, descriptor->account.login);
     append_u64(bytes, descriptor->trade_id);
     append_u64(bytes, descriptor->operation_id);
+    append_u64(bytes, descriptor->requested_volume);
     if (!append_bytes(bytes, baseline.account().server))
         return false;
     append_u64(bytes, baseline.account().login);
@@ -190,7 +192,8 @@ bool append_reconciliation_bindings(
 
 bool read_reconciliation_descriptor(
     const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-    std::optional<ReconciliationDescriptor> &descriptor, bool extended) {
+    std::optional<ReconciliationDescriptor> &descriptor, bool extended,
+    bool managed_extended) {
     if (offset == bytes.size())
         return true;
     std::uint32_t present = 0;
@@ -204,6 +207,7 @@ bool read_reconciliation_descriptor(
     std::uint64_t baseline_login = 0;
     std::uint64_t trade_id = 0;
     std::uint64_t operation_id = 0;
+    std::uint64_t requested_volume = 0;
     std::uint64_t graph_instance_id = 0;
     std::uint64_t graph_revision = 0;
     std::uint64_t active_orders_revision = 0;
@@ -216,6 +220,7 @@ bool read_reconciliation_descriptor(
         !read_u64(bytes, offset, descriptor_account.login) ||
         (extended && !read_u64(bytes, offset, trade_id)) ||
         (extended && !read_u64(bytes, offset, operation_id)) ||
+        (managed_extended && !read_u64(bytes, offset, requested_volume)) ||
         !read_string(bytes, offset, baseline_server) ||
         !read_u64(bytes, offset, baseline_login) ||
         !read_u64(bytes, offset, graph_instance_id) ||
@@ -236,7 +241,7 @@ bool read_reconciliation_descriptor(
         return false;
     ReconciliationDescriptor value{std::move(descriptor_account), *baseline, {},
                                    static_cast<OperationState>(settled_state), trade_id,
-                                   operation_id};
+                                   operation_id, requested_volume};
     value.predicates.reserve(predicate_count);
     for (std::uint32_t index = 0; index < predicate_count; ++index) {
         std::uint32_t kind = 0;
@@ -312,6 +317,7 @@ std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &r
     append_u32(body, static_cast<std::uint32_t>(record.journal_state));
     append_u64(body, record.revision);
     append_u64(body, record.fencing_token);
+    append_u64(body, record.settled_volume);
     if (!append_reconciliation_descriptor(body, record.reconciliation_descriptor))
         return std::nullopt;
     if (!append_reconciliation_bindings(body, record.reconciliation_bindings))
@@ -346,7 +352,8 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     std::uint64_t expected_checksum = 0;
     if (!read_u32(bytes, offset, version) || !read_u64(bytes, offset, body_size) ||
         !read_u64(bytes, offset, expected_checksum) ||
-        (version != kFormatVersion && version != kLegacyFormatVersion) ||
+        (version != kFormatVersion && version != kPreviousFormatVersion &&
+         version != kLegacyFormatVersion) ||
         body_size > kMaxBodyBytes || body_size != bytes.size() - offset)
         return std::nullopt;
 
@@ -371,11 +378,14 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
         !read_u32(body, body_offset, journal_state) ||
         !read_u64(body, body_offset, record.revision) ||
         !read_u64(body, body_offset, record.fencing_token) ||
+        (version >= kFormatVersion &&
+         !read_u64(body, body_offset, record.settled_volume)) ||
         !read_reconciliation_descriptor(body, body_offset,
                                         record.reconciliation_descriptor,
+                                        version >= kPreviousFormatVersion,
                                         version >= kFormatVersion))
         return std::nullopt;
-    if (version >= kFormatVersion) {
+    if (version >= kPreviousFormatVersion) {
         std::uint32_t binding_count = 0;
         if (!read_u32(body, body_offset, binding_count) ||
             binding_count > kMaxReconciliationPredicates)

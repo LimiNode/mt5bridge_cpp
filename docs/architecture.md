@@ -327,10 +327,12 @@ worker process.
    overfills, and unproven rows remain unresolved. It converts
    uncertainty to durable `reconciling` with a non-resendable owner outcome,
    and managed state alone never authorizes a send. Remainder handling after a
-   partial result, close/cancel planning, and restart reconstruction of
-   aggregate managed exposure remain later slices. The next public-facing layer
-   is the high-level asynchronous `TradeManager`; its side-effecting methods
-   must follow [ADR-0004](adr/0004-trade-reconciliation.md).
+   partial result and close/cancel planning remain later slices. The bounded
+   restart slice now persists requested/settled OPEN volume and can reconstruct
+   full or partial exposure fail-closed from durable terminal records;
+   unresolved, close, and cancel records still require later recovery slices.
+   The next public-facing layer is the high-level asynchronous `TradeManager`;
+   its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced
    entry/exit. Slicing must not be hidden inside a single-trade manager.
 10. Add hybrid virtual/broker exit policies and a risk engine only after the

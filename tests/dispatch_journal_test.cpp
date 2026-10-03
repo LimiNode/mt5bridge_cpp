@@ -848,7 +848,7 @@ int main() {
         require(recovery_journal.recover_all().accepted(),
                 "complete recovery scan was rejected");
         recovery_store.scan_status = mt5bridge::StoreScanStatus::invalid_record;
-        require(recovery_journal.recover_all().status ==
+        require(recovery_journal.recover_all().status() ==
                     mt5bridge::JournalMutationStatus::invalid_record &&
                     recovery_journal.find(recovery_key),
                 "failed recovery scan partially replaced the owner cache");

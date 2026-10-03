@@ -4,10 +4,14 @@
 #include <mt5bridge.hpp>
 
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -44,10 +48,154 @@ void prepare(mt5bridge::OperationJournal &journal,
         {mt5bridge::require_active_order(20),
          mt5bridge::require_history_order(21, history_window)},
         mt5bridge::OperationState::filled};
+    descriptor.requested_volume = 5;
     require(journal.persist_reconciliation_descriptor(operation_key,
                                                        std::move(descriptor))
                 .accepted(),
             "reconciliation descriptor transition failed");
+}
+
+void append_u32(std::vector<std::uint8_t> &bytes, std::uint32_t value) {
+    for (unsigned shift = 0; shift != 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void append_u64(std::vector<std::uint8_t> &bytes, std::uint64_t value) {
+    for (unsigned shift = 0; shift != 64; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void append_string(std::vector<std::uint8_t> &bytes, const std::string &value) {
+    require(value.size() <= (std::numeric_limits<std::uint32_t>::max)(),
+            "legacy fixture string is too large");
+    append_u32(bytes, static_cast<std::uint32_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+void append_payload(std::vector<std::uint8_t> &bytes,
+                    const std::vector<std::uint8_t> &value) {
+    require(value.size() <= (std::numeric_limits<std::uint32_t>::max)(),
+            "legacy fixture payload is too large");
+    append_u32(bytes, static_cast<std::uint32_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+std::uint64_t fixture_checksum(const std::vector<std::uint8_t> &bytes) {
+    std::uint64_t result = 1469598103934665603ULL;
+    for (const auto byte : bytes) {
+        result ^= byte;
+        result *= 1099511628211ULL;
+    }
+    return result;
+}
+
+std::string fixture_hex(std::uint64_t value) {
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << value;
+    return stream.str();
+}
+
+std::uint64_t fixture_fnv1a(const std::string &value) {
+    std::uint64_t result = 1469598103934665603ULL;
+    for (const unsigned char byte : value) {
+        result ^= byte;
+        result *= 1099511628211ULL;
+    }
+    return result;
+}
+
+std::filesystem::path fixture_path(const std::filesystem::path &directory,
+                                   const mt5bridge::OperationKey &operation_key) {
+    const auto suffix = "op-" + fixture_hex(fixture_fnv1a(operation_key.account.server)) +
+                        "-" + fixture_hex(operation_key.account.login) + "-" +
+                        fixture_hex(operation_key.trade_id) + "-" +
+                        fixture_hex(operation_key.operation_id) + ".bin";
+    return directory / suffix;
+}
+
+std::vector<std::uint8_t> wrap_fixture(std::uint32_t version,
+                                       const std::vector<std::uint8_t> &body) {
+    const std::vector<std::uint8_t> magic{'M', 'T', '5', 'J', 'N', 'L', '0', '1'};
+    std::vector<std::uint8_t> bytes(magic.begin(), magic.end());
+    append_u32(bytes, version);
+    append_u64(bytes, static_cast<std::uint64_t>(body.size()));
+    append_u64(bytes, fixture_checksum(body));
+    bytes.insert(bytes.end(), body.begin(), body.end());
+    return bytes;
+}
+
+std::vector<std::uint8_t> legacy_v1_body(const mt5bridge::OperationKey &operation_key) {
+    std::vector<std::uint8_t> body;
+    append_string(body, operation_key.account.server);
+    append_payload(body, {0x11});
+    append_payload(body, {});
+    append_u64(body, operation_key.account.login);
+    append_u64(body, operation_key.trade_id);
+    append_u64(body, operation_key.operation_id);
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::OperationState::queued));
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::JournalState::created));
+    append_u64(body, 1);
+    append_u64(body, 0);
+    return body;
+}
+
+std::vector<std::uint8_t> legacy_v2_body(const mt5bridge::OperationKey &operation_key) {
+    mt5bridge::ObservationGraph graph(operation_key.account);
+    const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
+    const mt5bridge::ObservationWindow window{1000, 2000};
+    std::vector<std::uint8_t> body;
+    append_string(body, operation_key.account.server);
+    append_payload(body, {0x22});
+    append_payload(body, {0xA0});
+    append_u64(body, operation_key.account.login);
+    append_u64(body, operation_key.trade_id);
+    append_u64(body, operation_key.operation_id);
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::OperationState::reconciling));
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::JournalState::reconciling));
+    append_u64(body, 8);
+    append_u64(body, 77);
+
+    append_u32(body, 1);
+    append_string(body, operation_key.account.server);
+    append_u64(body, operation_key.account.login);
+    append_u64(body, operation_key.trade_id);
+    append_u64(body, operation_key.operation_id);
+    append_string(body, baseline.account().server);
+    append_u64(body, baseline.account().login);
+    append_u64(body, baseline.graph_instance_id());
+    append_u64(body, baseline.graph_revision());
+    append_u64(body, baseline.active_orders_revision());
+    append_u64(body, baseline.positions_revision());
+    append_u64(body, baseline.history_orders_revision());
+    append_u64(body, baseline.history_deals_revision());
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::OperationState::filled));
+    append_u32(body, 1);
+    append_u32(body, static_cast<std::uint32_t>(
+                           mt5bridge::ReconciliationPredicateKind::history_deal_present));
+    append_u64(body, 0);
+    append_u32(body, 1);
+    append_u64(body, static_cast<std::uint64_t>(window.from_msc));
+    append_u64(body, static_cast<std::uint64_t>(window.to_msc));
+    append_u32(body, 1);
+    append_u64(body, 701);
+    append_u32(body, static_cast<std::uint32_t>(
+                           mt5bridge::ReconciliationTransition::absent_to_present));
+
+    append_u32(body, 1);
+    append_u64(body, 701);
+    append_u64(body, 730);
+    return body;
+}
+
+void write_fixture(const std::filesystem::path &directory,
+                   const mt5bridge::OperationKey &operation_key, std::uint32_t version,
+                   const std::vector<std::uint8_t> &body) {
+    std::ofstream output(fixture_path(directory, operation_key),
+                         std::ios::binary | std::ios::trunc);
+    const auto bytes = wrap_fixture(version, body);
+    output.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(output.good(), "legacy fixture could not be written");
 }
 
 } // namespace
@@ -57,13 +205,47 @@ void prepare(mt5bridge::OperationJournal &journal,
 int main() {
     const auto directory = std::filesystem::temp_directory_path() /
                            "mt5bridge_file_journal_store_test";
+    const auto legacy_directory = std::filesystem::temp_directory_path() /
+                                  "mt5bridge_file_journal_store_legacy_test";
     const auto original_cwd = std::filesystem::current_path();
     std::error_code cleanup_error;
     std::filesystem::remove_all(directory, cleanup_error);
+    std::filesystem::remove_all(legacy_directory, cleanup_error);
 
     try {
         mt5bridge::WindowsFileJournalStore store(directory);
         require(store.ready(), "file journal store did not open its directory");
+
+        const auto legacy_v1_key = key(70, 71);
+        const auto legacy_v2_key = key(72, 73);
+        mt5bridge::WindowsFileJournalStore legacy_store(legacy_directory);
+        require(legacy_store.ready(), "legacy fixture store did not open its directory");
+        write_fixture(legacy_store.directory(), legacy_v1_key, 1,
+                      legacy_v1_body(legacy_v1_key));
+        write_fixture(legacy_store.directory(), legacy_v2_key, 2,
+                      legacy_v2_body(legacy_v2_key));
+        const auto legacy_v1 = legacy_store.load(legacy_v1_key);
+        require(legacy_v1.found() && legacy_v1.record &&
+                    !legacy_v1.record->reconciliation_descriptor &&
+                    legacy_v1.record->operation_state ==
+                        mt5bridge::OperationState::queued &&
+                    legacy_v1.record->journal_state == mt5bridge::JournalState::created,
+                "version-one journal fixture was not read conservatively");
+        const auto legacy_v2 = legacy_store.load(legacy_v2_key);
+        require(legacy_v2.found() && legacy_v2.record &&
+                    legacy_v2.record->reconciliation_descriptor &&
+                    legacy_v2.record->reconciliation_descriptor->trade_id ==
+                        legacy_v2_key.trade_id &&
+                    legacy_v2.record->reconciliation_descriptor->operation_id ==
+                        legacy_v2_key.operation_id &&
+                    legacy_v2.record->reconciliation_bindings.size() == 1 &&
+                    legacy_v2.record->reconciliation_bindings.front() ==
+                        mt5bridge::ReconciliationBinding{701, 730} &&
+                    legacy_v2.record->settled_volume == 0,
+                "version-two journal fixture did not preserve causal metadata");
+        const auto legacy_scan = legacy_store.scan();
+        require(legacy_scan.complete() && legacy_scan.records.size() == 2,
+                "legacy journal fixtures did not survive a complete scan");
 
         const auto operation_key = key();
         const auto lease_account = operation_key.account;
@@ -148,6 +330,32 @@ int main() {
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        const auto settled_reconciling = owner_a.transition_operation(
+            operation_key, mt5bridge::OperationState::reconciling);
+        require(settled_reconciling.accepted(),
+                "managed operation did not enter reconciliation");
+        require(owner_a.transition_journal(operation_key,
+                                           mt5bridge::JournalState::reconciling)
+                    .accepted(),
+                "settlement journal barrier was not committed");
+        const auto reconciling_record = owner_a.find(operation_key);
+        require(reconciling_record.has_value(), "reconciling record was not retained");
+        auto settled_record_value = *reconciling_record;
+        settled_record_value.operation_state = mt5bridge::OperationState::filled;
+        settled_record_value.settled_volume = 5;
+        ++settled_record_value.revision;
+        require(settled_record_value.valid() &&
+                    store.commit(settled_record_value, reconciling_record->revision) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "settled managed volume was not committed");
+        mt5bridge::WindowsFileJournalStore settled_store(directory);
+        const auto settled_record = settled_store.load(operation_key);
+        require(settled_record.found() && settled_record.record->operation_state ==
+                                       mt5bridge::OperationState::filled &&
+                    settled_record.record->settled_volume == 5 &&
+                    settled_record.record->reconciliation_descriptor &&
+                    settled_record.record->reconciliation_descriptor->requested_volume == 5,
+                "settled managed volume did not survive store reopen");
         require(result_store.load(key(99, 100)).status ==
                     mt5bridge::StoreLoadStatus::not_found,
                 "missing operation was not distinguished from storage failure");
@@ -163,7 +371,7 @@ int main() {
 
         mt5bridge::OperationJournal restarted(result_store);
         const auto recovered_all = restarted.recover_all();
-        require(recovered_all.accepted() && recovered_all.records.size() == 2 &&
+        require(recovered_all.accepted() && recovered_all.records().size() == 2 &&
                     restarted.find(operation_key) && restarted.find(duplicate_key),
                 "restart enumeration did not recover every durable operation");
 
@@ -238,7 +446,7 @@ int main() {
         require(corrupted_journal.recover(operation_key).status ==
                     mt5bridge::JournalMutationStatus::invalid_record,
                 "corrupt single-record recovery was reported as missing");
-        require(corrupted_journal.recover_all().status ==
+        require(corrupted_journal.recover_all().status() ==
                     mt5bridge::JournalMutationStatus::invalid_record &&
                     !corrupted_journal.find(operation_key),
                 "corrupt restart scan partially replaced the owner cache");
@@ -286,11 +494,13 @@ int main() {
                 "failed lease retained the account lock after initialization error");
 
         std::filesystem::remove_all(directory, cleanup_error);
+        std::filesystem::remove_all(legacy_directory, cleanup_error);
         std::cout << "file journal store checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::filesystem::current_path(original_cwd);
         std::filesystem::remove_all(directory, cleanup_error);
+        std::filesystem::remove_all(legacy_directory, cleanup_error);
         std::cerr << "file journal store checks failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }

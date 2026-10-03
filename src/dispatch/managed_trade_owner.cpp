@@ -32,6 +32,62 @@ ManagedTradeOwner::ManagedTradeOwner(
       admission_(admission), backend_(backend), account_probe_(account_probe),
       lease_(lease), transport_(transport) {}
 
+std::optional<managed_trade::ManagedTradeState>
+ManagedTradeOwner::recover_settled_open(
+    managed_trade::ManagedTradeState initial_state, const AccountKey &account,
+    const JournalRecoveryResult &recovery) {
+    if (!recovery.accepted() || !account.valid() || !initial_state.valid() ||
+        initial_state.slice.operation_id != 0 || initial_state.plan.slice_count != 0 ||
+        initial_state.open_volume != 0 || initial_state.pending_remainder_volume != 0 ||
+        initial_state.slice.state != managed_trade::OperationState::idle)
+        return std::nullopt;
+
+    std::vector<const OperationRecord *> settled;
+    for (const auto &record : recovery.records()) {
+        if (record.key.account != account ||
+            record.key.trade_id != initial_state.trade_id.value)
+            continue;
+        if (!record.valid() || record.journal_state != JournalState::reconciling ||
+            !record.reconciliation_descriptor ||
+            record.reconciliation_descriptor->requested_volume == 0 ||
+            record.settled_volume == 0 ||
+            (record.operation_state != OperationState::partially_filled &&
+             record.operation_state != OperationState::filled))
+            return std::nullopt;
+        settled.push_back(&record);
+    }
+    std::sort(settled.begin(), settled.end(),
+              [](const auto *left, const auto *right) {
+                  return left->key.operation_id < right->key.operation_id;
+              });
+
+    auto candidate = std::move(initial_state);
+    for (const auto *record : settled) {
+        const auto requested = record->reconciliation_descriptor->requested_volume;
+        if (candidate.slice.operation_id == (std::numeric_limits<std::uint64_t>::max)() ||
+            record->key.operation_id != candidate.slice.operation_id + 1 ||
+            requested == 0 || requested > candidate.plan.max_slice_volume ||
+            record->settled_volume > requested)
+            return std::nullopt;
+        const auto expected_state =
+            record->settled_volume == requested
+                ? OperationState::filled
+                : OperationState::partially_filled;
+        if (record->operation_state != expected_state ||
+            candidate.start_open_slice(requested) !=
+                managed_trade::MutationStatus::applied ||
+            candidate.enter_submitting() !=
+                managed_trade::MutationStatus::applied ||
+            candidate.record_fill(record->settled_volume) !=
+                managed_trade::MutationStatus::applied ||
+            candidate.reconcile() != managed_trade::MutationStatus::applied ||
+            candidate.slice.operation_id != record->key.operation_id ||
+            !candidate.valid())
+            return std::nullopt;
+    }
+    return candidate;
+}
+
 std::optional<OperationKey> ManagedTradeOwner::current_key() const {
     if (!state_.trade_id.valid() || state_.slice.operation_id == 0 ||
         !account_.valid())
@@ -51,6 +107,7 @@ OwnerStepResult ManagedTradeOwner::result_for(
 
 OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
                                                 ManagedTradeIntent intent) {
+    intent.reconciliation_descriptor.requested_volume = volume;
     if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
         !intent.reconciliation_descriptor.valid() ||
         intent.reconciliation_descriptor.account != account_)
@@ -259,7 +316,8 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
                     managed_trade::MutationStatus::applied ||
                 candidate.reconcile() != managed_trade::MutationStatus::applied)
                 break;
-            const auto transitioned = journal_.transition_operation(*key, target_state);
+            const auto transitioned =
+                journal_.transition_operation(*key, target_state, *executed);
             if (!transitioned.accepted())
                 break;
             state_ = std::move(candidate);

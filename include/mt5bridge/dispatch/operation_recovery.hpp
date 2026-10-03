@@ -55,12 +55,12 @@ public:
     static OperationRecoveryResult recover(OperationJournal &journal) {
         const auto recovered = journal.recover_all();
         if (!recovered.accepted())
-            return {recovered.status, {}};
+            return {recovered.status(), {}};
 
         OperationRecoveryResult result;
         result.status = JournalMutationStatus::accepted;
-        result.operations.reserve(recovered.records.size());
-        for (const auto &record : recovered.records) {
+        result.operations.reserve(recovered.records().size());
+        for (const auto &record : recovered.records()) {
             if (!record.valid())
                 return {JournalMutationStatus::invalid_record, {}};
             result.operations.push_back({record, classify(record)});

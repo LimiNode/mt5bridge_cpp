@@ -331,7 +331,10 @@ and never authorize a resend. Recovery workers
 require the coordinator graph to be already bound to the operation's
 `AccountKey`; an unbound or foreign graph returns `ACCOUNT_MISMATCH` before
 provider collection. A later remainder is a new operation decision, not a
-blind retry of the old side effect.
+blind retry of the old side effect. After a full or partial OPEN settlement,
+the private owner can reconstruct confirmed exposure and pending remainder
+from durable requested/settled volume fields after restart; unresolved, close,
+and cancel reconstruction remain observation-only follow-up work.
 
 ## Quickstart scenarios
 

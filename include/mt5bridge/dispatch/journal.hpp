@@ -19,6 +19,10 @@ namespace mt5bridge::runtime {
 class OneShotDispatchBackend;
 }
 
+namespace mt5bridge::dispatch {
+class ManagedTradeOwner;
+}
+
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
 namespace mt5bridge {
@@ -202,15 +206,35 @@ struct JournalMutationResult {
     }
 };
 
-/// \struct JournalRecoveryResult
+/// \class JournalRecoveryResult
 /// \brief Returns an all-or-nothing owner-loop recovery result.
-struct JournalRecoveryResult {
-    JournalMutationStatus status = JournalMutationStatus::invalid_record;
-    std::vector<OperationRecord> records;
-
+class JournalRecoveryResult {
+public:
     /// \brief Tests whether the owner cache was replaced by a complete scan.
-    /// \return True only when the scan was accepted.
-    bool accepted() const { return status == JournalMutationStatus::accepted; }
+    /// \return True only when the scan was accepted and complete.
+    bool accepted() const {
+        return status_ == JournalMutationStatus::accepted && complete_scan_;
+    }
+
+    /// \brief Returns the durable scan status.
+    /// \return Accepted, invalid, or storage-error status.
+    JournalMutationStatus status() const { return status_; }
+
+    /// \brief Returns the records from an accepted complete scan.
+    /// \return Read-only durable record set owned by this result.
+    const std::vector<OperationRecord> &records() const { return records_; }
+
+private:
+    JournalRecoveryResult(JournalMutationStatus status,
+                          std::vector<OperationRecord> records,
+                          bool complete_scan)
+        : status_(status), records_(std::move(records)), complete_scan_(complete_scan) {}
+
+    JournalMutationStatus status_ = JournalMutationStatus::invalid_record;
+    std::vector<OperationRecord> records_;
+    bool complete_scan_ = false;
+
+    friend class OperationJournal;
 };
 
 /// \class OperationJournal
@@ -288,22 +312,23 @@ public:
     JournalRecoveryResult recover_all() {
         const auto scanned = store_.scan();
         if (scanned.status == StoreScanStatus::invalid_record)
-            return {JournalMutationStatus::invalid_record, {}};
+            return JournalRecoveryResult{JournalMutationStatus::invalid_record, {}, false};
         if (scanned.status == StoreScanStatus::io_error)
-            return {JournalMutationStatus::storage_error, {}};
+            return JournalRecoveryResult{JournalMutationStatus::storage_error, {}, false};
 
         std::map<OperationKey, OperationRecord> staged;
         for (const auto &record : scanned.records) {
             if (!record.key.valid() || !record.valid() ||
                 !staged.emplace(record.key, record).second)
-                return {JournalMutationStatus::invalid_record, {}};
+                return JournalRecoveryResult{JournalMutationStatus::invalid_record, {}, false};
         }
         std::vector<OperationRecord> recovered;
         recovered.reserve(staged.size());
         for (const auto &entry : staged)
             recovered.push_back(entry.second);
         records_.swap(staged);
-        return {JournalMutationStatus::accepted, std::move(recovered)};
+        return JournalRecoveryResult{JournalMutationStatus::accepted,
+                                     std::move(recovered), true};
     }
 
     /// \brief Reads a record already owned by this journal loop.
@@ -416,6 +441,13 @@ public:
     /// \return Mutation status and the committed next record.
     JournalMutationResult transition_operation(const OperationKey &key,
                                                OperationState next_state) {
+        return transition_operation(key, next_state, std::nullopt);
+    }
+
+private:
+    JournalMutationResult transition_operation(
+        const OperationKey &key, OperationState next_state,
+        std::optional<std::uint64_t> settled_volume) {
         const auto it = records_.find(key);
         if (it == records_.end())
             return {JournalMutationStatus::not_found, std::nullopt};
@@ -438,11 +470,23 @@ public:
             (!journal_at_least_result_persisted(it->second.journal_state) ||
              it->second.result_payload.empty()))
             return {JournalMutationStatus::invalid_transition, std::nullopt};
+        const bool fill_state = next_state == OperationState::partially_filled ||
+                                next_state == OperationState::filled;
+        if (settled_volume && (!fill_state || *settled_volume == 0))
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (fill_state && it->second.reconciliation_descriptor &&
+            it->second.reconciliation_descriptor->requested_volume != 0 &&
+            !settled_volume)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
         if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
             return {JournalMutationStatus::invalid_record, std::nullopt};
 
         OperationRecord candidate = it->second;
         candidate.operation_state = next_state;
+        if (settled_volume)
+            candidate.settled_volume = *settled_volume;
+        else if (!fill_state)
+            candidate.settled_volume = 0;
         candidate.revision += 1;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};
@@ -456,6 +500,7 @@ public:
         return {JournalMutationStatus::accepted, std::move(candidate)};
     }
 
+public:
     /// \brief Tests whether a write-ahead transition is legal.
     /// \param current Current durable journal state.
     /// \param next Proposed next journal state.
@@ -600,6 +645,7 @@ private:
     std::map<OperationKey, OperationRecord> records_;
 
     friend class runtime::OneShotDispatchBackend;
+    friend class dispatch::ManagedTradeOwner;
 };
 
 } // namespace mt5bridge

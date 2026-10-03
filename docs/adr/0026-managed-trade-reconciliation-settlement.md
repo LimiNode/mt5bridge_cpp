@@ -22,20 +22,35 @@ the returned cycle carries all of the following:
   the same graph instance; numeric revisions from another process are never
   compared.
 
-The current bounded implementation supports observation of an `OPEN` slice and
-the already-safe deterministic-rejection path, but it does not infer a fill
-volume from order presence. A confirmed full-fill predicate leaves both the
-managed slice and journal operation in `reconciling` until a later settlement
-evidence contract supplies executed volume. An authoritatively ambiguous cycle
-may record `unknown` only when the same provenance checks pass. Pending,
-not-observed, and event-gap cycles leave the managed slice unresolved.
-Account mismatch, missing provenance, and durable identity mismatch cannot
-settle the managed state.
+For an `OPEN` slice, the bounded semantic settlement path additionally
+requires a fresh `history_deal_present` predicate with a valid inclusive time
+window. The predicate's broker ticket must be either the durable ticket or a
+single-assignment result binding. The owner uses that ticket only as an anchor:
+it attributes all fresh history deals linked to the anchor's `DEAL_ORDER`,
+requires known `DEAL_ENTRY`, `DEAL_VOLUME`, and `DEAL_TIME`, ignores exit deals,
+and sums the remaining entry (`IN`/`INOUT`) volumes. Thus a raw broker deal
+ticket, active-order presence, or one arbitrary history row cannot settle the
+operation by itself. The logical managed-trade volume is intentionally an
+integer in this slice; a non-integral or otherwise malformed broker total is
+left unresolved rather than rounded.
 
-Partial fills, remainder handling, close/cancel settlement, late fills, and
-restart reconstruction of aggregate exposure remain later bounded slices. The
-worker and owner therefore keep the durable journal non-resendable while those
-semantics are absent.
+When the attributed total is positive but below the requested slice volume,
+the owner commits `partially_filled`, preserving the remainder. When it is at
+least the requested volume, it commits `filled` and caps the recorded result
+at the requested amount. Both the managed state and the durable journal are
+advanced only after the candidate state validates and the journal transition
+commits. A confirmed predicate without this history-deal provenance leaves
+both in `reconciling`.
+
+An authoritatively ambiguous cycle may record `unknown` only when the same
+provenance checks pass. Pending, not-observed, and event-gap cycles leave the
+managed slice unresolved. Account mismatch, missing provenance, and durable
+identity mismatch cannot settle the managed state.
+
+Remainder handling after the partial result, close/cancel settlement, late
+fills, and restart reconstruction of aggregate exposure remain later bounded
+slices. The worker and owner therefore keep the durable journal non-resendable
+while those semantics are absent.
 
 ## Consequences
 
@@ -56,5 +71,7 @@ semantics are absent.
 new active order does not imply a full fill: managed volume stays zero and the
 journal remains non-terminal. It also covers a pending cycle: the journal is
 normalized for reconciliation while managed state stays `submitting` and no
-second backend call is possible. A later slice must add provenance-bearing
-executed volume from history deals before applying full/partial fill state.
+second backend call is possible. The history-deal regressions bind a broker
+deal identity, aggregate multiple fresh entry deals by their order, ignore an
+exit deal, and verify both full and partial transitions with a preserved
+remainder.

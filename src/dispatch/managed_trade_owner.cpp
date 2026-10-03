@@ -3,7 +3,14 @@
 
 #include "managed_trade_owner.hpp"
 
+#include <mt5bridge/reconciliation/graph.hpp>
+#include <mt5bridge/trade/deals.h>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <utility>
+#include <vector>
 
 namespace mt5bridge::dispatch {
 namespace {
@@ -188,7 +195,8 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
     if (!current || !current->reconciliation_descriptor)
         return result_for(OwnerStepStatus::invalid_state, key, current);
     const auto settled_state = current->reconciliation_descriptor->settled_state;
-    if (settled_state != OperationState::filled)
+    if (settled_state != OperationState::filled &&
+        settled_state != OperationState::partially_filled)
         return result_for(OwnerStepStatus::invalid_state, key, current);
 
     const auto cycle = worker.step(trade_event_gap, deadline_expired);
@@ -230,14 +238,44 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
     case OperationReconciliationStatus::persistence_failed:
         return result;
     case OperationReconciliationStatus::confirmed:
-        if (settled_state != OperationState::filled || !cycle.record ||
+        if (!cycle.record ||
             cycle.record->operation_state != OperationState::reconciling ||
             !has_observation_provenance(cycle, worker, *key, *cycle.record))
+            break;
+        {
+            const auto executed = history_deal_volume(cycle, worker, *cycle.record);
+            if (!executed || *executed == 0 || state_.slice.requested_volume == 0)
+                break;
+
+            const auto applied_volume =
+                *executed >= state_.slice.requested_volume
+                    ? state_.slice.requested_volume
+                    : *executed;
+            const auto target_state =
+                *executed >= state_.slice.requested_volume
+                    ? OperationState::filled
+                    : OperationState::partially_filled;
+            auto candidate = state_;
+            if (candidate.record_fill(applied_volume) !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.reconcile() != managed_trade::MutationStatus::applied)
+                break;
+            const auto transitioned = journal_.transition_operation(*key, target_state);
+            if (!transitioned.accepted())
+                break;
+            state_ = std::move(candidate);
+            result.record = transitioned.record;
+            result.status = target_state == OperationState::filled
+                                 ? OwnerStepStatus::completed
+                                 : OwnerStepStatus::partially_filled;
             return result;
+        }
         result.status = OwnerStepStatus::awaiting_reconciliation;
         return result;
     }
 
+    if (cycle.status == OperationReconciliationStatus::confirmed)
+        result.status = OwnerStepStatus::awaiting_reconciliation;
     return result;
 }
 
@@ -290,6 +328,122 @@ bool ManagedTradeOwner::has_observation_provenance(
            durable->revision == record.revision &&
            durable->journal_state == record.journal_state &&
            durable->operation_state == record.operation_state;
+}
+
+std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
+    const OperationReconciliationCycle &cycle,
+    const OperationReconciliationWorker &worker,
+    const OperationRecord &record) const {
+    if (!cycle.observation || !cycle.observation->refresh.sample ||
+        !record.reconciliation_descriptor)
+        return std::nullopt;
+
+    const auto &sample = *cycle.observation->refresh.sample;
+    if (!observes(sample.batch().observed_domains,
+                  ObservationDomain::history_deals) ||
+        !sample.batch().history_deals_window)
+        return std::nullopt;
+
+    const auto &baseline = worker.effective_baseline();
+    if (!baseline || !baseline->valid() ||
+        worker.graph().domain_revision(ObservationDomain::history_deals) <=
+            baseline->history_deals_revision())
+        return std::nullopt;
+
+    std::optional<ObservationWindow> requested_window;
+    std::vector<std::uint64_t> anchor_tickets;
+    constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint64_t kRequiredDealFields =
+        MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+        MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
+        MT5BRIDGE_DEAL_KNOWN_VOLUME | MT5BRIDGE_DEAL_KNOWN_TIME;
+    for (const auto &predicate : record.reconciliation_descriptor->predicates) {
+        if (predicate.kind != ReconciliationPredicateKind::history_deal_present)
+            continue;
+        if (!predicate.history_window)
+            return std::nullopt;
+        if (!requested_window)
+            requested_window = predicate.history_window;
+        else if (requested_window->from_msc != predicate.history_window->from_msc ||
+                 requested_window->to_msc != predicate.history_window->to_msc)
+            return std::nullopt;
+
+        std::uint64_t ticket = predicate.ticket;
+        if (ticket == 0) {
+            for (const auto &binding : record.reconciliation_bindings) {
+                if (binding.correlation_id == predicate.correlation_id) {
+                    if (ticket != 0 && ticket != binding.broker_ticket)
+                        return std::nullopt;
+                    ticket = binding.broker_ticket;
+                }
+            }
+        }
+        if (ticket == 0)
+            return std::nullopt;
+        anchor_tickets.push_back(ticket);
+    }
+    if (!requested_window || anchor_tickets.empty() ||
+        sample.batch().history_deals_window->from_msc > requested_window->from_msc ||
+        sample.batch().history_deals_window->to_msc < requested_window->to_msc ||
+        !worker.graph().history_deals_covered(
+            *requested_window, baseline->history_deals_revision()))
+        return std::nullopt;
+
+    const auto deals = worker.graph().history_deals();
+    std::uint64_t order_ticket = 0;
+    std::uint64_t position_id = 0;
+    bool order_selected = false;
+    for (const auto anchor : anchor_tickets) {
+        const auto found = std::find_if(
+            deals.begin(), deals.end(), [anchor](const Mt5DealSnapshot &deal) {
+                return deal.ticket == anchor;
+            });
+        if (found == deals.end() ||
+            worker.graph().history_deal_evidence_revision(found->ticket) <=
+                baseline->history_deals_revision() ||
+            (found->known_fields & kRequiredDealFields) != kRequiredDealFields ||
+            found->order_ticket == 0 ||
+            found->position_id == 0 ||
+            found->time_msc < requested_window->from_msc ||
+            found->time_msc > requested_window->to_msc ||
+            (found->entry != kDealEntryIn && found->entry != kDealEntryInOut))
+            return std::nullopt;
+        if (!order_selected) {
+            order_ticket = found->order_ticket;
+            position_id = found->position_id;
+            order_selected = true;
+        } else if (order_ticket != found->order_ticket ||
+                   position_id != found->position_id) {
+            return std::nullopt;
+        }
+    }
+
+    long double total = 0.0L;
+    bool attributed_entry = false;
+    for (const auto &deal : deals) {
+        if (deal.order_ticket != order_ticket || deal.position_id != position_id ||
+            worker.graph().history_deal_evidence_revision(deal.ticket) <=
+                baseline->history_deals_revision() ||
+            deal.time_msc < requested_window->from_msc ||
+            deal.time_msc > requested_window->to_msc)
+            continue;
+        if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
+            return std::nullopt;
+        if (deal.entry != kDealEntryIn && deal.entry != kDealEntryInOut)
+            continue;
+        if (!std::isfinite(deal.volume) || deal.volume <= 0.0)
+            return std::nullopt;
+        total += static_cast<long double>(deal.volume);
+        if (!std::isfinite(total))
+            return std::nullopt;
+        attributed_entry = true;
+    }
+    if (!attributed_entry || total <= 0.0L ||
+        std::floor(total) != total ||
+        total > static_cast<long double>((std::numeric_limits<managed_trade::Volume>::max)()))
+        return std::nullopt;
+    return static_cast<managed_trade::Volume>(total);
 }
 
 } // namespace mt5bridge::dispatch

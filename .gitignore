@@ -17,3 +17,6 @@ __pycache__/
 
 # TLC model-checking state dumps
 formal/**/states/
+
+# Codebase-memory index artifacts are generated locally by the repository tool.
+.codebase-memory/

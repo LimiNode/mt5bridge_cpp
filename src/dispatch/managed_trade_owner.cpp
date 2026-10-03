@@ -43,7 +43,7 @@ ManagedTradeOwner::recover_settled_open(
         return std::nullopt;
 
     std::vector<const OperationRecord *> settled;
-    for (const auto &record : recovery.records) {
+    for (const auto &record : recovery.records()) {
         if (record.key.account != account ||
             record.key.trade_id != initial_state.trade_id.value)
             continue;

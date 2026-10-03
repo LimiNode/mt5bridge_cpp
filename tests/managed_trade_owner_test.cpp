@@ -12,8 +12,17 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
+
+static_assert(!std::is_default_constructible_v<mt5bridge::JournalRecoveryResult>);
+static_assert(!std::is_constructible_v<mt5bridge::JournalRecoveryResult,
+                                      mt5bridge::JournalMutationStatus,
+                                      std::vector<mt5bridge::OperationRecord>, bool>);
+static_assert(std::is_same_v<
+              decltype(std::declval<const mt5bridge::JournalRecoveryResult &>().records()),
+              const std::vector<mt5bridge::OperationRecord> &>);
 
 namespace {
 
@@ -782,16 +791,8 @@ int main() {
                     recovered_partial->pending_remainder_volume == 3,
                 "durable partial fill did not reconstruct managed remainder");
 
-        auto incomplete_recovery = recovered_records;
-        incomplete_recovery.complete_scan = false;
-        incomplete_recovery.records.resize(1);
-        mt5bridge::managed_trade::ManagedTradeState incomplete_seed;
-        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
-                    &incomplete_seed, mt5bridge::managed_trade::TradeId{50}, 5, 5, 4),
-                "incomplete recovery seed initialization failed");
-        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
-                     incomplete_seed, operation_account, incomplete_recovery),
-                "incomplete journal recovery was accepted for managed reconstruction");
+        require(recovered_records.accepted() && !recovered_records.records().empty(),
+                "accepted recovery did not expose a complete read-only record view");
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

@@ -371,7 +371,7 @@ int main() {
 
         mt5bridge::OperationJournal restarted(result_store);
         const auto recovered_all = restarted.recover_all();
-        require(recovered_all.accepted() && recovered_all.records.size() == 2 &&
+        require(recovered_all.accepted() && recovered_all.records().size() == 2 &&
                     restarted.find(operation_key) && restarted.find(duplicate_key),
                 "restart enumeration did not recover every durable operation");
 
@@ -446,7 +446,7 @@ int main() {
         require(corrupted_journal.recover(operation_key).status ==
                     mt5bridge::JournalMutationStatus::invalid_record,
                 "corrupt single-record recovery was reported as missing");
-        require(corrupted_journal.recover_all().status ==
+        require(corrupted_journal.recover_all().status() ==
                     mt5bridge::JournalMutationStatus::invalid_record &&
                     !corrupted_journal.find(operation_key),
                 "corrupt restart scan partially replaced the owner cache");

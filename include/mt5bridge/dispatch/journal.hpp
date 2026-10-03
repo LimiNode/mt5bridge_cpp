@@ -206,18 +206,35 @@ struct JournalMutationResult {
     }
 };
 
-/// \struct JournalRecoveryResult
+/// \class JournalRecoveryResult
 /// \brief Returns an all-or-nothing owner-loop recovery result.
-struct JournalRecoveryResult {
-    JournalMutationStatus status = JournalMutationStatus::invalid_record;
-    std::vector<OperationRecord> records;
-    bool complete_scan = false; ///< True only after the store scan is complete.
-
+class JournalRecoveryResult {
+public:
     /// \brief Tests whether the owner cache was replaced by a complete scan.
     /// \return True only when the scan was accepted and complete.
     bool accepted() const {
-        return status == JournalMutationStatus::accepted && complete_scan;
+        return status_ == JournalMutationStatus::accepted && complete_scan_;
     }
+
+    /// \brief Returns the durable scan status.
+    /// \return Accepted, invalid, or storage-error status.
+    JournalMutationStatus status() const { return status_; }
+
+    /// \brief Returns the records from an accepted complete scan.
+    /// \return Read-only durable record set owned by this result.
+    const std::vector<OperationRecord> &records() const { return records_; }
+
+private:
+    JournalRecoveryResult(JournalMutationStatus status,
+                          std::vector<OperationRecord> records,
+                          bool complete_scan)
+        : status_(status), records_(std::move(records)), complete_scan_(complete_scan) {}
+
+    JournalMutationStatus status_ = JournalMutationStatus::invalid_record;
+    std::vector<OperationRecord> records_;
+    bool complete_scan_ = false;
+
+    friend class OperationJournal;
 };
 
 /// \class OperationJournal
@@ -295,22 +312,23 @@ public:
     JournalRecoveryResult recover_all() {
         const auto scanned = store_.scan();
         if (scanned.status == StoreScanStatus::invalid_record)
-            return {JournalMutationStatus::invalid_record, {}};
+            return JournalRecoveryResult{JournalMutationStatus::invalid_record, {}, false};
         if (scanned.status == StoreScanStatus::io_error)
-            return {JournalMutationStatus::storage_error, {}};
+            return JournalRecoveryResult{JournalMutationStatus::storage_error, {}, false};
 
         std::map<OperationKey, OperationRecord> staged;
         for (const auto &record : scanned.records) {
             if (!record.key.valid() || !record.valid() ||
                 !staged.emplace(record.key, record).second)
-                return {JournalMutationStatus::invalid_record, {}};
+                return JournalRecoveryResult{JournalMutationStatus::invalid_record, {}, false};
         }
         std::vector<OperationRecord> recovered;
         recovered.reserve(staged.size());
         for (const auto &entry : staged)
             recovered.push_back(entry.second);
         records_.swap(staged);
-        return {JournalMutationStatus::accepted, std::move(recovered), true};
+        return JournalRecoveryResult{JournalMutationStatus::accepted,
+                                     std::move(recovered), true};
     }
 
     /// \brief Reads a record already owned by this journal loop.

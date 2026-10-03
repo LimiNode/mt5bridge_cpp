@@ -35,15 +35,15 @@ ManagedTradeOwner::ManagedTradeOwner(
 std::optional<managed_trade::ManagedTradeState>
 ManagedTradeOwner::recover_settled_open(
     managed_trade::ManagedTradeState initial_state, const AccountKey &account,
-    const std::vector<OperationRecord> &records) {
-    if (!account.valid() || !initial_state.valid() ||
+    const JournalRecoveryResult &recovery) {
+    if (!recovery.accepted() || !account.valid() || !initial_state.valid() ||
         initial_state.slice.operation_id != 0 || initial_state.plan.slice_count != 0 ||
         initial_state.open_volume != 0 || initial_state.pending_remainder_volume != 0 ||
         initial_state.slice.state != managed_trade::OperationState::idle)
         return std::nullopt;
 
     std::vector<const OperationRecord *> settled;
-    for (const auto &record : records) {
+    for (const auto &record : recovery.records) {
         if (record.key.account != account ||
             record.key.trade_id != initial_state.trade_id.value)
             continue;

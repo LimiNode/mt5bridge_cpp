@@ -14,8 +14,8 @@ format advances to version 3 while readers continue to accept versions 1 and
 2; older records remain valid but do not claim reconstructable managed volume.
 
 `ManagedTradeOwner::recover_settled_open()` accepts an initialized empty state
-carrying the trade's configured bounds and the complete set of recovered
-operation records. It replays only records for that account and trade whose
+carrying the trade's configured bounds and a complete, accepted journal scan.
+It replays only records for that account and trade whose
 journal state is `reconciling`, whose operation state is `filled` or
 `partially_filled`, and whose requested/settled volumes are durable and
 consistent. Each replayed operation must be the next operation id, must be an
@@ -41,6 +41,11 @@ responsibility of the journal/reconciliation worker.
   committed.
 - Close/cancel, late-fill aggregation, and reconstruction of an unresolved
   operation remain later bounded slices.
+- Version-3 reconstruction is currently valid only while provenance-bearing
+  settled-volume records are emitted exclusively for OPEN operations. Before
+  durable CLOSE settlement is introduced, the format must persist an operation
+  kind (or another explicit discriminator); otherwise a close fill could be
+  mistaken for an open fill and incorrectly increase managed exposure.
 
 ## Verification
 

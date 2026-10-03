@@ -211,10 +211,13 @@ struct JournalMutationResult {
 struct JournalRecoveryResult {
     JournalMutationStatus status = JournalMutationStatus::invalid_record;
     std::vector<OperationRecord> records;
+    bool complete_scan = false; ///< True only after the store scan is complete.
 
     /// \brief Tests whether the owner cache was replaced by a complete scan.
-    /// \return True only when the scan was accepted.
-    bool accepted() const { return status == JournalMutationStatus::accepted; }
+    /// \return True only when the scan was accepted and complete.
+    bool accepted() const {
+        return status == JournalMutationStatus::accepted && complete_scan;
+    }
 };
 
 /// \class OperationJournal
@@ -307,7 +310,7 @@ public:
         for (const auto &entry : staged)
             recovered.push_back(entry.second);
         records_.swap(staged);
-        return {JournalMutationStatus::accepted, std::move(recovered)};
+        return {JournalMutationStatus::accepted, std::move(recovered), true};
     }
 
     /// \brief Reads a record already owned by this journal loop.

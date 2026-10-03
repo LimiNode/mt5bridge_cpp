@@ -759,7 +759,7 @@ int main() {
                 "full-fill recovery seed initialization failed");
         const auto recovered_full =
             mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
-                recovered_full_seed, operation_account, recovered_records.records);
+                recovered_full_seed, operation_account, recovered_records);
         require(recovered_full && recovered_full->valid() &&
                     recovered_full->slice.state ==
                         mt5bridge::managed_trade::OperationState::filled &&
@@ -774,13 +774,24 @@ int main() {
                 "partial-fill recovery seed initialization failed");
         const auto recovered_partial =
             mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
-                recovered_partial_seed, operation_account, recovered_records.records);
+                recovered_partial_seed, operation_account, recovered_records);
         require(recovered_partial && recovered_partial->valid() &&
                     recovered_partial->slice.state ==
                         mt5bridge::managed_trade::OperationState::partially_filled &&
                     recovered_partial->open_volume == 2 &&
                     recovered_partial->pending_remainder_volume == 3,
                 "durable partial fill did not reconstruct managed remainder");
+
+        auto incomplete_recovery = recovered_records;
+        incomplete_recovery.complete_scan = false;
+        incomplete_recovery.records.resize(1);
+        mt5bridge::managed_trade::ManagedTradeState incomplete_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &incomplete_seed, mt5bridge::managed_trade::TradeId{50}, 5, 5, 4),
+                "incomplete recovery seed initialization failed");
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
+                     incomplete_seed, operation_account, incomplete_recovery),
+                "incomplete journal recovery was accepted for managed reconstruction");
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

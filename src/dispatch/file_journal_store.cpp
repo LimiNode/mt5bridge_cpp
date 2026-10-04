@@ -854,6 +854,11 @@ StoreCommitStatus WindowsFileJournalStore::commit(
                existing->revision != *expected_revision) {
         return StoreCommitStatus::conflict;
     }
+    if (status == ReadStatus::valid && existing &&
+        existing->operation_kind != record.operation_kind) {
+        set_error(last_error_, "operation kind is immutable");
+        return StoreCommitStatus::conflict;
+    }
 
     const auto temp = target.wstring() + L".tmp";
     const std::filesystem::path temp_path(temp);

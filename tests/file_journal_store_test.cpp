@@ -418,6 +418,12 @@ int main() {
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        auto rewritten_kind = *result_record.record;
+        rewritten_kind.operation_kind = mt5bridge::OperationKind::close;
+        ++rewritten_kind.revision;
+        require(result_store.commit(rewritten_kind, result_record.record->revision) ==
+                    mt5bridge::StoreCommitStatus::conflict,
+                "durable operation kind was rewritten after creation");
         const auto settled_reconciling = owner_a.transition_operation(
             operation_key, mt5bridge::OperationState::reconciling);
         require(settled_reconciling.accepted(),

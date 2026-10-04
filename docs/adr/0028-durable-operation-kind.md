@@ -21,6 +21,8 @@ next to the durable lifecycle and settlement fields. The existing two-argument
 `OperationJournal::create()` remains source-compatible and creates an
 `unspecified` record for generic callers; managed owner paths must provide an
 explicit kind. A non-zero `settled_volume` is valid only for `open` or `close`.
+The durable store also rejects a compare-and-commit that changes the kind of an
+existing record, so immutability is enforced below the in-memory journal API.
 
 Readers continue to accept versions 1, 2, and 3. Version-3 records that contain
 managed requested-volume metadata are migrated as `open`, because that version

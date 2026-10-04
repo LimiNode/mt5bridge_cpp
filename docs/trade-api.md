@@ -342,10 +342,13 @@ reconstruct confirmed exposure and pending remainder from durable
 requested/settled volume fields after restart. The private owner now also
 prepares explicit `close` and `cancel` records: exit settlement accepts only
 fresh attributed `DEAL_ENTRY_OUT`/`DEAL_ENTRY_OUT_BY` volume, while cancellation
-requires a fresh authoritative active-order absence. Partial close volume is
-durably applied as an exposure reduction; cancellation clears only the pending
-entry remainder and never discards already confirmed exposure. Recovery replays
-the persisted operation kinds in order and rejects generic/unknown records.
+requires a fresh authoritative active-order absence plus covered history. Partial
+close volume is durably applied as an exposure reduction; a partial close stays
+on the same operation and accepts only cumulative-volume deltas until terminal
+volume is proven. Cancellation re-aggregates the OPEN identity and applies late
+entry-fill deltas before clearing only the remaining pending remainder, so it
+never discards confirmed exposure. Recovery replays the persisted operation
+kinds in order and rejects generic/unknown records.
 The journal now persists an explicit operation kind, so only records marked
 `open`, `close`, or `cancel` can participate in managed reconstruction.
 

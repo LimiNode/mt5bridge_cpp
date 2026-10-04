@@ -268,7 +268,10 @@ MutationStatus ManagedTradeState::request_close() {
 
 MutationStatus ManagedTradeState::start_close(Volume volume) {
     if (!close_obligation.requested || close_obligation.satisfied ||
-        !slice.can_start_next() || open_volume == 0 || pending_remainder_volume != 0 ||
+        !slice.can_start_next() ||
+        (slice.kind == OperationKind::close &&
+         slice.state == OperationState::partially_filled) ||
+        open_volume == 0 || pending_remainder_volume != 0 ||
         volume == 0 || volume > open_volume)
         return slice.state == OperationState::ambiguous ? MutationStatus::ambiguous
                                                          : MutationStatus::invalid_state;
@@ -296,6 +299,24 @@ MutationStatus ManagedTradeState::start_cancel() {
     candidate.slice.kind = OperationKind::cancel;
     candidate.slice.state = OperationState::dispatching;
     candidate.slice.requested_volume = pending_remainder_volume;
+    candidate.slice.last_attempt_epoch = candidate.observation_epoch;
+    return commit_candidate(this, std::move(candidate));
+}
+
+MutationStatus ManagedTradeState::replay_cancelled_after_late_fill(Volume volume) {
+    if (slice.kind != OperationKind::open || slice.state != OperationState::filled ||
+        pending_remainder_volume != 0 || volume == 0 || volume >= slice.requested_volume)
+        return MutationStatus::invalid_state;
+    auto candidate = *this;
+    if (!next_operation_id(&candidate))
+        return MutationStatus::limit_reached;
+    reset_slice(&candidate.slice);
+    candidate.slice.operation_id = this->slice.operation_id + 1;
+    candidate.slice.kind = OperationKind::cancel;
+    candidate.slice.state = OperationState::cancelled;
+    candidate.slice.requested_volume = volume;
+    candidate.slice.broker_outcome = BrokerOutcome::full;
+    candidate.slice.send_count = 1;
     candidate.slice.last_attempt_epoch = candidate.observation_epoch;
     return commit_candidate(this, std::move(candidate));
 }
@@ -468,6 +489,38 @@ MutationStatus ManagedTradeState::observe_pending_remainder(Volume volume) {
     if (candidate.pending_remainder_volume == 0) {
         candidate.slice.broker_outcome = BrokerOutcome::full;
         candidate.slice.state = OperationState::filled;
+    }
+    return commit_candidate(this, std::move(candidate));
+}
+
+MutationStatus ManagedTradeState::observe_cancel_remainder(Volume volume) {
+    if (slice.kind != OperationKind::cancel ||
+        (slice.state != OperationState::submitting &&
+         slice.state != OperationState::reconciling) ||
+        pending_remainder_volume == 0 || volume == 0 ||
+        volume > pending_remainder_volume ||
+        !add_within(open_volume, volume, plan.target_volume))
+        return MutationStatus::invalid_state;
+    auto candidate = *this;
+    candidate.open_volume += volume;
+    candidate.pending_remainder_volume -= volume;
+    return commit_candidate(this, std::move(candidate));
+}
+
+MutationStatus ManagedTradeState::observe_close_remainder(Volume volume) {
+    if (slice.kind != OperationKind::close ||
+        slice.state != OperationState::partially_filled || volume == 0 ||
+        volume > slice.requested_volume - slice.result_volume ||
+        volume > open_volume)
+        return MutationStatus::invalid_state;
+    auto candidate = *this;
+    candidate.open_volume -= volume;
+    candidate.slice.result_volume += volume;
+    if (candidate.slice.result_volume == candidate.slice.requested_volume) {
+        candidate.slice.broker_outcome = BrokerOutcome::full;
+        candidate.slice.state = OperationState::filled;
+        if (candidate.open_volume == 0 && candidate.pending_remainder_volume == 0)
+            candidate.close_obligation.satisfied = true;
     }
     return commit_candidate(this, std::move(candidate));
 }

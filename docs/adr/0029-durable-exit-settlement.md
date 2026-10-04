@@ -17,13 +17,19 @@ identity. The settlement aggregator accepts only `DEAL_ENTRY_OUT` and
 its reversal volume cannot be split into close and new-entry semantics without a
 separate attribution policy. The attributed logical volume is committed as the
 record's durable `settled_volume` and is applied as a reduction of confirmed
-open exposure. Partial close is terminal for that operation and leaves the
-close obligation active so a new operation id can target the remaining exposure.
+open exposure. A partial close is not terminal for that operation: its durable
+record remains `partially_filled`, and later reconciliation re-aggregates the
+cumulative attributed exit volume and applies only the strictly new delta. The
+same operation becomes terminal only when cumulative volume reaches its
+requested volume; only then may a new operation id target remaining exposure.
 
 A `cancel` operation settles only after a fresh authoritative observation proves
-the bound active order is absent. It clears pending entry remainder while
-preserving all already confirmed open volume. No cancel volume is recorded as
-executed exposure.
+the bound active order is absent and the requested history-deal window is fresh
+and covered. The owner re-aggregates the cumulative entry volume for the
+durable OPEN identity and applies any late-fill delta before clearing the
+remaining pending entry volume. Thus active-order disappearance alone cannot
+erase a fill that became visible after the original partial OPEN settlement.
+No cancel volume is recorded as executed exposure.
 
 Restart reconstruction replays durable `open`, `cancel`, and `close` records in
 operation-id order. Missing operation ids, `unspecified` kinds, kind/state
@@ -33,14 +39,17 @@ store rejects CAS updates that attempt to rewrite an existing operation kind.
 ## Consequences
 
 - Close and cancellation are explicit durable capabilities, not payload guesses.
-- Partial close reduces exposure without manufacturing a new entry.
-- Cancellation cannot erase previously confirmed fills.
+- Partial close reduces exposure without manufacturing a new entry and remains
+  unresolved until cumulative terminality is proven on the same operation.
+- Cancellation cannot erase previously confirmed fills or late fills that are
+  proven by fresh history coverage.
 - Reversal (`INOUT`), netting attribution, and public `TradeManager` policy remain
   outside this bounded slice.
 
 ## Verification
 
-Owner-loop regressions cover partial close, full close, cancellation with a
-pending remainder, and restart replay of OPEN → CANCEL → CLOSE. Exit tests use
-fresh history provenance and reject entry-direction deals. Journal storage tests
-cover immutable operation-kind compare-and-commit behavior.
+Owner-loop regressions cover partial close followed by a late fill on the same
+operation, replacement-close rejection until terminality, cancellation with a
+pending remainder plus a late entry fill, and restart replay of OPEN -> CANCEL ->
+CLOSE. Exit tests use fresh history provenance and reject entry-direction deals.
+Journal storage tests cover immutable operation-kind compare-and-commit behavior.

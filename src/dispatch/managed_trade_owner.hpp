@@ -196,6 +196,26 @@ private:
         managed_trade::ManagedTradeState candidate, OperationKind kind,
         ManagedTradeIntent intent);
 
+    /// \brief Finds the durable OPEN record that owns the current remainder.
+    std::optional<OperationRecord> current_open_record_for_cancel() const;
+
+    /// \brief Verifies that cancellation carries active-order and OPEN-history evidence.
+    /// \param descriptor Proposed cancellation descriptor.
+    /// \param open_record Durable partial OPEN record owning the remainder.
+    /// \return True only when the active-order identity is bound consistently.
+    bool cancel_descriptor_matches_open(const ReconciliationDescriptor &descriptor,
+                                        const OperationRecord &open_record) const;
+
+    /// \brief Aggregates the OPEN identity's cumulative entry volume for CANCEL.
+    /// \param cycle Confirmed cancellation observation cycle.
+    /// \param worker Worker that produced the cycle and its baseline.
+    /// \param open_record Durable partial OPEN record carrying history identity.
+    /// \return Cumulative attributed entry volume, or empty when evidence is incomplete.
+    std::optional<managed_trade::Volume> cancel_cumulative_entry_volume(
+        const OperationReconciliationCycle &cycle,
+        const OperationReconciliationWorker &worker,
+        const OperationRecord &open_record) const;
+
     /// \brief Moves the durable journal record to observation-only reconciliation.
     bool mark_journal_reconciling(const OperationKey &key);
 
@@ -230,7 +250,7 @@ private:
         const OperationReconciliationWorker &worker,
         const OperationRecord &record, DealDirection direction) const;
 
-    /// \brief Aggregates the cumulative attributed volume for a late OPEN fill.
+    /// \brief Aggregates cumulative attributed volume for a late OPEN or CLOSE fill.
     /// \param cycle Confirmed observation cycle carrying a complete history window.
     /// \param worker Worker that produced the cycle and its baseline.
     /// \param record Durable operation record with result-derived bindings.

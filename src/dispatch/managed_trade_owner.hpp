@@ -31,7 +31,7 @@ enum class OwnerStepStatus {
 };
 
 /// \struct ManagedTradeIntent
-/// \brief Opaque request and immutable reconciliation contract for one entry.
+/// \brief Opaque request and immutable reconciliation contract for one operation.
 struct ManagedTradeIntent {
     std::vector<std::uint8_t> request_payload;
     ReconciliationDescriptor reconciliation_descriptor;
@@ -99,6 +99,15 @@ public:
         managed_trade::ManagedTradeState initial_state, const AccountKey &account,
         const JournalRecoveryResult &recovery);
 
+    /// \brief Rebuilds OPEN, CLOSE, and CANCEL exposure from durable records.
+    /// \param initial_state Empty initialized state carrying trade bounds.
+    /// \param account Account scope whose records may be replayed.
+    /// \param recovery Complete journal scan recovered after a process restart.
+    /// \return Reconstructed state, or empty when records are incomplete or inconsistent.
+    static std::optional<managed_trade::ManagedTradeState> recover_settled_trade(
+        managed_trade::ManagedTradeState initial_state, const AccountKey &account,
+        const JournalRecoveryResult &recovery);
+
     /// \brief Returns the current private logical state.
     /// \return Owner-loop state owned by this instance.
     const managed_trade::ManagedTradeState &state() const { return state_; }
@@ -109,6 +118,18 @@ public:
     /// \return Prepared, invalid, or durable-failure result.
     OwnerStepResult prepare_open(managed_trade::Volume volume,
                                  ManagedTradeIntent intent);
+
+    /// \brief Durably prepares one bounded close slice without calling a backend.
+    /// \param volume Logical exposure volume to reduce.
+    /// \param intent Opaque request and reconciliation descriptor.
+    /// \return Prepared, invalid, or durable-failure result.
+    OwnerStepResult prepare_close(managed_trade::Volume volume,
+                                  ManagedTradeIntent intent);
+
+    /// \brief Durably prepares cancellation of the current pending entry remainder.
+    /// \param intent Opaque request and reconciliation descriptor.
+    /// \return Prepared, invalid, or durable-failure result.
+    OwnerStepResult prepare_cancel(ManagedTradeIntent intent);
 
     /// \brief Admits and executes the current prepared operation exactly once.
     /// \param request Fresh account, environment, and blocker evidence.
@@ -133,7 +154,27 @@ public:
         OperationReconciliationWorker &worker, bool trade_event_gap = false,
         bool deadline_expired = false);
 
+    /// \brief Settles one CLOSE slice through attributed exit-deal evidence.
+    /// \param worker Provenance-bearing worker bound to the current operation.
+    /// \param trade_event_gap Whether the caller lost event continuity.
+    /// \param deadline_expired Whether the bounded observation deadline elapsed.
+    /// \return Settled, awaiting, ambiguous, or durable-failure outcome.
+    OwnerStepResult settle_close_reconciliation(
+        OperationReconciliationWorker &worker, bool trade_event_gap = false,
+        bool deadline_expired = false);
+
+    /// \brief Settles one CANCEL slice after authoritative order absence.
+    /// \param worker Provenance-bearing worker bound to the current operation.
+    /// \param trade_event_gap Whether the caller lost event continuity.
+    /// \param deadline_expired Whether the bounded observation deadline elapsed.
+    /// \return Cancelled, awaiting, ambiguous, or durable-failure outcome.
+    OwnerStepResult settle_cancel_reconciliation(
+        OperationReconciliationWorker &worker, bool trade_event_gap = false,
+        bool deadline_expired = false);
+
 private:
+    enum class DealDirection { entry, exit };
+
     /// \struct HistoryDealAttributionContext
     /// \brief Validated order identity and window for one OPEN settlement.
     struct HistoryDealAttributionContext {
@@ -149,6 +190,11 @@ private:
     OwnerStepResult result_for(OwnerStepStatus status,
                                std::optional<OperationKey> key = std::nullopt,
                                std::optional<OperationRecord> record = std::nullopt) const;
+
+    /// \brief Persists a candidate operation prepared in the private state machine.
+    OwnerStepResult prepare_durable_operation(
+        managed_trade::ManagedTradeState candidate, OperationKind kind,
+        ManagedTradeIntent intent);
 
     /// \brief Moves the durable journal record to observation-only reconciliation.
     bool mark_journal_reconciling(const OperationKey &key);
@@ -171,7 +217,7 @@ private:
     std::optional<HistoryDealAttributionContext> history_deal_attribution_context(
         const OperationReconciliationCycle &cycle,
         const OperationReconciliationWorker &worker,
-        const OperationRecord &record) const;
+        const OperationRecord &record, DealDirection direction) const;
 
     /// \brief Aggregates post-baseline entry deals for initial OPEN settlement.
     /// \param cycle Confirmed observation cycle carrying the graph sample.
@@ -182,7 +228,7 @@ private:
     std::optional<managed_trade::Volume> history_deal_volume(
         const OperationReconciliationCycle &cycle,
         const OperationReconciliationWorker &worker,
-        const OperationRecord &record) const;
+        const OperationRecord &record, DealDirection direction) const;
 
     /// \brief Aggregates the cumulative attributed volume for a late OPEN fill.
     /// \param cycle Confirmed observation cycle carrying a complete history window.
@@ -193,7 +239,7 @@ private:
     std::optional<managed_trade::Volume> history_deal_cumulative_volume(
         const OperationReconciliationCycle &cycle,
         const OperationReconciliationWorker &worker,
-        const OperationRecord &record) const;
+        const OperationRecord &record, DealDirection direction) const;
 
     managed_trade::ManagedTradeState state_;
     AccountKey account_;

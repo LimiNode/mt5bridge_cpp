@@ -31,10 +31,10 @@ reconciliation and already-settled OPEN records across the upgrade. Earlier
 records remain `unspecified` and are never treated as reconstructable OPEN
 exposure by the managed owner.
 
-`ManagedTradeOwner::recover_settled_open()` accepts only durable `open` records.
-Close/cancel settlement and reconstruction are intentionally not implemented in
-this slice; they will use the discriminator instead of inferring semantics from
-the lifecycle state or settled volume alone.
+`ManagedTradeOwner::recover_settled_open()` accepts only durable `open` records;
+the follow-up exit slice adds a separate replay path for explicit `close` and
+`cancel` records. All managed settlement paths use the discriminator instead of
+inferring semantics from lifecycle state or settled volume alone.
 
 ## Consequences
 
@@ -43,8 +43,8 @@ the lifecycle state or settled volume alone.
   files.
 - Generic journal users retain the existing create API, but `unspecified`
   records cannot participate in managed semantic settlement.
-- The next close/cancel slice can add provenance-bearing exit settlement without
-  changing the identity of an operation or guessing its kind from payloads.
+- Provenance-bearing exit settlement can use the same operation identity without
+  guessing its kind from payloads.
 
 ## Verification
 

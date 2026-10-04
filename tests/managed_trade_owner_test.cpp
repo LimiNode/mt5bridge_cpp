@@ -659,6 +659,93 @@ int main() {
                     partial_recovered->pending_remainder_volume == 3,
                 "durable partial fill did not reconstruct managed remainder");
 
+        MemoryStore late_restart_store = store;
+        mt5bridge::OperationJournal late_restart_journal(late_restart_store);
+        const auto late_restart_records = late_restart_journal.recover_all();
+        require(late_restart_records.accepted(),
+                "late-remainder restart scan did not recover durable records");
+        auto late_restart_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(711, 910, 911, 1.0),
+                     history_deal(713, 910, 911, 1.0)}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(711, 910, 911, 1.0),
+                     history_deal(713, 910, 911, 1.0)}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(710, 910, 911, 1.0),
+                     history_deal(711, 910, 911, 1.0),
+                     history_deal(713, 910, 911, 1.0),
+                     history_deal(714, 910, 911, 2.0)})});
+        mt5bridge::ObservationCoordinator late_restart_coordinator(
+            *late_restart_provider, operation_account);
+        mt5bridge::ObservationCollectionRequest late_restart_collection;
+        late_restart_collection.history_deals_window = deal_window;
+        const auto late_restart_first =
+            late_restart_coordinator.refresh(late_restart_collection);
+        const auto late_restart_second =
+            late_restart_coordinator.refresh(late_restart_collection);
+        require(late_restart_first.sample && late_restart_second.sample,
+                "late-remainder restart baseline setup failed");
+        mt5bridge::DispatchAdmissionBarrier late_restart_admission(
+            late_restart_journal, late_restart_coordinator.graph(), scope);
+        mt5bridge::runtime::OneShotDispatchBackend late_restart_backend;
+        FakeTransport late_restart_transport;
+        FakeAccountProbe late_restart_probe({operation_account});
+        mt5bridge::dispatch::ManagedTradeOwner late_restart_owner(
+            *partial_recovered, operation_account, late_restart_journal,
+            late_restart_admission, late_restart_backend, late_restart_probe, lease,
+            late_restart_transport);
+        mt5bridge::OperationReconciliationWorker late_restart_worker(
+            late_restart_journal, *partial_executed.key, late_restart_coordinator,
+            late_restart_collection);
+        const auto late_restart_settled =
+            late_restart_owner.settle_pending_remainder(late_restart_worker);
+        require(late_restart_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
+                    late_restart_settled.record &&
+                    late_restart_settled.record->settled_volume == 3 &&
+                    late_restart_owner.state().open_volume == 3 &&
+                    late_restart_owner.state().pending_remainder_volume == 2 &&
+                    late_restart_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled,
+                "late remainder restart overcounted the first cumulative snapshot");
+
+        mt5bridge::OperationReconciliationWorker repeated_restart_worker(
+            late_restart_journal, *partial_executed.key, late_restart_coordinator,
+            late_restart_collection);
+        const auto repeated_restart =
+            late_restart_owner.settle_pending_remainder(repeated_restart_worker);
+        require(repeated_restart.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    repeated_restart.record &&
+                    repeated_restart.record->settled_volume == 3 &&
+                    late_restart_owner.state().open_volume == 3 &&
+                    late_restart_owner.state().pending_remainder_volume == 2,
+                "repeated cumulative snapshot advanced the remainder twice");
+
+        mt5bridge::OperationReconciliationWorker final_restart_worker(
+            late_restart_journal, *partial_executed.key, late_restart_coordinator,
+            late_restart_collection);
+        const auto final_restart =
+            late_restart_owner.settle_pending_remainder(final_restart_worker);
+        require(final_restart.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    final_restart.record &&
+                    final_restart.record->settled_volume == 5 &&
+                    late_restart_owner.state().open_volume == 5 &&
+                    late_restart_owner.state().pending_remainder_volume == 0 &&
+                    late_restart_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled,
+                "late remainder restart did not complete from cumulative volume");
+
         mt5bridge::OperationReconciliationWorker ambiguous_late_worker(
             journal, *partial_executed.key, partial_deal_coordinator, deal_collection);
         const auto ambiguous_late =

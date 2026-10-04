@@ -52,16 +52,18 @@ identity mismatch cannot settle the managed state.
 
 A partial OPEN with a pending remainder remains eligible for a fresh
 `OperationReconciliationWorker` cycle through
-`ManagedTradeOwner::settle_pending_remainder()`. The owner snapshots the deal
-tickets already present before that refresh, then attributes only newly
-observed entry deals linked to the durable result binding. The newly attributed
-volume is added to both managed `open_volume`/`slice.result_volume` and the
-durable `settled_volume` in one bounded update. A partial-to-partial update is
-therefore allowed only when the cumulative settled volume strictly increases;
-the final remainder transitions the same OPEN slice to `filled`. Repeated full
-history snapshots cannot re-count an earlier deal. Contradictory evidence in a
-remainder cycle leaves the confirmed partial exposure and durable partial
-record intact so a later fresh worker can retry.
+`ManagedTradeOwner::settle_pending_remainder()`. The owner requires a complete
+fresh-covered deal history window and re-aggregates the authoritative
+cumulative entry volume linked to the durable result binding. It compares that
+cumulative frontier with durable `settled_volume` and advances only the delta.
+The delta is added to both managed `open_volume`/`slice.result_volume` and durable
+`settled_volume` in one bounded update. A partial-to-partial update is therefore
+allowed only when the cumulative settled volume strictly increases; the final
+remainder transitions the same OPEN slice to `filled`. Repeated full history
+snapshots and a new graph after restart use the same durable frontier and
+cannot re-count an earlier deal. Contradictory evidence in a remainder cycle
+leaves the confirmed partial exposure and durable partial record intact so a
+later fresh worker can retry.
 
 Close/cancel settlement remains a later bounded slice. Restart reconstruction
 for settled OPEN records is defined separately in

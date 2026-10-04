@@ -358,12 +358,6 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
         !current->reconciliation_descriptor)
         return result_for(OwnerStepStatus::invalid_state, key, current);
 
-    const auto before_deals = worker.graph().history_deals();
-    std::vector<std::uint64_t> prior_deal_tickets;
-    prior_deal_tickets.reserve(before_deals.size());
-    for (const auto &deal : before_deals)
-        prior_deal_tickets.push_back(deal.ticket);
-
     const auto cycle = worker.step(trade_event_gap, deadline_expired);
     auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
     if (!result.record)
@@ -394,17 +388,18 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
             cycle.record->settled_volume != state_.slice.result_volume)
             break;
         {
-            const auto executed = history_deal_volume(
-                cycle, worker, *cycle.record, &prior_deal_tickets);
-            if (!executed || *executed == 0 ||
-                *executed > state_.pending_remainder_volume ||
-                cycle.record->settled_volume >
-                    (std::numeric_limits<managed_trade::Volume>::max)() - *executed)
+            const auto cumulative = history_deal_cumulative_volume(
+                cycle, worker, *cycle.record);
+            if (!cumulative || *cumulative == 0 ||
+                *cumulative < cycle.record->settled_volume ||
+                *cumulative > state_.slice.requested_volume)
                 break;
 
-            const auto cumulative = cycle.record->settled_volume + *executed;
+            const auto delta = *cumulative - cycle.record->settled_volume;
+            if (delta == 0 || delta > state_.pending_remainder_volume)
+                break;
             auto candidate = state_;
-            if (candidate.observe_pending_remainder(*executed) !=
+            if (candidate.observe_pending_remainder(delta) !=
                 managed_trade::MutationStatus::applied)
                 break;
             const auto target_state = candidate.slice.state ==
@@ -412,7 +407,7 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
                                           ? OperationState::filled
                                           : OperationState::partially_filled;
             const auto transitioned =
-                journal_.transition_operation(*key, target_state, cumulative);
+                journal_.transition_operation(*key, target_state, *cumulative);
             if (!transitioned.accepted())
                 break;
             state_ = std::move(candidate);
@@ -482,11 +477,11 @@ bool ManagedTradeOwner::has_observation_provenance(
            durable->operation_state == record.operation_state;
 }
 
-std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
+std::optional<ManagedTradeOwner::HistoryDealAttributionContext>
+ManagedTradeOwner::history_deal_attribution_context(
     const OperationReconciliationCycle &cycle,
     const OperationReconciliationWorker &worker,
-    const OperationRecord &record,
-    const std::vector<std::uint64_t> *prior_deal_tickets) const {
+    const OperationRecord &record) const {
     if (!cycle.observation || !cycle.observation->refresh.sample ||
         !record.reconciliation_descriptor)
         return std::nullopt;
@@ -548,10 +543,10 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
             *requested_window, baseline->history_deals_revision()))
         return std::nullopt;
 
-    const auto deals = worker.graph().history_deals();
     std::uint64_t order_ticket = 0;
     std::uint64_t position_id = 0;
     bool order_selected = false;
+    const auto deals = worker.graph().history_deals();
     for (const auto anchor : anchor_tickets) {
         const auto found = std::find_if(
             deals.begin(), deals.end(), [anchor](const Mt5DealSnapshot &deal) {
@@ -577,18 +572,38 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
         }
     }
 
+    return HistoryDealAttributionContext{*requested_window, order_ticket,
+                                         position_id};
+}
+
+std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
+    const OperationReconciliationCycle &cycle,
+    const OperationReconciliationWorker &worker,
+    const OperationRecord &record) const {
+    const auto context =
+        history_deal_attribution_context(cycle, worker, record);
+    if (!context)
+        return std::nullopt;
+
+    const auto &baseline = worker.effective_baseline();
+    if (!baseline)
+        return std::nullopt;
+    constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint64_t kRequiredDealFields =
+        MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+        MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
+        MT5BRIDGE_DEAL_KNOWN_VOLUME | MT5BRIDGE_DEAL_KNOWN_TIME;
+
     long double total = 0.0L;
     bool attributed_entry = false;
-    for (const auto &deal : deals) {
-        if (deal.order_ticket != order_ticket || deal.position_id != position_id ||
+    for (const auto &deal : worker.graph().history_deals()) {
+        if (deal.order_ticket != context->order_ticket ||
+            deal.position_id != context->position_id ||
             worker.graph().history_deal_evidence_revision(deal.ticket) <=
                 baseline->history_deals_revision() ||
-            deal.time_msc < requested_window->from_msc ||
-            deal.time_msc > requested_window->to_msc)
-            continue;
-        if (prior_deal_tickets &&
-            std::find(prior_deal_tickets->begin(), prior_deal_tickets->end(), deal.ticket) !=
-                prior_deal_tickets->end())
+            deal.time_msc < context->requested_window.from_msc ||
+            deal.time_msc > context->requested_window.to_msc)
             continue;
         if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
             return std::nullopt;
@@ -603,6 +618,48 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
     }
     if (!attributed_entry || total <= 0.0L ||
         std::floor(total) != total ||
+        total > static_cast<long double>((std::numeric_limits<managed_trade::Volume>::max)()))
+        return std::nullopt;
+    return static_cast<managed_trade::Volume>(total);
+}
+
+std::optional<managed_trade::Volume>
+ManagedTradeOwner::history_deal_cumulative_volume(
+    const OperationReconciliationCycle &cycle,
+    const OperationReconciliationWorker &worker,
+    const OperationRecord &record) const {
+    const auto context =
+        history_deal_attribution_context(cycle, worker, record);
+    if (!context)
+        return std::nullopt;
+
+    constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint64_t kRequiredDealFields =
+        MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+        MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
+        MT5BRIDGE_DEAL_KNOWN_VOLUME | MT5BRIDGE_DEAL_KNOWN_TIME;
+
+    long double total = 0.0L;
+    bool attributed_entry = false;
+    for (const auto &deal : worker.graph().history_deals()) {
+        if (deal.order_ticket != context->order_ticket ||
+            deal.position_id != context->position_id ||
+            deal.time_msc < context->requested_window.from_msc ||
+            deal.time_msc > context->requested_window.to_msc)
+            continue;
+        if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
+            return std::nullopt;
+        if (deal.entry != kDealEntryIn && deal.entry != kDealEntryInOut)
+            continue;
+        if (!std::isfinite(deal.volume) || deal.volume <= 0.0)
+            return std::nullopt;
+        total += static_cast<long double>(deal.volume);
+        if (!std::isfinite(total))
+            return std::nullopt;
+        attributed_entry = true;
+    }
+    if (!attributed_entry || total <= 0.0L || std::floor(total) != total ||
         total > static_cast<long double>((std::numeric_limits<managed_trade::Volume>::max)()))
         return std::nullopt;
     return static_cast<managed_trade::Volume>(total);

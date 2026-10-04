@@ -134,6 +134,14 @@ public:
         bool deadline_expired = false);
 
 private:
+    /// \struct HistoryDealAttributionContext
+    /// \brief Validated order identity and window for one OPEN settlement.
+    struct HistoryDealAttributionContext {
+        ObservationWindow requested_window;
+        std::uint64_t order_ticket = 0;
+        std::uint64_t position_id = 0;
+    };
+
     /// \brief Derives the account-scoped key for the current logical slice.
     std::optional<OperationKey> current_key() const;
 
@@ -154,17 +162,38 @@ private:
         const OperationReconciliationWorker &worker, const OperationKey &key,
         const OperationRecord &record) const;
 
-    /// \brief Aggregates fresh entry deals attributed to one operation.
+    /// \brief Validates the authoritative history-deal attribution context.
     /// \param cycle Confirmed observation cycle carrying the graph sample.
     /// \param worker Worker that produced the cycle and its baseline.
     /// \param record Durable operation record with result-derived bindings.
-    /// \return Logical executed volume, or empty when attribution/provenance
-    ///         is incomplete or the broker volume cannot be represented safely.
+    /// \return Order identity and window, or empty when attribution/provenance
+    ///         is incomplete.
+    std::optional<HistoryDealAttributionContext> history_deal_attribution_context(
+        const OperationReconciliationCycle &cycle,
+        const OperationReconciliationWorker &worker,
+        const OperationRecord &record) const;
+
+    /// \brief Aggregates post-baseline entry deals for initial OPEN settlement.
+    /// \param cycle Confirmed observation cycle carrying the graph sample.
+    /// \param worker Worker that produced the cycle and its baseline.
+    /// \param record Durable operation record with result-derived bindings.
+    /// \return Fresh logical executed volume, or empty when attribution is
+    ///         incomplete or the broker volume cannot be represented safely.
     std::optional<managed_trade::Volume> history_deal_volume(
         const OperationReconciliationCycle &cycle,
         const OperationReconciliationWorker &worker,
-        const OperationRecord &record,
-        const std::vector<std::uint64_t> *prior_deal_tickets = nullptr) const;
+        const OperationRecord &record) const;
+
+    /// \brief Aggregates the cumulative attributed volume for a late OPEN fill.
+    /// \param cycle Confirmed observation cycle carrying a complete history window.
+    /// \param worker Worker that produced the cycle and its baseline.
+    /// \param record Durable operation record with result-derived bindings.
+    /// \return Cumulative logical entry volume, or empty when the authoritative
+    ///         window or deal fields are incomplete.
+    std::optional<managed_trade::Volume> history_deal_cumulative_volume(
+        const OperationReconciliationCycle &cycle,
+        const OperationReconciliationWorker &worker,
+        const OperationRecord &record) const;
 
     managed_trade::ManagedTradeState state_;
     AccountKey account_;

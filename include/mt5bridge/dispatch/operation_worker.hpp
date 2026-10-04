@@ -59,6 +59,8 @@ struct OperationReconciliationCycle {
 /// only.  Those states require semantic settlement evidence (for example an
 /// attributed executed-volume history), so a predicate such as
 /// `active_order_present` cannot terminalize the journal by itself.
+/// A durably partial OPEN remains eligible for a fresh observation cycle so
+/// the owner can attribute a late fill of its pending remainder.
 class OperationReconciliationWorker {
 public:
     /// \brief Binds one operation to a caller-driven observation worker.
@@ -169,6 +171,13 @@ private:
             return {OperationReconciliationStatus::invalid_request, cycle,
                     journal_.find(key_)};
         if (cycle.reconciliation.outcome == ReconciliationOutcome::ambiguous) {
+            // A partial OPEN already carries confirmed exposure and a pending
+            // remainder. Contradictory fresh evidence must not erase that
+            // durable settlement; the owner may retry with a new observation
+            // cycle instead of converting the whole operation to ambiguous.
+            if (current->operation_state == OperationState::partially_filled)
+                return {OperationReconciliationStatus::ambiguous, cycle,
+                        journal_.find(key_)};
             const auto advanced = journal_.transition_operation(
                 key_, OperationState::ambiguous);
             if (!advanced.accepted())

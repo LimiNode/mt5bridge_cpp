@@ -123,7 +123,8 @@ ManagedTradeOwner::recover_settled_trade(
                 return std::nullopt;
         } else if (record.operation_kind == OperationKind::cancel) {
             if (record.reconciliation_descriptor->requested_volume == 0 ||
-                record.operation_state != OperationState::cancelled ||
+                (record.operation_state != OperationState::reconciling &&
+                 record.operation_state != OperationState::cancelled) ||
                 record.settled_volume != 0)
                 return std::nullopt;
         } else {
@@ -178,36 +179,21 @@ ManagedTradeOwner::recover_settled_trade(
             break;
         case OperationKind::cancel:
             {
-                const bool late_fill_closed_remainder =
-                    candidate.pending_remainder_volume == 0 &&
-                    candidate.slice.kind == managed_trade::OperationKind::open &&
-                    candidate.slice.state == managed_trade::OperationState::filled &&
-                    record->reconciliation_descriptor->requested_volume != 0 &&
-                    record->reconciliation_descriptor->requested_volume <
-                        candidate.slice.requested_volume;
-                bool replayed_late_fill = false;
-                if (record->operation_state != OperationState::cancelled) {
+                const auto requested =
+                    record->reconciliation_descriptor->requested_volume;
+                if (candidate.restore_cancel_reconciliation(
+                        record->key.operation_id, requested) !=
+                    managed_trade::MutationStatus::applied) {
                     return std::nullopt;
                 }
-                if (late_fill_closed_remainder) {
-                    if (candidate.replay_cancelled_after_late_fill(
-                            record->reconciliation_descriptor->requested_volume) !=
-                        managed_trade::MutationStatus::applied) {
+                if (record->operation_state == OperationState::cancelled) {
+                    if (candidate.record_cancel_accepted() !=
+                            managed_trade::MutationStatus::applied ||
+                        candidate.reconcile() !=
+                            managed_trade::MutationStatus::applied)
                         return std::nullopt;
-                    }
-                    replayed_late_fill = true;
-                } else if (candidate.pending_remainder_volume == 0 ||
-                           candidate.start_cancel() !=
-                               managed_trade::MutationStatus::applied ||
-                           candidate.enter_submitting() !=
-                               managed_trade::MutationStatus::applied ||
-                           candidate.record_cancel_accepted() !=
-                               managed_trade::MutationStatus::applied) {
-                    return std::nullopt;
                 }
-                status = replayed_late_fill
-                             ? managed_trade::MutationStatus::applied
-                             : candidate.reconcile();
+                status = managed_trade::MutationStatus::applied;
                 break;
             }
         case OperationKind::unspecified:
@@ -240,7 +226,8 @@ OwnerStepResult ManagedTradeOwner::result_for(
 
 std::optional<OperationRecord> ManagedTradeOwner::current_open_record_for_cancel() const {
     if (!account_.valid() || !state_.trade_id.valid() ||
-        state_.pending_remainder_volume == 0)
+        (state_.slice.kind != managed_trade::OperationKind::cancel &&
+         state_.pending_remainder_volume == 0))
         return std::nullopt;
     std::uint64_t open_operation_id = state_.slice.operation_id;
     if (state_.slice.kind == managed_trade::OperationKind::cancel) {
@@ -255,7 +242,8 @@ std::optional<OperationRecord> ManagedTradeOwner::current_open_record_for_cancel
         OperationKey{account_, state_.trade_id.value, open_operation_id});
     if (!record || record->operation_kind != OperationKind::open ||
         record->journal_state != JournalState::reconciling ||
-        record->operation_state != OperationState::partially_filled ||
+        (record->operation_state != OperationState::partially_filled &&
+         record->operation_state != OperationState::filled) ||
         record->settled_volume == 0 || !record->reconciliation_descriptor)
         return std::nullopt;
     return record;

@@ -104,6 +104,8 @@ public:
     /// \param account Account scope whose records may be replayed.
     /// \param recovery Complete journal scan recovered after a process restart.
     /// \return Reconstructed state, or empty when records are incomplete or inconsistent.
+    /// \note An in-flight durable CANCEL is restored with its original operation
+    ///       id and intent volume so a fresh reconciliation worker can finish it.
     static std::optional<managed_trade::ManagedTradeState> recover_settled_trade(
         managed_trade::ManagedTradeState initial_state, const AccountKey &account,
         const JournalRecoveryResult &recovery);

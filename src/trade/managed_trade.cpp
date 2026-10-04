@@ -303,20 +303,23 @@ MutationStatus ManagedTradeState::start_cancel() {
     return commit_candidate(this, std::move(candidate));
 }
 
-MutationStatus ManagedTradeState::replay_cancelled_after_late_fill(Volume volume) {
-    if (slice.kind != OperationKind::open || slice.state != OperationState::filled ||
-        pending_remainder_volume != 0 || volume == 0 || volume >= slice.requested_volume)
+MutationStatus ManagedTradeState::restore_cancel_reconciliation(
+    std::uint64_t operation_id, Volume requested_volume) {
+    if ((slice.kind != OperationKind::open ||
+         (slice.state != OperationState::partially_filled &&
+          slice.state != OperationState::filled)) ||
+        operation_id == 0 || operation_id != slice.operation_id + 1 ||
+        operation_id > plan.max_operations || requested_volume == 0 ||
+        requested_volume < pending_remainder_volume ||
+        requested_volume >= slice.requested_volume)
         return MutationStatus::invalid_state;
+
     auto candidate = *this;
-    if (!next_operation_id(&candidate))
-        return MutationStatus::limit_reached;
     reset_slice(&candidate.slice);
-    candidate.slice.operation_id = this->slice.operation_id + 1;
+    candidate.slice.operation_id = operation_id;
     candidate.slice.kind = OperationKind::cancel;
-    candidate.slice.state = OperationState::cancelled;
-    candidate.slice.requested_volume = volume;
-    candidate.slice.broker_outcome = BrokerOutcome::full;
-    candidate.slice.send_count = 1;
+    candidate.slice.state = OperationState::submitting;
+    candidate.slice.requested_volume = requested_volume;
     candidate.slice.last_attempt_epoch = candidate.observation_epoch;
     return commit_candidate(this, std::move(candidate));
 }

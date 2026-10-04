@@ -178,10 +178,13 @@ struct ManagedTradeState {
     /// \return Applied, invalid, or ambiguous status.
     MutationStatus start_cancel();
 
-    /// \brief Replays a cancellation whose remainder filled before cancellation was observed.
-    /// \param volume Original cancellation request volume persisted in the journal.
-    /// \return Applied or invalid state.
-    MutationStatus replay_cancelled_after_late_fill(Volume volume);
+    /// \brief Restores a durable CANCEL operation without allocating a new id.
+    /// \param operation_id Durable operation identifier recovered from the journal.
+    /// \param requested_volume Volume captured when cancellation was requested.
+    /// \return Applied or invalid state when the recovered intent cannot follow the
+    ///         current OPEN frontier.
+    MutationStatus restore_cancel_reconciliation(std::uint64_t operation_id,
+                                                 Volume requested_volume);
 
     /// \brief Advances the durable operation to the one-shot submission edge.
     /// \return Applied or invalid state.

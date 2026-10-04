@@ -48,6 +48,7 @@ ManagedTradeOwner::recover_settled_open(
             record.key.trade_id != initial_state.trade_id.value)
             continue;
         if (!record.valid() || record.journal_state != JournalState::reconciling ||
+            record.operation_kind != OperationKind::open ||
             !record.reconciliation_descriptor ||
             record.reconciliation_descriptor->requested_volume == 0 ||
             record.settled_volume == 0 ||
@@ -122,7 +123,8 @@ OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
     if (journal_.find(key))
         return result_for(OwnerStepStatus::invalid_state, key, journal_.find(key));
 
-    const auto created = journal_.create(key, std::move(intent.request_payload));
+    const auto created = journal_.create(
+        key, std::move(intent.request_payload), OperationKind::open);
     if (!created.accepted())
         return result_for(OwnerStepStatus::durable_failure, key, created.record);
 

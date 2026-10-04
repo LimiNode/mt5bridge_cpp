@@ -22,6 +22,15 @@ using TradeId = std::uint64_t;
 /// \brief Stable identity of one side-effect attempt.
 using OperationId = std::uint64_t;
 
+/// \enum OperationKind
+/// \brief Identifies the durable side-effect semantics of one journal record.
+enum class OperationKind : std::uint32_t {
+    unspecified = 0, ///< Legacy or generic operation without managed semantics.
+    open = 1,        ///< Entry operation that can increase managed exposure.
+    close = 2,       ///< Exit operation that can reduce managed exposure.
+    cancel = 3,      ///< Cancellation of an outstanding broker-side remainder.
+};
+
 /// \enum OperationState
 /// \brief Durable lifecycle state of one managed operation.
 enum class OperationState {
@@ -202,6 +211,14 @@ constexpr bool valid_operation_state(OperationState state) {
     return false;
 }
 
+/// \brief Tests whether a value is a defined durable operation kind.
+/// \param kind Candidate operation kind, possibly recovered from storage.
+/// \return True only for a known enumerator.
+constexpr bool valid_operation_kind(OperationKind kind) {
+    return kind == OperationKind::unspecified || kind == OperationKind::open ||
+           kind == OperationKind::close || kind == OperationKind::cancel;
+}
+
 /// \brief Tests whether a value is a defined write-ahead journal state.
 /// \param state Candidate journal state, possibly recovered from storage.
 /// \return True only for a known enumerator.
@@ -295,6 +312,7 @@ struct OperationKey {
 /// \brief Durable operation intent and lifecycle state.
 struct OperationRecord {
     OperationKey key; ///< Immutable account and managed-operation identity.
+    OperationKind operation_kind = OperationKind::unspecified; ///< Durable side-effect kind.
     std::vector<std::uint8_t> request_payload; ///< Exact opaque request bytes.
     std::vector<std::uint8_t> result_payload; ///< Opaque backend result, when persisted.
     OperationState operation_state = OperationState::queued; ///< Managed lifecycle state.
@@ -310,7 +328,8 @@ struct OperationRecord {
     /// \brief Tests whether the record can be persisted or recovered safely.
     /// \return True when identity, payload, state pair, revision, and fencing agree.
     bool valid() const {
-        if (!key.valid() || request_payload.empty() || revision == 0 ||
+        if (!key.valid() || !valid_operation_kind(operation_kind) ||
+            request_payload.empty() || revision == 0 ||
             !valid_operation_state(operation_state) || !valid_journal_state(journal_state))
             return false;
         if (!valid_state_pair(journal_state, operation_state))
@@ -329,8 +348,14 @@ struct OperationRecord {
             settled_volume > reconciliation_descriptor->requested_volume)
             return false;
         if (settled_volume != 0 &&
-            (operation_state != OperationState::partially_filled &&
-             operation_state != OperationState::filled))
+            ((operation_kind != OperationKind::open &&
+              operation_kind != OperationKind::close) ||
+             (operation_state != OperationState::partially_filled &&
+              operation_state != OperationState::filled)))
+            return false;
+        if (operation_kind == OperationKind::cancel &&
+            (operation_state == OperationState::partially_filled ||
+             operation_state == OperationState::filled))
             return false;
         if (reconciliation_descriptor &&
             reconciliation_descriptor->requested_volume != 0 &&

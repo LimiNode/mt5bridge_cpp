@@ -463,8 +463,15 @@ int main() {
         require(created.accepted() && created.record->journal_state ==
                                        mt5bridge::JournalState::created &&
                     created.record->operation_state == mt5bridge::OperationState::queued &&
+                    created.record->operation_kind ==
+                        mt5bridge::OperationKind::unspecified &&
                     created.record->revision == 1,
                 "operation intent was not durably created");
+        auto invalid_kind = *created.record;
+        invalid_kind.operation_kind =
+            static_cast<mt5bridge::OperationKind>(99);
+        require(!invalid_kind.valid(),
+                "unknown durable operation kind passed record validation");
         require(journal.create(key, {0x09}).status ==
                     mt5bridge::JournalMutationStatus::duplicate_operation,
                 "duplicate operation id was accepted");

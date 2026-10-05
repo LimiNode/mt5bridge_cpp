@@ -8,10 +8,13 @@ public `TradeManager`, a new broker-call surface, or close/cancel recovery.
 
 ## Decision
 
-The durable journal records the managed logical volume requested by an OPEN
-slice and the authoritative volume proved when that slice settles. The journal
-format advances to version 3 while readers continue to accept versions 1 and
-2; older records remain valid but do not claim reconstructable managed volume.
+The durable journal records the immutable operation kind, the managed logical
+volume requested by an OPEN slice, and the authoritative volume proved when
+that slice settles. The journal format advances to version 4 while readers
+continue to accept versions 1 through 3. Version-3 records with managed
+requested-volume metadata are conservatively migrated as `open`; older records
+without that metadata remain kind-unspecified and do not claim reconstructable
+managed volume.
 
 `ManagedTradeOwner::recover_settled_open()` accepts an initialized empty state
 carrying the trade's configured bounds and a complete, accepted journal scan.
@@ -19,7 +22,7 @@ It replays only records for that account and trade whose
 journal state is `reconciling`, whose operation state is `filled` or
 `partially_filled`, and whose requested/settled volumes are durable and
 consistent. Each replayed operation must be the next operation id, must be an
-OPEN-sized slice within the configured limit, and must reproduce the expected
+durable `open` slice within the configured limit, and must reproduce the expected
 managed state transition. Any gap, malformed record, in-flight operation, or
 inconsistent volume fails closed.
 
@@ -36,22 +39,24 @@ responsibility of the journal/reconciliation worker.
   remainder.
 - Durable managed volume is no longer inferred from opaque request/result
   payloads.
-- Legacy records without the new fields are read conservatively and cannot be
-  used by this reconstruction helper until a fresh authoritative settlement is
-  committed.
+- Legacy records without the new fields are read conservatively. Version-3
+  settled records retain OPEN reconstruction through an inferred `open` kind;
+  version-1/2 records remain kind-unspecified and cannot be used by this
+  reconstruction helper until a fresh authoritative settlement is committed.
 - Close/cancel settlement and reconstruction of an unresolved operation remain
   later bounded slices. A partial OPEN may first advance through the bounded
   late-remainder path in ADR-0026; restart then replays its cumulative durable
   `settled_volume` just like any other settled OPEN record.
-- Version-3 reconstruction is currently valid only while provenance-bearing
-  settled-volume records are emitted exclusively for OPEN operations. Before
-  durable CLOSE settlement is introduced, the format must persist an operation
-  kind (or another explicit discriminator); otherwise a close fill could be
-  mistaken for an open fill and incorrectly increase managed exposure.
+- Durable operation kind is now persisted in version 4. `close` and `cancel`
+  records are recoverable as distinct operation semantics but are not yet
+  applied by `recover_settled_open()`; their settlement remains a later bounded
+  slice. This prevents a future close fill from being mistaken for an OPEN fill
+  and incorrectly increasing managed exposure.
 
 ## Verification
 
 The managed-owner regression reconstructs full and partial OPEN records through
-a new `OperationJournal` instance and checks exposure/remainder invariants. The
-file-store regression reopens a version-3 record and verifies that requested and
-settled managed volumes survive serialization.
+a new `OperationJournal` instance, rejects a durable close record in the OPEN
+reconstructor, and checks exposure/remainder invariants. The file-store
+regression reopens version-3 and version-4 records and verifies conservative
+migration, operation-kind persistence, and requested/settled managed volumes.

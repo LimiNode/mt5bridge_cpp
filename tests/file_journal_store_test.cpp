@@ -187,6 +187,59 @@ std::vector<std::uint8_t> legacy_v2_body(const mt5bridge::OperationKey &operatio
     return body;
 }
 
+std::vector<std::uint8_t> legacy_v3_body(
+    const mt5bridge::OperationKey &operation_key,
+    mt5bridge::OperationState operation_state,
+    std::uint64_t settled_volume) {
+    mt5bridge::ObservationGraph graph(operation_key.account);
+    const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
+    const mt5bridge::ObservationWindow window{1000, 2000};
+    std::vector<std::uint8_t> body;
+    append_string(body, operation_key.account.server);
+    append_payload(body, {0x33});
+    append_payload(body, {0xA1});
+    append_u64(body, operation_key.account.login);
+    append_u64(body, operation_key.trade_id);
+    append_u64(body, operation_key.operation_id);
+    append_u32(body, static_cast<std::uint32_t>(operation_state));
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::JournalState::reconciling));
+    append_u64(body, 9);
+    append_u64(body, 78);
+    append_u64(body, settled_volume);
+
+    append_u32(body, 1);
+    append_string(body, operation_key.account.server);
+    append_u64(body, operation_key.account.login);
+    append_u64(body, operation_key.trade_id);
+    append_u64(body, operation_key.operation_id);
+    append_u64(body, 5);
+    append_string(body, baseline.account().server);
+    append_u64(body, baseline.account().login);
+    append_u64(body, baseline.graph_instance_id());
+    append_u64(body, baseline.graph_revision());
+    append_u64(body, baseline.active_orders_revision());
+    append_u64(body, baseline.positions_revision());
+    append_u64(body, baseline.history_orders_revision());
+    append_u64(body, baseline.history_deals_revision());
+    append_u32(body, static_cast<std::uint32_t>(mt5bridge::OperationState::filled));
+    append_u32(body, 1);
+    append_u32(body, static_cast<std::uint32_t>(
+                           mt5bridge::ReconciliationPredicateKind::history_deal_present));
+    append_u64(body, 0);
+    append_u32(body, 1);
+    append_u64(body, static_cast<std::uint64_t>(window.from_msc));
+    append_u64(body, static_cast<std::uint64_t>(window.to_msc));
+    append_u32(body, 1);
+    append_u64(body, 701);
+    append_u32(body, static_cast<std::uint32_t>(
+                           mt5bridge::ReconciliationTransition::absent_to_present));
+
+    append_u32(body, 1);
+    append_u64(body, 701);
+    append_u64(body, 730);
+    return body;
+}
+
 void write_fixture(const std::filesystem::path &directory,
                    const mt5bridge::OperationKey &operation_key, std::uint32_t version,
                    const std::vector<std::uint8_t> &body) {
@@ -218,12 +271,22 @@ int main() {
 
         const auto legacy_v1_key = key(70, 71);
         const auto legacy_v2_key = key(72, 73);
+        const auto legacy_v3_settled_key = key(74, 75);
+        const auto legacy_v3_unresolved_key = key(76, 77);
         mt5bridge::WindowsFileJournalStore legacy_store(legacy_directory);
         require(legacy_store.ready(), "legacy fixture store did not open its directory");
         write_fixture(legacy_store.directory(), legacy_v1_key, 1,
                       legacy_v1_body(legacy_v1_key));
         write_fixture(legacy_store.directory(), legacy_v2_key, 2,
                       legacy_v2_body(legacy_v2_key));
+        write_fixture(
+            legacy_store.directory(), legacy_v3_settled_key, 3,
+            legacy_v3_body(legacy_v3_settled_key,
+                           mt5bridge::OperationState::filled, 5));
+        write_fixture(
+            legacy_store.directory(), legacy_v3_unresolved_key, 3,
+            legacy_v3_body(legacy_v3_unresolved_key,
+                           mt5bridge::OperationState::reconciling, 0));
         const auto legacy_v1 = legacy_store.load(legacy_v1_key);
         require(legacy_v1.found() && legacy_v1.record &&
                     !legacy_v1.record->reconciliation_descriptor &&
@@ -241,10 +304,30 @@ int main() {
                     legacy_v2.record->reconciliation_bindings.size() == 1 &&
                     legacy_v2.record->reconciliation_bindings.front() ==
                         mt5bridge::ReconciliationBinding{701, 730} &&
-                    legacy_v2.record->settled_volume == 0,
+                    legacy_v2.record->settled_volume == 0 &&
+                    legacy_v2.record->operation_kind ==
+                        mt5bridge::OperationKind::unspecified,
                 "version-two journal fixture did not preserve causal metadata");
+        const auto legacy_v3_settled = legacy_store.load(legacy_v3_settled_key);
+        require(legacy_v3_settled.found() && legacy_v3_settled.record &&
+                    legacy_v3_settled.record->operation_kind ==
+                        mt5bridge::OperationKind::open &&
+                    legacy_v3_settled.record->settled_volume == 5 &&
+                    legacy_v3_settled.record->reconciliation_descriptor &&
+                    legacy_v3_settled.record->reconciliation_descriptor
+                            ->requested_volume == 5,
+                "version-three journal fixture did not migrate settled OPEN kind");
+        const auto legacy_v3_unresolved =
+            legacy_store.load(legacy_v3_unresolved_key);
+        require(legacy_v3_unresolved.found() && legacy_v3_unresolved.record &&
+                    legacy_v3_unresolved.record->operation_kind ==
+                        mt5bridge::OperationKind::open &&
+                    legacy_v3_unresolved.record->settled_volume == 0 &&
+                    legacy_v3_unresolved.record->operation_state ==
+                        mt5bridge::OperationState::reconciling,
+                "version-three unresolved OPEN lost its durable kind migration");
         const auto legacy_scan = legacy_store.scan();
-        require(legacy_scan.complete() && legacy_scan.records.size() == 2,
+        require(legacy_scan.complete() && legacy_scan.records.size() == 4,
                 "legacy journal fixtures did not survive a complete scan");
 
         const auto operation_key = key();
@@ -273,7 +356,10 @@ int main() {
         }
 
         mt5bridge::OperationJournal journal(store);
-        require(journal.create(operation_key, {0x01, 0x02, 0x03}).accepted(),
+        require(journal
+                    .create(operation_key, {0x01, 0x02, 0x03},
+                            mt5bridge::OperationKind::open)
+                    .accepted(),
                 "file-backed create was not committed");
         prepare(journal, operation_key);
         require(journal.transition_journal(operation_key,
@@ -285,6 +371,8 @@ int main() {
         const auto recovered_record = recovered_store.load(operation_key);
         require(recovered_record.found() && recovered_record.record->journal_state ==
                                        mt5bridge::JournalState::dispatching &&
+                    recovered_record.record->operation_kind ==
+                        mt5bridge::OperationKind::open &&
                     recovered_record.record->fencing_token == 77 &&
                     recovered_record.record->reconciliation_descriptor &&
                     recovered_record.record->reconciliation_descriptor->valid() &&
@@ -330,6 +418,12 @@ int main() {
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        auto rewritten_kind = *result_record.record;
+        rewritten_kind.operation_kind = mt5bridge::OperationKind::close;
+        ++rewritten_kind.revision;
+        require(result_store.commit(rewritten_kind, result_record.record->revision) ==
+                    mt5bridge::StoreCommitStatus::conflict,
+                "durable operation kind was rewritten after creation");
         const auto settled_reconciling = owner_a.transition_operation(
             operation_key, mt5bridge::OperationState::reconciling);
         require(settled_reconciling.accepted(),
@@ -362,7 +456,9 @@ int main() {
 
         const auto duplicate_key = key(8, 12);
         mt5bridge::OperationJournal duplicate_owner(result_store);
-        require(duplicate_owner.create(duplicate_key, {0x09}).accepted(),
+        require(duplicate_owner
+                    .create(duplicate_key, {0x09}, mt5bridge::OperationKind::close)
+                    .accepted(),
                 "duplicate setup create failed");
         mt5bridge::OperationJournal second_duplicate_owner(result_store);
         require(second_duplicate_owner.create(duplicate_key, {0x0A}).status ==
@@ -372,7 +468,9 @@ int main() {
         mt5bridge::OperationJournal restarted(result_store);
         const auto recovered_all = restarted.recover_all();
         require(recovered_all.accepted() && recovered_all.records().size() == 2 &&
-                    restarted.find(operation_key) && restarted.find(duplicate_key),
+                    restarted.find(operation_key) && restarted.find(duplicate_key) &&
+                    restarted.find(duplicate_key)->operation_kind ==
+                        mt5bridge::OperationKind::close,
                 "restart enumeration did not recover every durable operation");
 
         const auto crash_key = key(20, 21);

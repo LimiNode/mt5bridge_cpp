@@ -71,7 +71,8 @@ public:
     /// \param expected_revision Expected current revision; empty means no record exists.
     /// \return Commit, conflict, or I/O status.
     /// \warning Returning `committed` before the record survives a process crash breaks
-    /// the non-resendable dispatch barrier.
+    /// the non-resendable dispatch barrier. The operation kind is immutable after
+    /// creation; a CAS update that changes it must report `conflict`.
     virtual StoreCommitStatus commit(
         const OperationRecord &record,
         std::optional<std::uint64_t> expected_revision) = 0;

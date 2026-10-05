@@ -341,6 +341,9 @@ OPEN slice. After a full or partial OPEN settlement, the private owner can
 reconstruct confirmed exposure and pending remainder from durable
 requested/settled volume fields after restart; unresolved, close, and cancel
 reconstruction remain observation-only follow-up work.
+The journal now persists an explicit operation kind, so only records marked
+`open` can participate in this OPEN reconstruction; close/cancel settlement is
+kept for a later bounded slice.
 
 ## Quickstart scenarios
 

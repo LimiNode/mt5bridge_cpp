@@ -634,6 +634,8 @@ int main() {
                     partial_settled.record &&
                     partial_settled.record->operation_state ==
                         mt5bridge::OperationState::partially_filled &&
+                    partial_settled.record->operation_kind ==
+                        mt5bridge::OperationKind::open &&
                     partial_owner.state().slice.state ==
                         mt5bridge::managed_trade::OperationState::partially_filled &&
                     partial_owner.state().open_volume == 2 &&
@@ -658,6 +660,25 @@ int main() {
                     partial_recovered->open_volume == 2 &&
                     partial_recovered->pending_remainder_volume == 3,
                 "durable partial fill did not reconstruct managed remainder");
+
+        MemoryStore wrong_kind_store = store;
+        const auto wrong_kind_loaded = wrong_kind_store.load(*partial_executed.key);
+        require(wrong_kind_loaded.found() && wrong_kind_loaded.record,
+                "wrong-kind recovery fixture could not load the partial record");
+        auto wrong_kind_record = *wrong_kind_loaded.record;
+        wrong_kind_record.operation_kind = mt5bridge::OperationKind::close;
+        ++wrong_kind_record.revision;
+        require(wrong_kind_record.valid() &&
+                    wrong_kind_store.commit(wrong_kind_record,
+                                            wrong_kind_loaded.record->revision) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "wrong-kind recovery fixture could not persist");
+        mt5bridge::OperationJournal wrong_kind_journal(wrong_kind_store);
+        const auto wrong_kind_records = wrong_kind_journal.recover_all();
+        require(wrong_kind_records.accepted() &&
+                    !mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
+                        partial_recovery_seed, operation_account, wrong_kind_records),
+                "close record was misclassified as settled OPEN exposure");
 
         MemoryStore late_restart_store = store;
         mt5bridge::OperationJournal late_restart_journal(late_restart_store);

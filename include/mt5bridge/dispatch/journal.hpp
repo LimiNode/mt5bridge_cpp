@@ -258,16 +258,21 @@ public:
     /// \brief Creates and durably records a queued operation.
     /// \param key Account and managed-operation identity.
     /// \param request_payload Exact opaque request bytes retained for replay.
+    /// \param operation_kind Durable managed semantics, or `unspecified` for
+    ///        legacy/generic callers that cannot perform semantic settlement.
     /// \return Mutation status and the committed queued record.
     JournalMutationResult create(
-        const OperationKey &key, std::vector<std::uint8_t> request_payload) {
-        if (!key.valid() || request_payload.empty())
+        const OperationKey &key, std::vector<std::uint8_t> request_payload,
+        OperationKind operation_kind = OperationKind::unspecified) {
+        if (!key.valid() || request_payload.empty() ||
+            !valid_operation_kind(operation_kind))
             return {};
         if (records_.find(key) != records_.end())
             return {JournalMutationStatus::duplicate_operation, std::nullopt};
 
         OperationRecord candidate;
         candidate.key = key;
+        candidate.operation_kind = operation_kind;
         candidate.request_payload = std::move(request_payload);
         candidate.operation_state = OperationState::queued;
         candidate.journal_state = JournalState::created;

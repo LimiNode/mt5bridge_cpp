@@ -67,12 +67,12 @@ cannot re-count an earlier deal. Contradictory evidence in a remainder cycle
 leaves the confirmed partial exposure and durable partial record intact so a
 later fresh worker can retry.
 
-Close/cancel settlement remains a later bounded slice. Restart reconstruction
-for settled OPEN records is defined separately in
-[ADR-0027](0027-managed-trade-restart-reconstruction.md);
-unresolved, close, and cancel records remain non-resendable until their own
-recovery semantics exist. The worker and owner therefore keep the durable
-journal non-resendable while those semantics are absent.
+Close/cancel settlement and its restart semantics are defined by the later
+[ADR-0029](0029-durable-exit-settlement.md) bounded slice. Restart
+reconstruction for settled OPEN records remains defined separately in
+[ADR-0027](0027-managed-trade-restart-reconstruction.md). This ADR therefore
+keeps its scope on provenance-bearing OPEN settlement and late entry
+remainder aggregation; it does not redefine the close/cancel contracts.
 
 ## Consequences
 

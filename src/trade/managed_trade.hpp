@@ -178,6 +178,14 @@ struct ManagedTradeState {
     /// \return Applied, invalid, or ambiguous status.
     MutationStatus start_cancel();
 
+    /// \brief Restores a durable CANCEL operation without allocating a new id.
+    /// \param operation_id Durable operation identifier recovered from the journal.
+    /// \param requested_volume Volume captured when cancellation was requested.
+    /// \return Applied or invalid state when the recovered intent cannot follow the
+    ///         current OPEN frontier.
+    MutationStatus restore_cancel_reconciliation(std::uint64_t operation_id,
+                                                 Volume requested_volume);
+
     /// \brief Advances the durable operation to the one-shot submission edge.
     /// \return Applied or invalid state.
     MutationStatus enter_submitting();
@@ -207,6 +215,16 @@ struct ManagedTradeState {
     /// \param volume Newly observed filled remainder volume.
     /// \return Applied or invalid state.
     MutationStatus observe_pending_remainder(Volume volume);
+
+    /// \brief Applies a late entry fill while a CANCEL operation is pending.
+    /// \param volume Newly observed volume from the durable OPEN frontier.
+    /// \return Applied or invalid state.
+    MutationStatus observe_cancel_remainder(Volume volume);
+
+    /// \brief Applies a late exit fill to the same partial CLOSE operation.
+    /// \param volume Newly observed close volume from the cumulative frontier.
+    /// \return Applied or invalid state.
+    MutationStatus observe_close_remainder(Volume volume);
 
     /// \brief Stops creation of new entry slices without discarding exposure.
     /// \return Applied or invalid state.

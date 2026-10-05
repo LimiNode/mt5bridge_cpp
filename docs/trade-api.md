@@ -339,11 +339,18 @@ cannot re-attribute earlier deals. The cumulative `settled_volume` is committed
 atomically with the managed exposure; the final remainder completes the same
 OPEN slice. After a full or partial OPEN settlement, the private owner can
 reconstruct confirmed exposure and pending remainder from durable
-requested/settled volume fields after restart; unresolved, close, and cancel
-reconstruction remain observation-only follow-up work.
+requested/settled volume fields after restart. The private owner now also
+prepares explicit `close` and `cancel` records: exit settlement accepts only
+fresh attributed `DEAL_ENTRY_OUT`/`DEAL_ENTRY_OUT_BY` volume, while cancellation
+requires a fresh authoritative active-order absence plus covered history. Partial
+close volume is durably applied as an exposure reduction; a partial close stays
+on the same operation and accepts only cumulative-volume deltas until terminal
+volume is proven. Cancellation re-aggregates the OPEN identity and applies late
+entry-fill deltas before clearing only the remaining pending remainder, so it
+never discards confirmed exposure. Recovery replays the persisted operation
+kinds in order and rejects generic/unknown records.
 The journal now persists an explicit operation kind, so only records marked
-`open` can participate in this OPEN reconstruction; close/cancel settlement is
-kept for a later bounded slice.
+`open`, `close`, or `cancel` can participate in managed reconstruction.
 
 ## Quickstart scenarios
 

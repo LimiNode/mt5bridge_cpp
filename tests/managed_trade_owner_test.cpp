@@ -951,6 +951,484 @@ int main() {
                     overfill_owner.state().open_volume == 0,
                 "overfilled deal evidence was silently capped into a fill");
 
+        auto full_open_state = [](std::uint64_t trade_id) {
+            mt5bridge::managed_trade::ManagedTradeState state;
+            require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                        &state, mt5bridge::managed_trade::TradeId{trade_id}, 5, 5, 6),
+                    "exit state initialization failed");
+            require(state.start_open_slice(5) ==
+                        mt5bridge::managed_trade::MutationStatus::applied &&
+                        state.enter_submitting() ==
+                            mt5bridge::managed_trade::MutationStatus::applied &&
+                        state.record_fill(5) ==
+                            mt5bridge::managed_trade::MutationStatus::applied &&
+                        state.reconcile() ==
+                            mt5bridge::managed_trade::MutationStatus::applied,
+                    "exit state full-open setup failed");
+            return state;
+        };
+
+        MemoryStore close_store;
+        auto close_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window,
+                                    {history_deal(801, 901, 902, 2.0, 1)}),
+                history_deals_batch(operation_account, deal_window,
+                                    {history_deal(801, 901, 902, 2.0, 1),
+                                     history_deal(803, 901, 902, 1.0, 1)})});
+        mt5bridge::ObservationCoordinator close_coordinator(
+            *close_provider, operation_account);
+        const auto close_first = close_coordinator.refresh(deal_collection);
+        const auto close_second = close_coordinator.refresh(deal_collection);
+        require(close_first.sample && close_second.sample,
+                "close baseline setup failed");
+        mt5bridge::EnvironmentConsistencyRequest close_consistency_request;
+        close_consistency_request.history_deals_window = deal_window;
+        const auto close_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*close_first.sample, *close_second.sample},
+                close_consistency_request);
+        require(close_consistency.consistent() && close_consistency.proof,
+                "close consistency proof setup failed");
+        mt5bridge::OperationJournal close_journal(close_store);
+        mt5bridge::DispatchAdmissionBarrier close_admission(
+            close_journal, close_coordinator.graph(), close_consistency_request);
+        mt5bridge::runtime::OneShotDispatchBackend close_backend;
+        FakeTransport close_transport;
+        close_transport.next.reconciliation_bindings = {{9001, 801}};
+        FakeAccountProbe close_probe({operation_account, operation_account});
+        mt5bridge::dispatch::ManagedTradeOwner close_owner(
+            full_open_state(60), operation_account, close_journal,
+            close_admission, close_backend, close_probe, lease, close_transport);
+        const auto close_predicate = mt5bridge::expect_reconciliation_transition(
+            mt5bridge::ReconciliationPredicateKind::history_deal_present,
+            std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+            9001, deal_window);
+        mt5bridge::dispatch::ManagedTradeIntent close_intent{
+            {0xC1},
+            {operation_account, close_coordinator.capture_baseline(),
+             {close_predicate}, mt5bridge::OperationState::partially_filled}};
+        require(close_owner.prepare_close(3, std::move(close_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "close owner did not prepare a durable close slice");
+        mt5bridge::DispatchAdmissionRequest close_ready;
+        close_ready.current_account = operation_account;
+        close_ready.environment_proof = close_consistency.proof;
+        const auto close_executed = close_owner.execute_pending(close_ready);
+        require(close_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    close_executed.key && close_owner.state().slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::close,
+                "close owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker close_worker(
+            close_journal, *close_executed.key, close_coordinator, deal_collection);
+        const auto close_partial =
+            close_owner.settle_close_reconciliation(close_worker);
+        require(close_partial.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
+                    close_partial.record && close_partial.record->operation_kind ==
+                        mt5bridge::OperationKind::close &&
+                    close_partial.record->settled_volume == 2 &&
+                    close_owner.state().open_volume == 3 &&
+                    close_owner.state().close_obligation.requested &&
+                    close_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::partially_filled,
+                "provenance-bearing partial close did not reduce exposure");
+
+        mt5bridge::dispatch::ManagedTradeIntent premature_close_intent{
+            {0xC2},
+            {operation_account, close_coordinator.capture_baseline(),
+             {close_predicate}, mt5bridge::OperationState::filled}};
+        require(close_owner.prepare_close(1, std::move(premature_close_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::invalid_state,
+                "partial close incorrectly permitted a replacement operation");
+
+        mt5bridge::OperationReconciliationWorker late_close_worker(
+            close_journal, *close_executed.key, close_coordinator, deal_collection);
+        const auto late_close =
+            close_owner.settle_close_reconciliation(late_close_worker);
+        require(late_close.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    late_close.record && late_close.record->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    late_close.record->settled_volume == 3 &&
+                    close_owner.state().open_volume == 2 &&
+                    close_owner.state().close_obligation.requested &&
+                    close_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled,
+                "late close evidence did not complete the original close operation");
+        mt5bridge::dispatch::ManagedTradeIntent replacement_close_intent{
+            {0xC2},
+            {operation_account, close_coordinator.capture_baseline(),
+             {close_predicate}, mt5bridge::OperationState::filled}};
+        require(close_owner.prepare_close(2, std::move(replacement_close_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "terminal close did not permit a replacement close");
+
+        MemoryStore cancel_store;
+        mt5bridge::managed_trade::ManagedTradeState cancel_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &cancel_state, mt5bridge::managed_trade::TradeId{61}, 5, 5, 6),
+                "cancel state initialization failed");
+        require(cancel_state.start_open_slice(4) ==
+                    mt5bridge::managed_trade::MutationStatus::applied &&
+                    cancel_state.enter_submitting() ==
+                        mt5bridge::managed_trade::MutationStatus::applied &&
+                    cancel_state.record_fill(2) ==
+                        mt5bridge::managed_trade::MutationStatus::applied &&
+                    cancel_state.reconcile() ==
+                        mt5bridge::managed_trade::MutationStatus::applied &&
+                    cancel_state.pending_remainder_volume == 2,
+                "cancel state partial-open setup failed");
+        auto cancel_batch = [&](std::vector<Mt5DealSnapshot> deals, bool active) {
+            auto batch = history_deals_batch(operation_account, deal_window,
+                                              std::move(deals));
+            if (active) {
+                Mt5OrderSnapshot order{};
+                order.ticket = 901;
+                order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                                     MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
+                batch.active_orders.push_back(order);
+            }
+            return batch;
+        };
+        auto cancel_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                cancel_batch({history_deal(1001, 901, 902, 2.0)}, true),
+                cancel_batch({history_deal(1001, 901, 902, 2.0)}, true),
+                cancel_batch({history_deal(1001, 901, 902, 2.0),
+                              history_deal(1002, 901, 902, 2.0)}, false)});
+        mt5bridge::ObservationCoordinator cancel_coordinator(
+            *cancel_provider, operation_account);
+        mt5bridge::ObservationCollectionRequest cancel_collection;
+        cancel_collection.history_deals_window = deal_window;
+        const auto cancel_first = cancel_coordinator.refresh(cancel_collection);
+        const auto cancel_second = cancel_coordinator.refresh(cancel_collection);
+        require(cancel_first.sample && cancel_second.sample,
+                "cancel baseline setup failed");
+        mt5bridge::EnvironmentConsistencyRequest cancel_consistency_request;
+        cancel_consistency_request.history_deals_window = deal_window;
+        const auto cancel_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*cancel_first.sample, *cancel_second.sample},
+                cancel_consistency_request);
+        require(cancel_consistency.consistent() && cancel_consistency.proof,
+                "cancel consistency proof setup failed");
+        mt5bridge::ObservationGraph cancel_open_graph(operation_account);
+        const auto cancel_open_baseline =
+            mt5bridge::capture_reconciliation_baseline(cancel_open_graph);
+        mt5bridge::OperationRecord cancel_open_record;
+        cancel_open_record.key = {operation_account, 61, 1};
+        cancel_open_record.operation_kind = mt5bridge::OperationKind::open;
+        cancel_open_record.request_payload = {0xC0};
+        cancel_open_record.result_payload = {0xC1};
+        cancel_open_record.operation_state =
+            mt5bridge::OperationState::partially_filled;
+        cancel_open_record.journal_state = mt5bridge::JournalState::reconciling;
+        cancel_open_record.revision = 1;
+        cancel_open_record.fencing_token = 1;
+        cancel_open_record.settled_volume = 2;
+        cancel_open_record.reconciliation_descriptor =
+            mt5bridge::ReconciliationDescriptor{
+                operation_account, cancel_open_baseline,
+                {mt5bridge::require_active_order(901),
+                 mt5bridge::expect_reconciliation_transition(
+                     mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                     std::uint64_t{1001}, false,
+                     mt5bridge::ReconciliationTransition::absent_to_present, 0,
+                     deal_window)},
+                mt5bridge::OperationState::partially_filled, 61, 1, 4};
+        require(cancel_open_record.valid() &&
+                    cancel_store.commit(cancel_open_record, std::nullopt) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "cancel OPEN frontier fixture was not committed");
+        mt5bridge::OperationJournal cancel_journal(cancel_store);
+        require(cancel_journal.recover(cancel_open_record.key).accepted(),
+                "cancel OPEN frontier was not recovered into the journal");
+        mt5bridge::DispatchAdmissionBarrier cancel_admission(
+            cancel_journal, cancel_coordinator.graph(), cancel_consistency_request);
+        mt5bridge::runtime::OneShotDispatchBackend cancel_backend;
+        FakeTransport cancel_transport;
+        FakeAccountProbe cancel_probe({operation_account, operation_account});
+        mt5bridge::dispatch::ManagedTradeOwner cancel_owner(
+            cancel_state, operation_account, cancel_journal, cancel_admission,
+            cancel_backend, cancel_probe, lease, cancel_transport);
+        mt5bridge::dispatch::ManagedTradeIntent cancel_intent{
+            {0xCA},
+            {operation_account, cancel_coordinator.capture_baseline(),
+             {mt5bridge::require_active_order_absent(901)},
+             mt5bridge::OperationState::cancelled}};
+        require(cancel_owner.prepare_cancel(std::move(cancel_intent)).status ==
+                    mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "cancel owner did not prepare a durable cancellation");
+        mt5bridge::DispatchAdmissionRequest cancel_ready;
+        cancel_ready.current_account = operation_account;
+        cancel_ready.environment_proof = cancel_consistency.proof;
+        const auto cancel_executed = cancel_owner.execute_pending(cancel_ready);
+        require(cancel_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    cancel_executed.key,
+                "cancel owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker cancel_worker(
+            cancel_journal, *cancel_executed.key, cancel_coordinator,
+            cancel_collection);
+        const auto cancelled =
+            cancel_owner.settle_cancel_reconciliation(cancel_worker);
+        require(cancelled.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    cancelled.record && cancelled.record->operation_kind ==
+                        mt5bridge::OperationKind::cancel &&
+                    cancelled.record->operation_state ==
+                        mt5bridge::OperationState::cancelled &&
+                    cancel_owner.state().pending_remainder_volume == 0 &&
+                    cancel_owner.state().open_volume == 4 &&
+                    cancel_owner.state().slice.state ==
+                        mt5bridge::managed_trade::OperationState::cancelled,
+                "cancel settlement did not preserve filled exposure");
+        const auto persisted_cancel_open = cancel_journal.find(
+            {operation_account, 61, 1});
+        require(persisted_cancel_open &&
+                    persisted_cancel_open->operation_state ==
+                        mt5bridge::OperationState::filled &&
+                    persisted_cancel_open->settled_volume == 4 &&
+                    persisted_cancel_open->valid(),
+                "late cancel fill was not persisted on the OPEN frontier");
+        const auto cancel_recovery = cancel_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState cancel_recovery_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &cancel_recovery_seed, mt5bridge::managed_trade::TradeId{61}, 5, 5,
+                    6),
+                "cancel recovery seed initialization failed");
+        const auto recovered_cancel =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_trade(
+                cancel_recovery_seed, operation_account, cancel_recovery);
+        require(recovered_cancel && recovered_cancel->valid() &&
+                    recovered_cancel->open_volume == 4 &&
+                    recovered_cancel->pending_remainder_volume == 0 &&
+                    recovered_cancel->slice.operation_id == 2 &&
+                    recovered_cancel->slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::cancel &&
+                    recovered_cancel->slice.state ==
+                        mt5bridge::managed_trade::OperationState::cancelled,
+                "restart did not preserve a late fill before cancellation");
+
+        // A crash after the OPEN frontier commit must not lose an in-flight
+        // CANCEL. Recovery keeps the durable operation id and lets a fresh
+        // worker finish the same cancellation without another backend call.
+        auto cancel_restart_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                cancel_batch({history_deal(1001, 901, 902, 2.0)}, true),
+                cancel_batch({history_deal(1001, 901, 902, 2.0)}, true),
+                cancel_batch({history_deal(1001, 901, 902, 2.0),
+                              history_deal(1002, 901, 902, 2.0)}, false)});
+        mt5bridge::ObservationCoordinator cancel_restart_coordinator(
+            *cancel_restart_provider, operation_account);
+        mt5bridge::ObservationCollectionRequest cancel_restart_collection;
+        cancel_restart_collection.history_deals_window = deal_window;
+        const auto restart_first =
+            cancel_restart_coordinator.refresh(cancel_restart_collection);
+        const auto restart_second =
+            cancel_restart_coordinator.refresh(cancel_restart_collection);
+        require(restart_first.sample && restart_second.sample,
+                "cancel restart baseline setup failed");
+        const auto restart_baseline =
+            mt5bridge::capture_reconciliation_baseline(
+                cancel_restart_coordinator.graph());
+
+        auto make_restart_record = [&](std::uint64_t operation_id,
+                                       mt5bridge::OperationKind kind,
+                                       mt5bridge::OperationState state,
+                                       std::uint64_t requested,
+                                       std::uint64_t settled,
+                                       mt5bridge::OperationState settled_state,
+                                       std::vector<mt5bridge::ReconciliationPredicate>
+                                           predicates) {
+            mt5bridge::OperationRecord record;
+            record.key = {operation_account, 61, operation_id};
+            record.operation_kind = kind;
+            record.request_payload = {0xD0, static_cast<std::uint8_t>(operation_id)};
+            record.result_payload = {0xD1, static_cast<std::uint8_t>(operation_id)};
+            record.operation_state = state;
+            record.journal_state = mt5bridge::JournalState::reconciling;
+            record.revision = 1;
+            record.fencing_token = 1;
+            record.settled_volume = settled;
+            record.reconciliation_descriptor = mt5bridge::ReconciliationDescriptor{
+                operation_account, restart_baseline, std::move(predicates), settled_state,
+                61, operation_id, requested};
+            require(record.valid(), "cancel restart record fixture is invalid");
+            return record;
+        };
+
+        MemoryStore restart_store;
+        const auto restart_open = make_restart_record(
+            1, mt5bridge::OperationKind::open,
+            mt5bridge::OperationState::filled, 4, 4,
+            mt5bridge::OperationState::filled,
+            {mt5bridge::require_active_order(901),
+             mt5bridge::expect_reconciliation_transition(
+                 mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                 std::uint64_t{1001}, false,
+                 mt5bridge::ReconciliationTransition::absent_to_present, 0,
+                 deal_window)});
+        const auto restart_cancel = make_restart_record(
+            2, mt5bridge::OperationKind::cancel,
+            mt5bridge::OperationState::reconciling, 2, 0,
+            mt5bridge::OperationState::cancelled,
+            {mt5bridge::require_active_order_absent(901)});
+        require(restart_store.commit(restart_open, std::nullopt) ==
+                    mt5bridge::StoreCommitStatus::committed &&
+                    restart_store.commit(restart_cancel, std::nullopt) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "cancel restart records were not committed");
+        mt5bridge::OperationJournal cancel_restart_journal(restart_store);
+        const auto restart_recovery = cancel_restart_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState cancel_restart_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &cancel_restart_seed, mt5bridge::managed_trade::TradeId{61}, 5, 5,
+                    6),
+                "cancel restart seed initialization failed");
+        const auto recovered_inflight =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_trade(
+                cancel_restart_seed, operation_account, restart_recovery);
+        require(recovered_inflight && recovered_inflight->valid() &&
+                    recovered_inflight->open_volume == 4 &&
+                    recovered_inflight->pending_remainder_volume == 0 &&
+                    recovered_inflight->slice.operation_id == 2 &&
+                    recovered_inflight->slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::cancel &&
+                    recovered_inflight->slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    recovered_inflight->slice.requested_volume == 2,
+                "restart did not restore the in-flight cancel operation");
+
+        mt5bridge::EnvironmentConsistencyRequest restart_scope;
+        mt5bridge::DispatchAdmissionBarrier cancel_restart_admission(
+            cancel_restart_journal, cancel_restart_coordinator.graph(), restart_scope);
+        mt5bridge::runtime::OneShotDispatchBackend cancel_restart_backend;
+        FakeAccountProbe cancel_restart_probe({});
+        FakeTransport cancel_restart_transport;
+        mt5bridge::dispatch::ManagedTradeOwner restarted_owner(
+            *recovered_inflight, operation_account, cancel_restart_journal,
+            cancel_restart_admission, cancel_restart_backend, cancel_restart_probe, lease,
+            cancel_restart_transport);
+        mt5bridge::OperationReconciliationWorker cancel_restart_worker(
+            cancel_restart_journal, {operation_account, 61, 2},
+            cancel_restart_coordinator, cancel_restart_collection);
+        const auto restarted_cancel =
+            restarted_owner.settle_cancel_reconciliation(cancel_restart_worker);
+        require(restarted_cancel.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    restarted_cancel.record &&
+                    restarted_cancel.record->operation_state ==
+                        mt5bridge::OperationState::cancelled &&
+                    cancel_restart_transport.calls == 0 &&
+                    restarted_owner.state().slice.operation_id == 2,
+                "fresh reconciliation worker did not finish the recovered cancel");
+
+        // A late fill may shrink the current remainder after CANCEL intent was
+        // persisted. Replay must retain the original intent-time volume.
+        MemoryStore partial_cancel_store;
+        const auto partial_open = make_restart_record(
+            1, mt5bridge::OperationKind::open,
+            mt5bridge::OperationState::partially_filled, 4, 3,
+            mt5bridge::OperationState::partially_filled,
+            {mt5bridge::require_active_order(901),
+             mt5bridge::expect_reconciliation_transition(
+                 mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                 std::uint64_t{1001}, false,
+                 mt5bridge::ReconciliationTransition::absent_to_present, 0,
+                 deal_window)});
+        const auto partial_cancel = make_restart_record(
+            2, mt5bridge::OperationKind::cancel,
+            mt5bridge::OperationState::reconciling, 2, 0,
+            mt5bridge::OperationState::cancelled,
+            {mt5bridge::require_active_order_absent(901)});
+        require(partial_cancel_store.commit(partial_open, std::nullopt) ==
+                    mt5bridge::StoreCommitStatus::committed &&
+                    partial_cancel_store.commit(partial_cancel, std::nullopt) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "partial late-fill records were not committed");
+        mt5bridge::OperationJournal partial_cancel_journal(partial_cancel_store);
+        const auto partial_recovery = partial_cancel_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState partial_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &partial_seed, mt5bridge::managed_trade::TradeId{61}, 5, 5, 6),
+                "partial late-fill seed initialization failed");
+        const auto recovered_partial_cancel =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_trade(
+                partial_seed, operation_account, partial_recovery);
+        require(recovered_partial_cancel && recovered_partial_cancel->valid() &&
+                    recovered_partial_cancel->open_volume == 3 &&
+                    recovered_partial_cancel->pending_remainder_volume == 1 &&
+                    recovered_partial_cancel->slice.operation_id == 2 &&
+                    recovered_partial_cancel->slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::cancel &&
+                    recovered_partial_cancel->slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    recovered_partial_cancel->slice.requested_volume == 2,
+                "recovery lost the original cancel intent volume after a late fill");
+
+        MemoryStore exit_recovery_store;
+        const auto recovery_graph = mt5bridge::ObservationGraph(operation_account);
+        const auto recovery_baseline =
+            mt5bridge::capture_reconciliation_baseline(recovery_graph);
+        auto durable_exit_record = [&](std::uint64_t trade_id,
+                                       std::uint64_t operation_id,
+                                       mt5bridge::OperationKind kind,
+                                       mt5bridge::OperationState state,
+                                       std::uint64_t requested,
+                                       std::uint64_t settled,
+                                       mt5bridge::OperationState settled_state) {
+            mt5bridge::OperationRecord record;
+            record.key = {operation_account, trade_id, operation_id};
+            record.operation_kind = kind;
+            record.request_payload = {0xE1};
+            record.result_payload = {0xE2};
+            record.operation_state = state;
+            record.journal_state = mt5bridge::JournalState::reconciling;
+            record.revision = 1;
+            record.fencing_token = 1;
+            record.settled_volume = settled;
+            record.reconciliation_descriptor = mt5bridge::ReconciliationDescriptor{
+                operation_account, recovery_baseline,
+                {mt5bridge::require_active_order(1000 + operation_id)}, settled_state,
+                trade_id, operation_id, requested};
+            require(record.valid(), "durable exit recovery fixture is invalid");
+            require(exit_recovery_store.commit(record, std::nullopt) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                    "durable exit recovery fixture was not committed");
+        };
+        durable_exit_record(61, 1, mt5bridge::OperationKind::open,
+                            mt5bridge::OperationState::partially_filled, 4, 2,
+                            mt5bridge::OperationState::partially_filled);
+        durable_exit_record(61, 2, mt5bridge::OperationKind::cancel,
+                            mt5bridge::OperationState::cancelled, 2, 0,
+                            mt5bridge::OperationState::cancelled);
+        durable_exit_record(61, 3, mt5bridge::OperationKind::close,
+                            mt5bridge::OperationState::filled, 2, 2,
+                            mt5bridge::OperationState::filled);
+        mt5bridge::OperationJournal exit_recovery_journal(exit_recovery_store);
+        const auto exit_recovery = exit_recovery_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState exit_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &exit_seed, mt5bridge::managed_trade::TradeId{61}, 5, 5, 6),
+                "durable exit recovery seed initialization failed");
+        const auto recovered_exit =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_settled_trade(
+                exit_seed, operation_account, exit_recovery);
+        require(recovered_exit && recovered_exit->valid() &&
+                    recovered_exit->open_volume == 0 &&
+                    recovered_exit->pending_remainder_volume == 0 &&
+                    recovered_exit->close_obligation.satisfied &&
+                    recovered_exit->slice.operation_id == 3 &&
+                    recovered_exit->slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::close &&
+                    recovered_exit->slice.state ==
+                        mt5bridge::managed_trade::OperationState::filled,
+                "restart did not reconstruct OPEN/CANCEL/CLOSE exposure");
+
         mt5bridge::OperationJournal restarted_journal(store);
         const auto recovered_records = restarted_journal.recover_all();
         require(recovered_records.accepted(),

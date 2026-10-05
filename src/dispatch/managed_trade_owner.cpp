@@ -89,6 +89,124 @@ ManagedTradeOwner::recover_settled_open(
     return candidate;
 }
 
+std::optional<managed_trade::ManagedTradeState>
+ManagedTradeOwner::recover_settled_trade(
+    managed_trade::ManagedTradeState initial_state, const AccountKey &account,
+    const JournalRecoveryResult &recovery) {
+    if (!recovery.accepted() || !account.valid() || !initial_state.valid() ||
+        initial_state.slice.operation_id != 0 || initial_state.plan.slice_count != 0 ||
+        initial_state.open_volume != 0 || initial_state.pending_remainder_volume != 0 ||
+        initial_state.slice.state != managed_trade::OperationState::idle)
+        return std::nullopt;
+
+    std::vector<const OperationRecord *> records;
+    for (const auto &record : recovery.records()) {
+        if (record.key.account != account ||
+            record.key.trade_id != initial_state.trade_id.value)
+            continue;
+        if (!record.valid() || record.journal_state != JournalState::reconciling ||
+            !record.reconciliation_descriptor || record.settled_volume >
+                                                       record.reconciliation_descriptor
+                                                           ->requested_volume)
+            return std::nullopt;
+        if (record.operation_kind == OperationKind::open) {
+            if (record.reconciliation_descriptor->requested_volume == 0 ||
+                record.settled_volume == 0 ||
+                (record.operation_state != OperationState::partially_filled &&
+                 record.operation_state != OperationState::filled))
+                return std::nullopt;
+        } else if (record.operation_kind == OperationKind::close) {
+            if (record.reconciliation_descriptor->requested_volume == 0 ||
+                record.settled_volume == 0 ||
+                (record.operation_state != OperationState::partially_filled &&
+                 record.operation_state != OperationState::filled))
+                return std::nullopt;
+        } else if (record.operation_kind == OperationKind::cancel) {
+            if (record.reconciliation_descriptor->requested_volume == 0 ||
+                (record.operation_state != OperationState::reconciling &&
+                 record.operation_state != OperationState::cancelled) ||
+                record.settled_volume != 0)
+                return std::nullopt;
+        } else {
+            return std::nullopt;
+        }
+        records.push_back(&record);
+    }
+    std::sort(records.begin(), records.end(),
+              [](const auto *left, const auto *right) {
+                  return left->key.operation_id < right->key.operation_id;
+              });
+
+    auto candidate = std::move(initial_state);
+    for (const auto *record : records) {
+        if (candidate.slice.operation_id ==
+                (std::numeric_limits<std::uint64_t>::max)() ||
+            record->key.operation_id != candidate.slice.operation_id + 1)
+            return std::nullopt;
+
+        const auto requested = record->reconciliation_descriptor->requested_volume;
+        managed_trade::MutationStatus status = managed_trade::MutationStatus::invalid_state;
+        switch (record->operation_kind) {
+        case OperationKind::open:
+            if (requested == 0 || requested > candidate.plan.max_slice_volume ||
+                record->settled_volume > requested ||
+                record->operation_state !=
+                    (record->settled_volume == requested ? OperationState::filled
+                                                          : OperationState::partially_filled) ||
+                candidate.start_open_slice(requested) !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.enter_submitting() != managed_trade::MutationStatus::applied ||
+                candidate.record_fill(record->settled_volume) !=
+                    managed_trade::MutationStatus::applied)
+                return std::nullopt;
+            status = candidate.reconcile();
+            break;
+        case OperationKind::close:
+            if (requested == 0 || requested > candidate.open_volume ||
+                record->settled_volume > requested ||
+                record->operation_state !=
+                    (record->settled_volume == requested ? OperationState::filled
+                                                          : OperationState::partially_filled) ||
+                (!candidate.close_obligation.requested &&
+                 candidate.request_close() != managed_trade::MutationStatus::applied) ||
+                candidate.start_close(requested) !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.enter_submitting() != managed_trade::MutationStatus::applied ||
+                candidate.record_fill(record->settled_volume) !=
+                    managed_trade::MutationStatus::applied)
+                return std::nullopt;
+            status = candidate.reconcile();
+            break;
+        case OperationKind::cancel:
+            {
+                const auto requested =
+                    record->reconciliation_descriptor->requested_volume;
+                if (candidate.restore_cancel_reconciliation(
+                        record->key.operation_id, requested) !=
+                    managed_trade::MutationStatus::applied) {
+                    return std::nullopt;
+                }
+                if (record->operation_state == OperationState::cancelled) {
+                    if (candidate.record_cancel_accepted() !=
+                            managed_trade::MutationStatus::applied ||
+                        candidate.reconcile() !=
+                            managed_trade::MutationStatus::applied)
+                        return std::nullopt;
+                }
+                status = managed_trade::MutationStatus::applied;
+                break;
+            }
+        case OperationKind::unspecified:
+            return std::nullopt;
+        }
+        if (status != managed_trade::MutationStatus::applied ||
+            candidate.slice.operation_id != record->key.operation_id ||
+            !candidate.valid())
+            return std::nullopt;
+    }
+    return candidate;
+}
+
 std::optional<OperationKey> ManagedTradeOwner::current_key() const {
     if (!state_.trade_id.valid() || state_.slice.operation_id == 0 ||
         !account_.valid())
@@ -106,17 +224,178 @@ OwnerStepResult ManagedTradeOwner::result_for(
     return result;
 }
 
-OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
-                                                ManagedTradeIntent intent) {
-    intent.reconciliation_descriptor.requested_volume = volume;
-    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
-        !intent.reconciliation_descriptor.valid() ||
-        intent.reconciliation_descriptor.account != account_)
-        return result_for(OwnerStepStatus::invalid_request);
+std::optional<OperationRecord> ManagedTradeOwner::current_open_record_for_cancel() const {
+    if (!account_.valid() || !state_.trade_id.valid() ||
+        (state_.slice.kind != managed_trade::OperationKind::cancel &&
+         state_.pending_remainder_volume == 0))
+        return std::nullopt;
+    std::uint64_t open_operation_id = state_.slice.operation_id;
+    if (state_.slice.kind == managed_trade::OperationKind::cancel) {
+        if (open_operation_id == 0)
+            return std::nullopt;
+        --open_operation_id;
+    } else if (state_.slice.kind != managed_trade::OperationKind::open ||
+               state_.slice.state != managed_trade::OperationState::partially_filled) {
+        return std::nullopt;
+    }
+    const auto record = journal_.find(
+        OperationKey{account_, state_.trade_id.value, open_operation_id});
+    if (!record || record->operation_kind != OperationKind::open ||
+        record->journal_state != JournalState::reconciling ||
+        (record->operation_state != OperationState::partially_filled &&
+         record->operation_state != OperationState::filled) ||
+        record->settled_volume == 0 || !record->reconciliation_descriptor)
+        return std::nullopt;
+    return record;
+}
 
-    auto candidate = state_;
-    if (candidate.start_open_slice(volume) != managed_trade::MutationStatus::applied)
-        return result_for(OwnerStepStatus::invalid_state);
+bool ManagedTradeOwner::cancel_descriptor_matches_open(
+    const ReconciliationDescriptor &descriptor,
+    const OperationRecord &open_record) const {
+    if (!descriptor.valid() || descriptor.settled_state != OperationState::cancelled ||
+        !open_record.reconciliation_descriptor)
+        return false;
+
+    const auto bound_ticket = [](const OperationRecord &record,
+                                 ReconciliationPredicateKind kind) {
+        for (const auto &predicate : record.reconciliation_descriptor->predicates) {
+            if (predicate.kind != kind)
+                continue;
+            if (predicate.ticket != 0)
+                return predicate.ticket;
+            if (predicate.correlation_id == 0)
+                return std::uint64_t{0};
+            for (const auto &binding : record.reconciliation_bindings) {
+                if (binding.correlation_id == predicate.correlation_id)
+                    return binding.broker_ticket;
+            }
+            return std::uint64_t{0};
+        }
+        return std::uint64_t{0};
+    };
+
+    const auto order_ticket = bound_ticket(
+        open_record, ReconciliationPredicateKind::active_order_present);
+    if (order_ticket == 0)
+        return false;
+
+    const ReconciliationPredicate *absence = nullptr;
+    for (const auto &predicate : descriptor.predicates) {
+        if (predicate.kind == ReconciliationPredicateKind::active_order_absent) {
+            if (absence)
+                return false;
+            absence = &predicate;
+        } else {
+            return false;
+        }
+    }
+    return absence && absence->ticket == order_ticket;
+}
+
+std::optional<managed_trade::Volume>
+ManagedTradeOwner::cancel_cumulative_entry_volume(
+    const OperationReconciliationCycle &cycle,
+    const OperationReconciliationWorker &worker,
+    const OperationRecord &open_record) const {
+    if (!cycle.observation || !cycle.observation->refresh.sample ||
+        !open_record.reconciliation_descriptor)
+        return std::nullopt;
+    const auto &sample = *cycle.observation->refresh.sample;
+    if (!observes(sample.batch().observed_domains, ObservationDomain::history_deals) ||
+        !sample.batch().history_deals_window)
+        return std::nullopt;
+    const auto &baseline = worker.effective_baseline();
+    if (!baseline || !baseline->valid() ||
+        worker.graph().domain_revision(ObservationDomain::history_deals) <=
+            baseline->history_deals_revision())
+        return std::nullopt;
+
+    std::uint64_t anchor_ticket = 0;
+    std::optional<ObservationWindow> requested_window;
+    for (const auto &predicate : open_record.reconciliation_descriptor->predicates) {
+        if (predicate.kind != ReconciliationPredicateKind::history_deal_present)
+            continue;
+        if (anchor_ticket != 0 || !predicate.history_window)
+            return std::nullopt;
+        anchor_ticket = predicate.ticket;
+        if (anchor_ticket == 0 && predicate.correlation_id != 0) {
+            for (const auto &binding : open_record.reconciliation_bindings) {
+                if (binding.correlation_id == predicate.correlation_id) {
+                    anchor_ticket = binding.broker_ticket;
+                    break;
+                }
+            }
+        }
+        requested_window = predicate.history_window;
+    }
+    if (anchor_ticket == 0 || !requested_window ||
+        sample.batch().history_deals_window->from_msc > requested_window->from_msc ||
+        sample.batch().history_deals_window->to_msc < requested_window->to_msc ||
+        !worker.graph().history_deals_covered(
+            *requested_window, baseline->history_deals_revision()))
+        return std::nullopt;
+
+    constexpr std::uint64_t kRequiredDealFields =
+        MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+        MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
+        MT5BRIDGE_DEAL_KNOWN_VOLUME | MT5BRIDGE_DEAL_KNOWN_TIME;
+    const auto deals = worker.graph().history_deals();
+    const auto anchor = std::find_if(
+        deals.begin(), deals.end(), [anchor_ticket](const Mt5DealSnapshot &deal) {
+            return deal.ticket == anchor_ticket;
+        });
+    if (anchor == deals.end() ||
+        (anchor->known_fields & kRequiredDealFields) != kRequiredDealFields ||
+        anchor->order_ticket == 0 || anchor->position_id == 0 ||
+        anchor->time_msc < requested_window->from_msc ||
+        anchor->time_msc > requested_window->to_msc ||
+        (anchor->entry != 0 && anchor->entry != 2))
+        return std::nullopt;
+
+    long double total = 0.0L;
+    bool attributed_entry = false;
+    for (const auto &deal : deals) {
+        if (deal.order_ticket != anchor->order_ticket ||
+            deal.position_id != anchor->position_id ||
+            deal.time_msc < requested_window->from_msc ||
+            deal.time_msc > requested_window->to_msc)
+            continue;
+        if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields ||
+            (deal.entry != 0 && deal.entry != 2) || !std::isfinite(deal.volume) ||
+            deal.volume <= 0.0)
+            return std::nullopt;
+        total += static_cast<long double>(deal.volume);
+        if (!std::isfinite(total))
+            return std::nullopt;
+        attributed_entry = true;
+    }
+    if (!attributed_entry || total <= 0.0L || std::floor(total) != total ||
+        total > static_cast<long double>((std::numeric_limits<managed_trade::Volume>::max)()))
+        return std::nullopt;
+    return static_cast<managed_trade::Volume>(total);
+}
+
+OwnerStepResult ManagedTradeOwner::prepare_durable_operation(
+    managed_trade::ManagedTradeState candidate, OperationKind kind,
+    ManagedTradeIntent intent) {
+    intent.reconciliation_descriptor.requested_volume =
+        candidate.slice.requested_volume;
+    if (!account_.valid() || !candidate.valid() || intent.request_payload.empty() ||
+        !intent.reconciliation_descriptor.valid() ||
+        intent.reconciliation_descriptor.account != account_ ||
+        (kind == OperationKind::open &&
+         candidate.slice.kind != managed_trade::OperationKind::open) ||
+        (kind == OperationKind::close &&
+         candidate.slice.kind != managed_trade::OperationKind::close) ||
+        (kind == OperationKind::cancel &&
+         candidate.slice.kind != managed_trade::OperationKind::cancel) ||
+        ((kind == OperationKind::open || kind == OperationKind::close) &&
+         intent.reconciliation_descriptor.settled_state != OperationState::filled &&
+         intent.reconciliation_descriptor.settled_state !=
+             OperationState::partially_filled) ||
+        (kind == OperationKind::cancel &&
+         intent.reconciliation_descriptor.settled_state != OperationState::cancelled))
+        return result_for(OwnerStepStatus::invalid_request);
 
     const OperationKey key{account_, candidate.trade_id.value,
                            candidate.slice.operation_id};
@@ -124,10 +403,9 @@ OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
         return result_for(OwnerStepStatus::invalid_state, key, journal_.find(key));
 
     const auto created = journal_.create(
-        key, std::move(intent.request_payload), OperationKind::open);
+        key, std::move(intent.request_payload), kind);
     if (!created.accepted())
         return result_for(OwnerStepStatus::durable_failure, key, created.record);
-
     const auto prechecking = journal_.transition_operation(
         key, OperationState::prechecking);
     if (!prechecking.accepted())
@@ -144,9 +422,53 @@ OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
         key, std::move(intent.reconciliation_descriptor));
     if (!descriptor.accepted())
         return result_for(OwnerStepStatus::durable_failure, key, descriptor.record);
-
     state_ = std::move(candidate);
     return result_for(OwnerStepStatus::prepared, key, descriptor.record);
+}
+
+OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
+                                                ManagedTradeIntent intent) {
+    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
+        !intent.reconciliation_descriptor.valid() ||
+        intent.reconciliation_descriptor.account != account_)
+        return result_for(OwnerStepStatus::invalid_request);
+    auto candidate = state_;
+    if (candidate.start_open_slice(volume) != managed_trade::MutationStatus::applied)
+        return result_for(OwnerStepStatus::invalid_state);
+    return prepare_durable_operation(std::move(candidate), OperationKind::open,
+                                     std::move(intent));
+}
+
+OwnerStepResult ManagedTradeOwner::prepare_close(managed_trade::Volume volume,
+                                                 ManagedTradeIntent intent) {
+    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
+        !intent.reconciliation_descriptor.valid() ||
+        intent.reconciliation_descriptor.account != account_)
+        return result_for(OwnerStepStatus::invalid_request);
+    auto candidate = state_;
+    if (!candidate.close_obligation.requested &&
+        candidate.request_close() != managed_trade::MutationStatus::applied)
+        return result_for(OwnerStepStatus::invalid_state);
+    if (candidate.start_close(volume) != managed_trade::MutationStatus::applied)
+        return result_for(OwnerStepStatus::invalid_state);
+    return prepare_durable_operation(std::move(candidate), OperationKind::close,
+                                     std::move(intent));
+}
+
+OwnerStepResult ManagedTradeOwner::prepare_cancel(ManagedTradeIntent intent) {
+    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
+        !intent.reconciliation_descriptor.valid() ||
+        intent.reconciliation_descriptor.account != account_)
+        return result_for(OwnerStepStatus::invalid_request);
+    const auto open_record = current_open_record_for_cancel();
+    if (!open_record ||
+        !cancel_descriptor_matches_open(intent.reconciliation_descriptor, *open_record))
+        return result_for(OwnerStepStatus::invalid_state);
+    auto candidate = state_;
+    if (candidate.start_cancel() != managed_trade::MutationStatus::applied)
+        return result_for(OwnerStepStatus::invalid_state);
+    return prepare_durable_operation(std::move(candidate), OperationKind::cancel,
+                                     std::move(intent));
 }
 
 OwnerStepResult ManagedTradeOwner::execute_pending(
@@ -302,7 +624,8 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
             !has_observation_provenance(cycle, worker, *key, *cycle.record))
             break;
         {
-            const auto executed = history_deal_volume(cycle, worker, *cycle.record);
+            const auto executed = history_deal_volume(
+                cycle, worker, *cycle.record, DealDirection::entry);
             if (!executed || *executed == 0 || state_.slice.requested_volume == 0)
                 break;
 
@@ -391,7 +714,7 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
             break;
         {
             const auto cumulative = history_deal_cumulative_volume(
-                cycle, worker, *cycle.record);
+                cycle, worker, *cycle.record, DealDirection::entry);
             if (!cumulative || *cumulative == 0 ||
                 *cumulative < cycle.record->settled_volume ||
                 *cumulative > state_.slice.requested_volume)
@@ -417,6 +740,249 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
             result.status = target_state == OperationState::filled
                                 ? OwnerStepStatus::completed
                                 : OwnerStepStatus::partially_filled;
+            return result;
+        }
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    }
+
+    if (cycle.status == OperationReconciliationStatus::confirmed)
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+    return result;
+}
+
+OwnerStepResult ManagedTradeOwner::settle_close_reconciliation(
+    OperationReconciliationWorker &worker, bool trade_event_gap,
+    bool deadline_expired) {
+    if (!state_.valid())
+        return result_for(OwnerStepStatus::invalid_request);
+    if ((state_.slice.state != managed_trade::OperationState::submitting &&
+         state_.slice.state != managed_trade::OperationState::partially_filled) ||
+        state_.slice.kind != managed_trade::OperationKind::close)
+        return result_for(OwnerStepStatus::invalid_state, current_key());
+
+    const auto key = current_key();
+    if (!key)
+        return result_for(OwnerStepStatus::invalid_request);
+    if (worker.key() != *key)
+        return result_for(OwnerStepStatus::invalid_request, key,
+                          journal_.find(*key));
+    const auto current = journal_.find(*key);
+    if (!current || current->operation_kind != OperationKind::close ||
+        !current->reconciliation_descriptor)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+    const auto settled_state = current->reconciliation_descriptor->settled_state;
+    if (settled_state != OperationState::filled &&
+        settled_state != OperationState::partially_filled)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+
+    const auto cycle = worker.step(trade_event_gap, deadline_expired);
+    auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
+    if (!result.record)
+        result.record = journal_.find(*key);
+
+    switch (cycle.status) {
+    case OperationReconciliationStatus::pending:
+    case OperationReconciliationStatus::not_observed:
+    case OperationReconciliationStatus::trade_event_gap:
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    case OperationReconciliationStatus::account_mismatch:
+    case OperationReconciliationStatus::ambiguous:
+        if (!cycle.record ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record)) {
+            result.status = OwnerStepStatus::ambiguous;
+            return result;
+        }
+        if (cycle.record->operation_state != OperationState::ambiguous)
+            return result;
+        {
+            auto candidate = state_;
+            if (candidate.record_unknown() != managed_trade::MutationStatus::applied ||
+                candidate.reconcile() != managed_trade::MutationStatus::applied)
+                return result;
+            state_ = std::move(candidate);
+        }
+        result.status = OwnerStepStatus::ambiguous;
+        return result;
+    case OperationReconciliationStatus::invalid_request:
+        result.status = OwnerStepStatus::invalid_request;
+        return result;
+    case OperationReconciliationStatus::operation_not_found:
+    case OperationReconciliationStatus::invalid_state:
+        result.status = OwnerStepStatus::invalid_state;
+        return result;
+    case OperationReconciliationStatus::persistence_failed:
+        return result;
+    case OperationReconciliationStatus::confirmed:
+        if (!cycle.record || cycle.record->operation_kind != OperationKind::close ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record))
+            break;
+        {
+            auto candidate = state_;
+            managed_trade::Volume durable_volume = 0;
+            managed_trade::Volume applied_volume = 0;
+            OperationState target_state = OperationState::partially_filled;
+            if (state_.slice.state == managed_trade::OperationState::submitting) {
+                if (cycle.record->operation_state != OperationState::reconciling)
+                    break;
+                const auto executed = history_deal_volume(
+                    cycle, worker, *cycle.record, DealDirection::exit);
+                if (!executed || *executed == 0 ||
+                    *executed > state_.slice.requested_volume ||
+                    *executed > state_.open_volume)
+                    break;
+                applied_volume = *executed;
+                target_state = *executed == state_.slice.requested_volume
+                                   ? OperationState::filled
+                                   : OperationState::partially_filled;
+                if (candidate.record_fill(applied_volume) !=
+                        managed_trade::MutationStatus::applied ||
+                    candidate.reconcile() != managed_trade::MutationStatus::applied)
+                    break;
+                durable_volume = applied_volume;
+            } else {
+                if (cycle.record->operation_state != OperationState::partially_filled)
+                    break;
+                const auto cumulative = history_deal_cumulative_volume(
+                    cycle, worker, *cycle.record, DealDirection::exit);
+                if (!cumulative || *cumulative < cycle.record->settled_volume ||
+                    *cumulative > state_.slice.requested_volume)
+                    break;
+                applied_volume = *cumulative - cycle.record->settled_volume;
+                if (applied_volume == 0 ||
+                    candidate.observe_close_remainder(applied_volume) !=
+                        managed_trade::MutationStatus::applied)
+                    break;
+                durable_volume = *cumulative;
+                target_state = candidate.slice.state ==
+                                       managed_trade::OperationState::filled
+                                   ? OperationState::filled
+                                   : OperationState::partially_filled;
+            }
+            const auto transitioned =
+                journal_.transition_operation(*key, target_state, durable_volume);
+            if (!transitioned.accepted())
+                break;
+            state_ = std::move(candidate);
+            result.record = transitioned.record;
+            result.status = target_state == OperationState::filled
+                                 ? OwnerStepStatus::completed
+                                 : OwnerStepStatus::partially_filled;
+            return result;
+        }
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    }
+
+    if (cycle.status == OperationReconciliationStatus::confirmed)
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+    return result;
+}
+
+OwnerStepResult ManagedTradeOwner::settle_cancel_reconciliation(
+    OperationReconciliationWorker &worker, bool trade_event_gap,
+    bool deadline_expired) {
+    if (!state_.valid())
+        return result_for(OwnerStepStatus::invalid_request);
+    if (state_.slice.state != managed_trade::OperationState::submitting ||
+        state_.slice.kind != managed_trade::OperationKind::cancel)
+        return result_for(OwnerStepStatus::invalid_state, current_key());
+
+    const auto key = current_key();
+    if (!key)
+        return result_for(OwnerStepStatus::invalid_request);
+    if (worker.key() != *key)
+        return result_for(OwnerStepStatus::invalid_request, key,
+                          journal_.find(*key));
+    const auto current = journal_.find(*key);
+    if (!current || current->operation_kind != OperationKind::cancel ||
+        !current->reconciliation_descriptor ||
+        current->reconciliation_descriptor->settled_state != OperationState::cancelled)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+    const auto open_record = current_open_record_for_cancel();
+    if (!open_record)
+        return result_for(OwnerStepStatus::invalid_state, key, current);
+
+    const auto cycle = worker.step(trade_event_gap, deadline_expired);
+    auto result = result_for(OwnerStepStatus::durable_failure, key, cycle.record);
+    if (!result.record)
+        result.record = journal_.find(*key);
+
+    switch (cycle.status) {
+    case OperationReconciliationStatus::pending:
+    case OperationReconciliationStatus::not_observed:
+    case OperationReconciliationStatus::trade_event_gap:
+        result.status = OwnerStepStatus::awaiting_reconciliation;
+        return result;
+    case OperationReconciliationStatus::account_mismatch:
+    case OperationReconciliationStatus::ambiguous:
+        if (!cycle.record ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record)) {
+            result.status = OwnerStepStatus::ambiguous;
+            return result;
+        }
+        if (cycle.record->operation_state != OperationState::ambiguous)
+            return result;
+        {
+            auto candidate = state_;
+            if (candidate.record_unknown() != managed_trade::MutationStatus::applied ||
+                candidate.reconcile() != managed_trade::MutationStatus::applied)
+                return result;
+            state_ = std::move(candidate);
+        }
+        result.status = OwnerStepStatus::ambiguous;
+        return result;
+    case OperationReconciliationStatus::invalid_request:
+        result.status = OwnerStepStatus::invalid_request;
+        return result;
+    case OperationReconciliationStatus::operation_not_found:
+    case OperationReconciliationStatus::invalid_state:
+        result.status = OwnerStepStatus::invalid_state;
+        return result;
+    case OperationReconciliationStatus::persistence_failed:
+        return result;
+    case OperationReconciliationStatus::confirmed:
+        if (!cycle.record || cycle.record->operation_kind != OperationKind::cancel ||
+            cycle.record->operation_state != OperationState::reconciling ||
+            !has_observation_provenance(cycle, worker, *key, *cycle.record))
+            break;
+        {
+            const auto cumulative = cancel_cumulative_entry_volume(
+                cycle, worker, *open_record);
+            if (!cumulative || *cumulative < open_record->settled_volume ||
+                !open_record->reconciliation_descriptor ||
+                *cumulative >
+                    open_record->reconciliation_descriptor->requested_volume)
+                break;
+            const auto late_fill = *cumulative - open_record->settled_volume;
+            auto candidate = state_;
+            if (late_fill != 0 &&
+                (late_fill > candidate.pending_remainder_volume ||
+                 candidate.observe_cancel_remainder(late_fill) !=
+                     managed_trade::MutationStatus::applied))
+                break;
+            if (late_fill != 0) {
+                const auto open_state =
+                    *cumulative == open_record->reconciliation_descriptor->requested_volume
+                        ? OperationState::filled
+                        : OperationState::partially_filled;
+                const auto open_transition = journal_.transition_operation(
+                    open_record->key, open_state, *cumulative);
+                if (!open_transition.accepted())
+                    break;
+            }
+            if (candidate.record_cancel_accepted() !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.reconcile() != managed_trade::MutationStatus::applied)
+                break;
+            const auto transitioned = journal_.transition_operation(
+                *key, OperationState::cancelled);
+            if (!transitioned.accepted())
+                break;
+            state_ = std::move(candidate);
+            result.record = transitioned.record;
+            result.status = OwnerStepStatus::completed;
             return result;
         }
         result.status = OwnerStepStatus::awaiting_reconciliation;
@@ -483,7 +1049,7 @@ std::optional<ManagedTradeOwner::HistoryDealAttributionContext>
 ManagedTradeOwner::history_deal_attribution_context(
     const OperationReconciliationCycle &cycle,
     const OperationReconciliationWorker &worker,
-    const OperationRecord &record) const {
+    const OperationRecord &record, DealDirection direction) const {
     if (!cycle.observation || !cycle.observation->refresh.sample ||
         !record.reconciliation_descriptor)
         return std::nullopt;
@@ -504,7 +1070,9 @@ ManagedTradeOwner::history_deal_attribution_context(
     std::vector<std::uint64_t> anchor_tickets;
     std::size_t history_deal_predicate_count = 0;
     constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryOut = 1;
     constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint32_t kDealEntryOutBy = 3;
     constexpr std::uint64_t kRequiredDealFields =
         MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
         MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
@@ -554,6 +1122,12 @@ ManagedTradeOwner::history_deal_attribution_context(
             deals.begin(), deals.end(), [anchor](const Mt5DealSnapshot &deal) {
                 return deal.ticket == anchor;
             });
+        const bool valid_entry = found != deals.end() &&
+                                 (found->entry == kDealEntryIn ||
+                                  found->entry == kDealEntryInOut);
+        const bool valid_exit = found != deals.end() &&
+                                (found->entry == kDealEntryOut ||
+                                 found->entry == kDealEntryOutBy);
         if (found == deals.end() ||
             worker.graph().history_deal_evidence_revision(found->ticket) <=
                 baseline->history_deals_revision() ||
@@ -562,7 +1136,7 @@ ManagedTradeOwner::history_deal_attribution_context(
             found->position_id == 0 ||
             found->time_msc < requested_window->from_msc ||
             found->time_msc > requested_window->to_msc ||
-            (found->entry != kDealEntryIn && found->entry != kDealEntryInOut))
+            (direction == DealDirection::entry ? !valid_entry : !valid_exit))
             return std::nullopt;
         if (!order_selected) {
             order_ticket = found->order_ticket;
@@ -581,9 +1155,9 @@ ManagedTradeOwner::history_deal_attribution_context(
 std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
     const OperationReconciliationCycle &cycle,
     const OperationReconciliationWorker &worker,
-    const OperationRecord &record) const {
+    const OperationRecord &record, DealDirection direction) const {
     const auto context =
-        history_deal_attribution_context(cycle, worker, record);
+        history_deal_attribution_context(cycle, worker, record, direction);
     if (!context)
         return std::nullopt;
 
@@ -591,7 +1165,9 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
     if (!baseline)
         return std::nullopt;
     constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryOut = 1;
     constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint32_t kDealEntryOutBy = 3;
     constexpr std::uint64_t kRequiredDealFields =
         MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
         MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
@@ -609,7 +1185,11 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
             continue;
         if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
             return std::nullopt;
-        if (deal.entry != kDealEntryIn && deal.entry != kDealEntryInOut)
+        const bool entry_deal = deal.entry == kDealEntryIn ||
+                                deal.entry == kDealEntryInOut;
+        const bool exit_deal = deal.entry == kDealEntryOut ||
+                               deal.entry == kDealEntryOutBy;
+        if (direction == DealDirection::entry ? !entry_deal : !exit_deal)
             continue;
         if (!std::isfinite(deal.volume) || deal.volume <= 0.0)
             return std::nullopt;
@@ -629,14 +1209,16 @@ std::optional<managed_trade::Volume>
 ManagedTradeOwner::history_deal_cumulative_volume(
     const OperationReconciliationCycle &cycle,
     const OperationReconciliationWorker &worker,
-    const OperationRecord &record) const {
+    const OperationRecord &record, DealDirection direction) const {
     const auto context =
-        history_deal_attribution_context(cycle, worker, record);
+        history_deal_attribution_context(cycle, worker, record, direction);
     if (!context)
         return std::nullopt;
 
     constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryOut = 1;
     constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint32_t kDealEntryOutBy = 3;
     constexpr std::uint64_t kRequiredDealFields =
         MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
         MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
@@ -652,7 +1234,11 @@ ManagedTradeOwner::history_deal_cumulative_volume(
             continue;
         if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
             return std::nullopt;
-        if (deal.entry != kDealEntryIn && deal.entry != kDealEntryInOut)
+        const bool entry_deal = deal.entry == kDealEntryIn ||
+                                deal.entry == kDealEntryInOut;
+        const bool exit_deal = deal.entry == kDealEntryOut ||
+                               deal.entry == kDealEntryOutBy;
+        if (direction == DealDirection::entry ? !entry_deal : !exit_deal)
             continue;
         if (!std::isfinite(deal.volume) || deal.volume <= 0.0)
             return std::nullopt;

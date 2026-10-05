@@ -326,11 +326,13 @@ worker process.
    aggregate; exit deals, missing fields, fractional logical totals, anomalous
    overfills, and unproven rows remain unresolved. It converts
    uncertainty to durable `reconciling` with a non-resendable owner outcome,
-   and managed state alone never authorizes a send. Remainder handling after a
-   partial result and close/cancel planning remain later slices. The bounded
-   restart slice now persists requested/settled OPEN volume and can reconstruct
-   full or partial exposure fail-closed from durable terminal records;
-   unresolved, close, and cancel records still require later recovery slices.
+   and managed state alone never authorizes a send. OPEN remainder handling now
+   advances a cumulative durable frontier, while the bounded close/cancel slice
+   applies provenance-bearing exit volume and late-entry-fill deltas. A partial
+   CLOSE remains on its original operation until cumulative terminality is
+   proven; active-order absence alone cannot erase a late OPEN fill. The
+   bounded restart slice persists requested/settled volume and reconstructs
+   OPEN, CLOSE, and CANCEL exposure fail-closed from durable records.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

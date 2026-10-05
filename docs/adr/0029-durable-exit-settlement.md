@@ -45,8 +45,10 @@ store rejects CAS updates that attempt to rewrite an existing operation kind.
   unresolved until cumulative terminality is proven on the same operation.
 - Cancellation cannot erase previously confirmed fills or late fills that are
   proven by fresh history coverage.
-- Reversal (`INOUT`), netting attribution, and public `TradeManager` policy remain
-  outside this bounded slice.
+- Reversal (`INOUT`) implementation and netting attribution remain outside
+  this bounded slice; their durable proof boundary is defined in
+  [ADR-0030](0030-durable-reversal-attribution-model.md). Public
+  `TradeManager` policy remains deferred as well.
 
 ## Verification
 

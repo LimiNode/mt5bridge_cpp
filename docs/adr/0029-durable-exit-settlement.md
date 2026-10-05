@@ -15,7 +15,9 @@ the result-derived history-deal identity and attributes one order/position
 identity. The settlement aggregator accepts only `DEAL_ENTRY_OUT` and
 `DEAL_ENTRY_OUT_BY` deals; `DEAL_ENTRY_INOUT` is rejected for this slice because
 its reversal volume cannot be split into close and new-entry semantics without a
-separate attribution policy. The attributed logical volume is committed as the
+separate attribution policy. The same fail-closed rule applies when an INOUT
+deal is encountered alongside otherwise attributable history rows. The
+attributed logical volume is committed as the
 record's durable `settled_volume` and is applied as a reduction of confirmed
 open exposure. A partial close is not terminal for that operation: its durable
 record remains `partially_filled`, and later reconciliation re-aggregates the

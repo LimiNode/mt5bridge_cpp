@@ -15,6 +15,34 @@
 namespace mt5bridge::dispatch {
 namespace {
 
+enum class ManagedHistoryDealRole { entry, exit, inout, unknown };
+
+/// \brief Classifies a broker history deal for managed settlement attribution.
+ManagedHistoryDealRole classify_history_deal(std::uint32_t entry) {
+    constexpr std::uint32_t kDealEntryIn = 0;
+    constexpr std::uint32_t kDealEntryOut = 1;
+    constexpr std::uint32_t kDealEntryInOut = 2;
+    constexpr std::uint32_t kDealEntryOutBy = 3;
+    switch (entry) {
+    case kDealEntryIn:
+        return ManagedHistoryDealRole::entry;
+    case kDealEntryOut:
+    case kDealEntryOutBy:
+        return ManagedHistoryDealRole::exit;
+    case kDealEntryInOut:
+        return ManagedHistoryDealRole::inout;
+    default:
+        return ManagedHistoryDealRole::unknown;
+    }
+}
+
+/// \brief Checks whether a classified deal belongs to the requested direction.
+bool matches_history_deal_direction(ManagedHistoryDealRole role,
+                                    bool entry_direction) {
+    return (entry_direction && role == ManagedHistoryDealRole::entry) ||
+           (!entry_direction && role == ManagedHistoryDealRole::exit);
+}
+
 bool is_result_pending(const OperationRecord &record) {
     return record.journal_state == JournalState::result_persisted ||
            record.journal_state == JournalState::reconciling;
@@ -1069,10 +1097,6 @@ ManagedTradeOwner::history_deal_attribution_context(
     std::optional<ObservationWindow> requested_window;
     std::vector<std::uint64_t> anchor_tickets;
     std::size_t history_deal_predicate_count = 0;
-    constexpr std::uint32_t kDealEntryIn = 0;
-    constexpr std::uint32_t kDealEntryOut = 1;
-    constexpr std::uint32_t kDealEntryInOut = 2;
-    constexpr std::uint32_t kDealEntryOutBy = 3;
     constexpr std::uint64_t kRequiredDealFields =
         MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
         MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
@@ -1122,12 +1146,13 @@ ManagedTradeOwner::history_deal_attribution_context(
             deals.begin(), deals.end(), [anchor](const Mt5DealSnapshot &deal) {
                 return deal.ticket == anchor;
             });
-        const bool valid_entry = found != deals.end() &&
-                                 (found->entry == kDealEntryIn ||
-                                  found->entry == kDealEntryInOut);
-        const bool valid_exit = found != deals.end() &&
-                                (found->entry == kDealEntryOut ||
-                                 found->entry == kDealEntryOutBy);
+        const auto role = found == deals.end()
+                              ? ManagedHistoryDealRole::unknown
+                              : classify_history_deal(found->entry);
+        const bool valid_direction =
+            found != deals.end() &&
+            matches_history_deal_direction(
+                role, direction == DealDirection::entry);
         if (found == deals.end() ||
             worker.graph().history_deal_evidence_revision(found->ticket) <=
                 baseline->history_deals_revision() ||
@@ -1136,7 +1161,7 @@ ManagedTradeOwner::history_deal_attribution_context(
             found->position_id == 0 ||
             found->time_msc < requested_window->from_msc ||
             found->time_msc > requested_window->to_msc ||
-            (direction == DealDirection::entry ? !valid_entry : !valid_exit))
+            !valid_direction)
             return std::nullopt;
         if (!order_selected) {
             order_ticket = found->order_ticket;
@@ -1164,10 +1189,6 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
     const auto &baseline = worker.effective_baseline();
     if (!baseline)
         return std::nullopt;
-    constexpr std::uint32_t kDealEntryIn = 0;
-    constexpr std::uint32_t kDealEntryOut = 1;
-    constexpr std::uint32_t kDealEntryInOut = 2;
-    constexpr std::uint32_t kDealEntryOutBy = 3;
     constexpr std::uint64_t kRequiredDealFields =
         MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
         MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
@@ -1185,11 +1206,11 @@ std::optional<managed_trade::Volume> ManagedTradeOwner::history_deal_volume(
             continue;
         if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
             return std::nullopt;
-        const bool entry_deal = deal.entry == kDealEntryIn ||
-                                deal.entry == kDealEntryInOut;
-        const bool exit_deal = deal.entry == kDealEntryOut ||
-                               deal.entry == kDealEntryOutBy;
-        if (direction == DealDirection::entry ? !entry_deal : !exit_deal)
+        const auto role = classify_history_deal(deal.entry);
+        if (role == ManagedHistoryDealRole::inout)
+            return std::nullopt;
+        if (!matches_history_deal_direction(
+                role, direction == DealDirection::entry))
             continue;
         if (!std::isfinite(deal.volume) || deal.volume <= 0.0)
             return std::nullopt;
@@ -1215,10 +1236,6 @@ ManagedTradeOwner::history_deal_cumulative_volume(
     if (!context)
         return std::nullopt;
 
-    constexpr std::uint32_t kDealEntryIn = 0;
-    constexpr std::uint32_t kDealEntryOut = 1;
-    constexpr std::uint32_t kDealEntryInOut = 2;
-    constexpr std::uint32_t kDealEntryOutBy = 3;
     constexpr std::uint64_t kRequiredDealFields =
         MT5BRIDGE_DEAL_KNOWN_TICKET | MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
         MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
@@ -1234,11 +1251,11 @@ ManagedTradeOwner::history_deal_cumulative_volume(
             continue;
         if ((deal.known_fields & kRequiredDealFields) != kRequiredDealFields)
             return std::nullopt;
-        const bool entry_deal = deal.entry == kDealEntryIn ||
-                                deal.entry == kDealEntryInOut;
-        const bool exit_deal = deal.entry == kDealEntryOut ||
-                               deal.entry == kDealEntryOutBy;
-        if (direction == DealDirection::entry ? !entry_deal : !exit_deal)
+        const auto role = classify_history_deal(deal.entry);
+        if (role == ManagedHistoryDealRole::inout)
+            return std::nullopt;
+        if (!matches_history_deal_direction(
+                role, direction == DealDirection::entry))
             continue;
         if (!std::isfinite(deal.volume) || deal.volume <= 0.0)
             return std::nullopt;

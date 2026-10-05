@@ -553,6 +553,86 @@ int main() {
                     deal_owner.state().pending_remainder_volume == 0,
                 "fresh attributed history deals did not prove a full fill");
 
+        // A reversal deal carries one broker volume for both the closing and
+        // opening legs.  Without an attribution ledger, managed OPEN
+        // settlement must leave that operation unresolved rather than count
+        // the whole INOUT volume as a fresh entry.
+        MemoryStore inout_open_store;
+        auto inout_open_provider = std::make_unique<FakeObservationProvider>(
+            std::vector<mt5bridge::ObservationBatch>{
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(operation_account, deal_window, {}),
+                history_deals_batch(
+                    operation_account, deal_window,
+                    {history_deal(760, 960, 961, 5.0, 2)})});
+        mt5bridge::ObservationCoordinator inout_open_coordinator(
+            *inout_open_provider, operation_account);
+        const auto inout_open_first =
+            inout_open_coordinator.refresh(deal_collection);
+        const auto inout_open_second =
+            inout_open_coordinator.refresh(deal_collection);
+        require(inout_open_first.sample && inout_open_second.sample,
+                "INOUT open baseline setup failed");
+        const auto inout_open_consistency =
+            mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*inout_open_first.sample, *inout_open_second.sample},
+                deal_consistency_request);
+        require(inout_open_consistency.consistent() &&
+                    inout_open_consistency.proof,
+                "INOUT open consistency proof setup failed");
+        mt5bridge::OperationJournal inout_open_journal(inout_open_store);
+        mt5bridge::DispatchAdmissionBarrier inout_open_admission(
+            inout_open_journal, inout_open_coordinator.graph(), scope);
+        mt5bridge::runtime::OneShotDispatchBackend inout_open_backend;
+        FakeTransport inout_open_transport;
+        inout_open_transport.next.reconciliation_bindings = {{551, 760}};
+        FakeAccountProbe inout_open_probe({operation_account, operation_account});
+        mt5bridge::managed_trade::ManagedTradeState inout_open_state;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &inout_open_state, mt5bridge::managed_trade::TradeId{54}, 5,
+                    5, 4),
+                "INOUT open state initialization failed");
+        mt5bridge::dispatch::ManagedTradeOwner inout_open_owner(
+            inout_open_state, operation_account, inout_open_journal,
+            inout_open_admission, inout_open_backend, inout_open_probe, lease,
+            inout_open_transport);
+        const auto inout_open_predicate =
+            mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 551,
+                deal_window);
+        mt5bridge::dispatch::ManagedTradeIntent inout_open_intent{
+            {0x54},
+            {operation_account, inout_open_coordinator.capture_baseline(),
+             {inout_open_predicate}, mt5bridge::OperationState::filled}};
+        require(inout_open_owner.prepare_open(5, std::move(inout_open_intent))
+                        .status == mt5bridge::dispatch::OwnerStepStatus::prepared,
+                "INOUT open owner did not prepare the slice");
+        mt5bridge::DispatchAdmissionRequest inout_open_ready;
+        inout_open_ready.current_account = operation_account;
+        inout_open_ready.environment_proof = inout_open_consistency.proof;
+        const auto inout_open_executed =
+            inout_open_owner.execute_pending(inout_open_ready);
+        require(inout_open_executed.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    inout_open_executed.key,
+                "INOUT open owner did not reach reconciliation");
+        mt5bridge::OperationReconciliationWorker inout_open_worker(
+            inout_open_journal, *inout_open_executed.key,
+            inout_open_coordinator, deal_collection);
+        const auto inout_open_settled =
+            inout_open_owner.settle_reconciliation(inout_open_worker);
+        require(inout_open_settled.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    inout_open_settled.record &&
+                    inout_open_settled.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    inout_open_settled.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    inout_open_owner.state().open_volume == 0,
+                "INOUT deal was misattributed as a pure OPEN fill");
+
         auto partial_provider = std::make_unique<FakeObservationProvider>(
             std::vector<mt5bridge::ObservationBatch>{
                 history_deals_batch(operation_account, deal_window, {}),
@@ -974,6 +1054,8 @@ int main() {
                 history_deals_batch(operation_account, deal_window, {}),
                 history_deals_batch(operation_account, deal_window, {}),
                 history_deals_batch(operation_account, deal_window,
+                                    {history_deal(801, 901, 902, 2.0, 2)}),
+                history_deals_batch(operation_account, deal_window,
                                     {history_deal(801, 901, 902, 2.0, 1)}),
                 history_deals_batch(operation_account, deal_window,
                                     {history_deal(801, 901, 902, 2.0, 1),
@@ -1024,8 +1106,22 @@ int main() {
                 "close owner did not reach reconciliation");
         mt5bridge::OperationReconciliationWorker close_worker(
             close_journal, *close_executed.key, close_coordinator, deal_collection);
-        const auto close_partial =
+        const auto close_inout =
             close_owner.settle_close_reconciliation(close_worker);
+        require(close_inout.status ==
+                    mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                    close_inout.record &&
+                    close_inout.record->journal_state ==
+                        mt5bridge::JournalState::reconciling &&
+                    close_inout.record->operation_state ==
+                        mt5bridge::OperationState::reconciling &&
+                    close_owner.state().open_volume == 5,
+                "INOUT deal was misattributed as a pure CLOSE fill");
+
+        mt5bridge::OperationReconciliationWorker close_partial_worker(
+            close_journal, *close_executed.key, close_coordinator, deal_collection);
+        const auto close_partial =
+            close_owner.settle_close_reconciliation(close_partial_worker);
         require(close_partial.status ==
                     mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
                     close_partial.record && close_partial.record->operation_kind ==

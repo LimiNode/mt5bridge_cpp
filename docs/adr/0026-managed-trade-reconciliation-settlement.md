@@ -30,7 +30,9 @@ that correlation. A caller-chosen deal ticket is never semantic settlement
 evidence. The owner uses the bound ticket only as an anchor: it attributes all
 fresh history deals linked to the anchor's `DEAL_ORDER`, requires known
 `DEAL_ENTRY`, `DEAL_VOLUME`, and `DEAL_TIME`, ignores exit deals, and sums the
-remaining entry (`IN`/`INOUT`) volumes. Thus active-order presence, an
+remaining entry (`IN`) volumes. A `DEAL_ENTRY_INOUT` reversal is left
+unresolved: its single broker volume cannot be split into closing and opening
+legs without a separate attribution ledger. Thus active-order presence, an
 unlinked arbitrary history row, or a pre-bound deal ticket cannot settle the
 operation by itself. The logical managed-trade volume is intentionally an
 integer in this slice; a non-integral or otherwise malformed broker total is

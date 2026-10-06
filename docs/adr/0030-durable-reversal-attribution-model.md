@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted as the design boundary for a future `DEAL_ENTRY_INOUT` implementation;
-runtime and ledger implementation remain deferred.
+Accepted as the design boundary for `DEAL_ENTRY_INOUT`. The broker-only durable
+record and immutable file-store contract are implemented; managed allocation
+and runtime settlement remain deferred.
 
 ## Context
 
@@ -32,6 +33,7 @@ broker reversal record with at least:
 ```text
 account key and account margin mode
 broker deal ticket and order ticket
+DEAL_ENTRY = INOUT
 DEAL_POSITION_ID
 pre-deal POSITION_IDENTIFIER, direction, and volume
 post-deal POSITION_IDENTIFIER, direction, and volume
@@ -52,6 +54,14 @@ The broker decomposition record and any later managed allocation are committed
 as separate durable facts with an explicit link. A later snapshot or restart
 must replay the broker record and the allocation link, not derive a second pair
 of legs from the same deal ticket.
+
+The first implementation slice provides `BrokerReversalObservation`,
+`BrokerReversalRecord`, and `DurableBrokerReversalStore`. The observation
+factory accepts already step-normalized exact volumes, derives the two broker
+legs once, and rejects contradictory evidence before persistence. The file
+store uses an immutable account/deal key, a checksummed versioned envelope,
+atomic replacement, duplicate-idempotent commit, conflict detection, and
+all-or-nothing scan for restart recovery.
 
 The model is account-mode aware:
 
@@ -81,9 +91,10 @@ For an accepted broker decomposition, the following must hold:
    proven close leg is accounted for; an unexplained residual is ambiguous.
 4. The position direction flips and the pre/post position evidence is
    consistent with the selected account mode.
-5. `POSITION_IDENTIFIER` continuity and the deal's `DEAL_POSITION_ID` mapping
-   are explicitly known; a generic symbol, ticket, or order match is
-   insufficient.
+5. The pre- and post-deal `POSITION_IDENTIFIER` are the same continuous
+   identity, and `DEAL_POSITION_ID` equals that identifier. A generic symbol,
+   ticket, or order match is insufficient; identity replacement is outside
+   this bounded slice.
 6. The decomposition is bound to one account, deal ticket, and graph
    provenance chain. Applying the same deal ticket or durable broker record
    twice is a no-op or a fail-closed conflict; it cannot increase either leg
@@ -119,18 +130,27 @@ or `OUT`.
 
 ## Verification boundary
 
-The implementation slice following this ADR must add focused regressions for:
+The broker-only implementation now has focused regressions for:
 
 - a proven netting reversal where the two broker legs exactly reconstruct
   `DEAL_VOLUME` and match pre/post position evidence;
-- a broker reversal whose ownership is split across managed and external
-  exposure, leaving managed allocation unresolved;
 - an external or concurrent position mutation between the two snapshots;
 - duplicate refresh and restart replay of one deal ticket;
 - hedging observations with independent position identities; and
-- incomplete or contradictory provenance, which must remain unresolved.
+- incomplete or contradictory provenance, which must remain unresolved; and
+- duplicate commit, conflicting decomposition, and restart load of one durable
+  broker record.
 
-Until those tests and a durable record schema exist, `DEAL_ENTRY_INOUT` stays
-rejected by the managed settlement boundary as specified by
-[ADR-0026](0026-managed-trade-reconciliation-settlement.md) and
+The remaining runtime slice must connect fresh `ObservationGraph` evidence to
+this record without changing managed exposure. It must still add regressions
+for:
+
+- a broker reversal whose ownership is split across managed and external
+  exposure, leaving managed allocation unresolved;
+- an external or concurrent position mutation between the two snapshots; and
+- hedging observations with independent position identities.
+
+Until that runtime integration and later managed allocation proof exist,
+`DEAL_ENTRY_INOUT` stays rejected by the managed settlement boundary as
+specified by [ADR-0026](0026-managed-trade-reconciliation-settlement.md) and
 [ADR-0029](0029-durable-exit-settlement.md).

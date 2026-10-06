@@ -63,6 +63,16 @@ store uses an immutable account/deal key, a checksummed versioned envelope,
 atomic replacement, duplicate-idempotent commit, conflict detection, and
 all-or-nothing scan for restart recovery.
 
+The runtime integration accepts two sequential `ObservationSample` values from
+one `ObservationGraph`. The post sample must carry the explicit causal
+history window containing the target deal; both samples must carry authoritative
+position domains, and the adapter requires one matching pre/post position,
+continuous identity, complete deal fields, and an exact symbol-volume
+normalization proof. Only after `derive_broker_reversal_record()` succeeds does
+it call `DurableBrokerReversalStore::commit()`. This path does not infer a
+managed `TradeId`, mutate managed exposure, or choose an ownership allocation
+policy.
+
 The model is account-mode aware:
 
 - On a netting account, `DEAL_POSITION_ID` together with the pre/post
@@ -141,9 +151,15 @@ The broker-only implementation now has focused regressions for:
 - duplicate commit, conflicting decomposition, and restart load of one durable
   broker record.
 
-The remaining runtime slice must connect fresh `ObservationGraph` evidence to
-this record without changing managed exposure. It must still add regressions
-for:
+The runtime adapter now connects fresh `ObservationGraph` evidence to this
+record without changing managed exposure. Its regressions cover:
+
+- same-graph, revision-ordered pre/post samples with an explicit causal
+  history window;
+- foreign-graph samples, duplicate position identities, non-INOUT deals, and
+  non-step-normalized volumes remaining unresolved.
+
+The later managed allocation slice must still add regressions for:
 
 - a broker reversal whose ownership is split across managed and external
   exposure, leaving managed allocation unresolved;

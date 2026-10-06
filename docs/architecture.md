@@ -99,7 +99,8 @@ include/
     ├── reconciliation/{graph,engine,coordinator,worker,
     │                  environment_consistency}.hpp
     ├── dispatch.hpp
-    └── dispatch/{journal,file_journal_store,operation_worker}.hpp
+    └── dispatch/{journal,file_journal_store,broker_reversal,
+                  broker_reversal_reconciliation,operation_worker}.hpp
 
 src/
 ├── bridge/mt5_bridge.cpp
@@ -170,6 +171,12 @@ The bounded cross-view environment policy is specified in
 observation batches for account continuity, direct identity-link conflicts,
 and a repeated stable evidence signature; it does not claim that MT5 supplied
 an atomic snapshot.
+The broker-only `DEAL_ENTRY_INOUT` integration boundary is specified in
+[ADR-0030](adr/0030-durable-reversal-attribution-model.md) and exposed by
+`include/mt5bridge/dispatch/broker_reversal_reconciliation.hpp`. It accepts
+only same-graph, revision-ordered pre/post samples with an explicit causal
+history window and exact volume-step proof, then commits a durable broker
+decomposition without assigning managed ownership or changing exposure.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

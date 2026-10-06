@@ -222,6 +222,17 @@ This policy still does not claim an atomic MT5 snapshot and does not call or
 authorize `order_send`; its contract is recorded in
 [`docs/adr/0010-environment-consistency.md`](docs/adr/0010-environment-consistency.md).
 
+For a proven netting `DEAL_ENTRY_INOUT`, the focused dispatch adapter
+`<mt5bridge/dispatch/broker_reversal_reconciliation.hpp>` accepts only two
+sequential `ObservationSample` values from the same graph. The caller supplies
+the causal post-action history window and an exact symbol-volume normalization
+proof; the adapter requires one matching deal, continuous
+`POSITION_IDENTIFIER`, matching `DEAL_POSITION_ID`, and complete pre/post
+position evidence before deriving and committing the broker-only reversal
+record. It never assigns a managed `TradeId`, changes managed exposure, or
+selects FIFO/LIFO/pro-rata ownership policy. Ambiguous, stale, non-INOUT, and
+non-step-normalized evidence remains unresolved.
+
 This Stage 2 slice adds `mt5bridge::OperationJournal` and
 `mt5bridge::DispatchAdmissionBarrier`. The journal durably records the opaque
 operation intent, AccountKey, managed IDs, and write-ahead states through a

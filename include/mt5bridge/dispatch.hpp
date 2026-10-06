@@ -6,6 +6,7 @@
 #include "dispatch/journal.hpp"
 #include "dispatch/journal_store.hpp"
 #include "dispatch/broker_reversal.hpp"
+#include "dispatch/broker_reversal_reconciliation.hpp"
 #include "dispatch/lease.hpp"
 #include "dispatch/admission.hpp"
 #include "dispatch/file_journal_store.hpp"

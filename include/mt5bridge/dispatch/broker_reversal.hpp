@@ -74,6 +74,7 @@ enum class BrokerDealEntry : std::uint32_t {
     out = 1,   ///< Deal closes a position.
     inout = 2, ///< Deal reverses a netting position.
     out_by = 3, ///< Deal closes by an opposite position.
+    unknown = 0xffffffffU, ///< Deal entry evidence was not supplied.
 };
 
 /// \struct BrokerVolume
@@ -181,7 +182,7 @@ struct BrokerReversalObservation {
     std::uint64_t deal_ticket = 0; ///< MT5 DEAL_TICKET.
     std::uint64_t order_ticket = 0; ///< MT5 DEAL_ORDER.
     std::uint64_t deal_position_id = 0; ///< MT5 DEAL_POSITION_ID.
-    BrokerDealEntry deal_entry = BrokerDealEntry::inout;
+    BrokerDealEntry deal_entry = BrokerDealEntry::unknown;
     std::uint64_t pre_position_identifier = 0;
     BrokerPositionDirection pre_direction = BrokerPositionDirection::unknown;
     BrokerVolume pre_volume;
@@ -206,7 +207,7 @@ struct BrokerReversalRecord {
     std::uint64_t deal_ticket = 0; ///< MT5 DEAL_TICKET.
     std::uint64_t order_ticket = 0; ///< MT5 DEAL_ORDER.
     std::uint64_t deal_position_id = 0; ///< MT5 DEAL_POSITION_ID.
-    BrokerDealEntry deal_entry = BrokerDealEntry::inout;
+    BrokerDealEntry deal_entry = BrokerDealEntry::unknown;
     std::uint64_t pre_position_identifier = 0; ///< POSITION_IDENTIFIER before deal.
     BrokerPositionDirection pre_direction = BrokerPositionDirection::unknown;
     BrokerVolume pre_volume;

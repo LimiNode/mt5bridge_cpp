@@ -5,8 +5,10 @@
 
 #include "dispatch/journal.hpp"
 #include "dispatch/journal_store.hpp"
+#include "dispatch/broker_reversal.hpp"
 #include "dispatch/lease.hpp"
 #include "dispatch/admission.hpp"
 #include "dispatch/file_journal_store.hpp"
+#include "dispatch/file_broker_reversal_store.hpp"
 #include "dispatch/operation_recovery.hpp"
 #include "dispatch/operation_worker.hpp"

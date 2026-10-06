@@ -118,6 +118,12 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_file_journal_store
              COMMAND mt5bridge_file_journal_store_test)
+    add_executable(mt5bridge_broker_reversal_store_test
+                   tests/broker_reversal_store_test.cpp)
+    target_link_libraries(mt5bridge_broker_reversal_store_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
+    add_test(NAME mt5bridge_broker_reversal_store
+             COMMAND mt5bridge_broker_reversal_store_test)
     add_executable(mt5bridge_dispatch_admission_header_only_test
                    tests/dispatch_admission_header_only_test.cpp)
     target_link_libraries(mt5bridge_dispatch_admission_header_only_test PRIVATE
@@ -150,6 +156,7 @@ if(BUILD_TESTING)
                    tests/header_self_containment_dispatch_operation_worker.cpp
                    tests/header_self_containment_dispatch_operation_recovery.cpp
                    tests/header_self_containment_dispatch_journal_store.cpp
+                   tests/header_self_containment_dispatch_broker_reversal.cpp
                    tests/header_self_containment_dispatch_lease.cpp
                    tests/header_self_containment_dispatch_admission.cpp
                    tests/header_self_containment_environment_consistency.cpp

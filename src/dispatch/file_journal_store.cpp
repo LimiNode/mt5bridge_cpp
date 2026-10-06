@@ -17,11 +17,13 @@
 #endif
 
 #include <mt5bridge/dispatch/file_journal_store.hpp>
+#include <mt5bridge/dispatch/file_broker_reversal_store.hpp>
 
 namespace mt5bridge {
 namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'J', 'N', 'L', '0', '1'}};
+constexpr std::array<char, 8> kBrokerReversalMagic{{'M', 'T', '5', 'R', 'V', 'L', '0', '1'}};
 constexpr std::uint32_t kLegacyFormatVersion = 1;
 constexpr std::uint32_t kCausalFormatVersion = 2;
 constexpr std::uint32_t kManagedVolumeFormatVersion = 3;
@@ -35,6 +37,13 @@ constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
 constexpr std::size_t kMaxBodyBytes = 2U * (kMaxPayloadBytes + kMaxStringBytes) + 256U;
 constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
+constexpr std::uint32_t kBrokerReversalFormatVersion = 1;
+constexpr std::size_t kBrokerReversalEnvelopeBytes = kBrokerReversalMagic.size() +
+                                                      sizeof(std::uint32_t) +
+                                                      2U * sizeof(std::uint64_t);
+constexpr std::size_t kMaxBrokerReversalBodyBytes = 1024U;
+constexpr std::size_t kMaxBrokerReversalRecordBytes =
+    kBrokerReversalEnvelopeBytes + kMaxBrokerReversalBodyBytes;
 constexpr std::size_t kEpochEnvelopeBytes = kEpochMagic.size() + sizeof(std::uint32_t) +
                                              2U * sizeof(std::uint64_t);
 constexpr std::size_t kMaxEpochRecordBytes = kEpochEnvelopeBytes + kMaxStringBytes +
@@ -418,6 +427,142 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     return record.valid() ? std::optional<OperationRecord>(std::move(record)) : std::nullopt;
 }
 
+void append_broker_volume(std::vector<std::uint8_t> &bytes,
+                          const BrokerVolume &volume) {
+    append_u64(bytes, volume.units);
+    append_u32(bytes, volume.scale);
+    append_u64(bytes, volume.step_units);
+}
+
+bool read_broker_volume(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
+                        BrokerVolume &volume) {
+    return read_u64(bytes, offset, volume.units) &&
+           read_u32(bytes, offset, volume.scale) &&
+           read_u64(bytes, offset, volume.step_units);
+}
+
+std::optional<std::vector<std::uint8_t>> serialize_broker_reversal_body(
+    const BrokerReversalRecord &record) {
+    if (!record.valid())
+        return std::nullopt;
+    std::vector<std::uint8_t> body;
+    body.reserve(256 + record.account.server.size() + record.symbol.size());
+    if (!append_bytes(body, record.account.server) || !append_bytes(body, record.symbol))
+        return std::nullopt;
+    append_u64(body, record.account.login);
+    append_u32(body, static_cast<std::uint32_t>(record.margin_mode));
+    append_u64(body, record.deal_ticket);
+    append_u64(body, record.order_ticket);
+    append_u64(body, record.deal_position_id);
+    append_u32(body, static_cast<std::uint32_t>(record.deal_position_binding));
+    append_u64(body, record.pre_position_identifier);
+    append_u32(body, static_cast<std::uint32_t>(record.pre_direction));
+    append_broker_volume(body, record.pre_volume);
+    append_u64(body, record.post_position_identifier);
+    append_u32(body, static_cast<std::uint32_t>(record.post_direction));
+    append_broker_volume(body, record.post_volume);
+    append_u32(body, static_cast<std::uint32_t>(record.deal_direction));
+    append_u32(body, static_cast<std::uint32_t>(record.identity_relation));
+    append_broker_volume(body, record.deal_volume);
+    append_broker_volume(body, record.broker_close_leg);
+    append_broker_volume(body, record.broker_reverse_open_leg);
+    append_u64(body, record.provenance.graph_instance_id);
+    append_u64(body, record.provenance.pre_graph_revision);
+    append_u64(body, record.provenance.post_graph_revision);
+    append_u64(body, record.provenance.pre_positions_revision);
+    append_u64(body, record.provenance.post_positions_revision);
+    append_u64(body, record.provenance.history_deals_revision);
+    append_u64(body, record.provenance.evidence_digest);
+    return body.size() <= kMaxBrokerReversalBodyBytes
+               ? std::optional<std::vector<std::uint8_t>>(std::move(body))
+               : std::nullopt;
+}
+
+std::optional<std::vector<std::uint8_t>> serialize_broker_reversal(
+    const BrokerReversalRecord &record) {
+    const auto body = serialize_broker_reversal_body(record);
+    if (!body)
+        return std::nullopt;
+    std::vector<std::uint8_t> result;
+    result.reserve(kBrokerReversalEnvelopeBytes + body->size());
+    result.insert(result.end(), kBrokerReversalMagic.begin(), kBrokerReversalMagic.end());
+    append_u32(result, kBrokerReversalFormatVersion);
+    append_u64(result, static_cast<std::uint64_t>(body->size()));
+    append_u64(result, checksum(*body));
+    result.insert(result.end(), body->begin(), body->end());
+    return result;
+}
+
+std::optional<BrokerReversalRecord> deserialize_broker_reversal(
+    const std::vector<std::uint8_t> &bytes) {
+    if (bytes.size() < kBrokerReversalEnvelopeBytes ||
+        bytes.size() > kMaxBrokerReversalRecordBytes ||
+        !std::equal(kBrokerReversalMagic.begin(), kBrokerReversalMagic.end(), bytes.begin()))
+        return std::nullopt;
+
+    std::size_t offset = kBrokerReversalMagic.size();
+    std::uint32_t version = 0;
+    std::uint64_t body_size = 0;
+    std::uint64_t expected_checksum = 0;
+    if (!read_u32(bytes, offset, version) || !read_u64(bytes, offset, body_size) ||
+        !read_u64(bytes, offset, expected_checksum) ||
+        version != kBrokerReversalFormatVersion ||
+        body_size > kMaxBrokerReversalBodyBytes || body_size != bytes.size() - offset)
+        return std::nullopt;
+
+    const std::vector<std::uint8_t> body(
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset), bytes.end());
+    if (checksum(body) != expected_checksum)
+        return std::nullopt;
+
+    BrokerReversalRecord record;
+    std::size_t body_offset = 0;
+    std::uint32_t margin_mode = 0;
+    std::uint32_t deal_binding = 0;
+    std::uint32_t pre_direction = 0;
+    std::uint32_t post_direction = 0;
+    std::uint32_t deal_direction = 0;
+    std::uint32_t identity_relation = 0;
+    if (!read_string(body, body_offset, record.account.server) ||
+        !read_string(body, body_offset, record.symbol) ||
+        !read_u64(body, body_offset, record.account.login) ||
+        !read_u32(body, body_offset, margin_mode) ||
+        !read_u64(body, body_offset, record.deal_ticket) ||
+        !read_u64(body, body_offset, record.order_ticket) ||
+        !read_u64(body, body_offset, record.deal_position_id) ||
+        !read_u32(body, body_offset, deal_binding) ||
+        !read_u64(body, body_offset, record.pre_position_identifier) ||
+        !read_u32(body, body_offset, pre_direction) ||
+        !read_broker_volume(body, body_offset, record.pre_volume) ||
+        !read_u64(body, body_offset, record.post_position_identifier) ||
+        !read_u32(body, body_offset, post_direction) ||
+        !read_broker_volume(body, body_offset, record.post_volume) ||
+        !read_u32(body, body_offset, deal_direction) ||
+        !read_u32(body, body_offset, identity_relation) ||
+        !read_broker_volume(body, body_offset, record.deal_volume) ||
+        !read_broker_volume(body, body_offset, record.broker_close_leg) ||
+        !read_broker_volume(body, body_offset, record.broker_reverse_open_leg) ||
+        !read_u64(body, body_offset, record.provenance.graph_instance_id) ||
+        !read_u64(body, body_offset, record.provenance.pre_graph_revision) ||
+        !read_u64(body, body_offset, record.provenance.post_graph_revision) ||
+        !read_u64(body, body_offset, record.provenance.pre_positions_revision) ||
+        !read_u64(body, body_offset, record.provenance.post_positions_revision) ||
+        !read_u64(body, body_offset, record.provenance.history_deals_revision) ||
+        !read_u64(body, body_offset, record.provenance.evidence_digest) ||
+        body_offset != body.size())
+        return std::nullopt;
+    record.margin_mode = static_cast<BrokerMarginMode>(margin_mode);
+    record.deal_position_binding =
+        static_cast<BrokerDealPositionBinding>(deal_binding);
+    record.pre_direction = static_cast<BrokerPositionDirection>(pre_direction);
+    record.post_direction = static_cast<BrokerPositionDirection>(post_direction);
+    record.deal_direction = static_cast<BrokerPositionDirection>(deal_direction);
+    record.identity_relation =
+        static_cast<BrokerPositionIdentityRelation>(identity_relation);
+    return record.valid() ? std::optional<BrokerReversalRecord>(std::move(record))
+                          : std::nullopt;
+}
+
 #if defined(_WIN32)
 
 std::string win32_error(const char *operation, DWORD error = GetLastError()) {
@@ -464,9 +609,8 @@ private:
 
 enum class ReadStatus { absent, valid, malformed, io_error };
 
-ReadStatus read_file(const std::filesystem::path &path,
-                     std::optional<OperationRecord> &record,
-                     std::string &error) {
+ReadStatus read_bytes_file(const std::filesystem::path &path, std::size_t max_bytes,
+                           std::vector<std::uint8_t> &bytes, std::string &error) {
     const HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ,
                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -484,13 +628,12 @@ ReadStatus read_file(const std::filesystem::path &path,
         CloseHandle(handle);
         return ReadStatus::io_error;
     }
-    if (size.QuadPart < 0 ||
-        static_cast<unsigned long long>(size.QuadPart) > kMaxRecordBytes) {
-        error = "journal record exceeds storage limits";
+    if (size.QuadPart < 0 || static_cast<unsigned long long>(size.QuadPart) > max_bytes) {
+        error = "durable record exceeds storage limits";
         CloseHandle(handle);
         return ReadStatus::malformed;
     }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size.QuadPart));
+    bytes.resize(static_cast<std::size_t>(size.QuadPart));
     std::size_t offset = 0;
     while (offset < bytes.size()) {
         const DWORD requested = static_cast<DWORD>(
@@ -504,8 +647,29 @@ ReadStatus read_file(const std::filesystem::path &path,
         offset += read;
     }
     CloseHandle(handle);
+    return ReadStatus::valid;
+}
 
+ReadStatus read_file(const std::filesystem::path &path,
+                     std::optional<OperationRecord> &record,
+                     std::string &error) {
+    std::vector<std::uint8_t> bytes;
+    const auto status = read_bytes_file(path, kMaxRecordBytes, bytes, error);
+    if (status != ReadStatus::valid)
+        return status;
     record = deserialize_record(bytes);
+    return record ? ReadStatus::valid : ReadStatus::malformed;
+}
+
+ReadStatus read_broker_reversal_file(
+    const std::filesystem::path &path,
+    std::optional<BrokerReversalRecord> &record,
+    std::string &error) {
+    std::vector<std::uint8_t> bytes;
+    const auto status = read_bytes_file(path, kMaxBrokerReversalRecordBytes, bytes, error);
+    if (status != ReadStatus::valid)
+        return status;
+    record = deserialize_broker_reversal(bytes);
     return record ? ReadStatus::valid : ReadStatus::malformed;
 }
 
@@ -683,6 +847,18 @@ std::filesystem::path record_path(const std::filesystem::path &directory,
     const std::string suffix = "op-" + hex_u64(fnv1a(key.account.server)) + "-" +
                                hex_u64(key.account.login) + "-" + hex_u64(key.trade_id) + "-" +
                                hex_u64(key.operation_id) + ".bin";
+#if defined(_WIN32)
+    return directory / widen_ascii(suffix);
+#else
+    return directory / suffix;
+#endif
+}
+
+std::filesystem::path broker_reversal_path(const std::filesystem::path &directory,
+                                           const BrokerReversalKey &key) {
+    const std::string suffix = "rev-" + hex_u64(fnv1a(key.account.server)) + "-" +
+                               hex_u64(key.account.login) + "-" +
+                               hex_u64(key.deal_ticket) + ".bin";
 #if defined(_WIN32)
     return directory / widen_ascii(suffix);
 #else
@@ -981,6 +1157,202 @@ StoreScanResult WindowsFileJournalStore::scan() const {
 #else
     set_error(last_error_, "WindowsFileJournalStore requires Windows");
     return {StoreScanStatus::io_error, {}};
+#endif
+}
+
+WindowsFileBrokerReversalStore::WindowsFileBrokerReversalStore(
+    std::filesystem::path directory)
+    : directory_(std::move(directory)) {
+#if defined(_WIN32)
+    try {
+        if (directory_.empty()) {
+            set_error(last_error_, "broker reversal directory is empty");
+            return;
+        }
+        const auto absolute_directory = std::filesystem::absolute(directory_);
+        std::filesystem::create_directories(absolute_directory);
+        if (!std::filesystem::is_directory(absolute_directory)) {
+            set_error(last_error_, "broker reversal path is not a directory");
+            return;
+        }
+        directory_ = std::filesystem::weakly_canonical(absolute_directory);
+        ready_ = true;
+    } catch (const std::filesystem::filesystem_error &error) {
+        set_error(last_error_, error.what());
+    }
+#else
+    (void)directory_;
+    set_error(last_error_, "WindowsFileBrokerReversalStore requires Windows");
+#endif
+}
+
+BrokerReversalCommitStatus WindowsFileBrokerReversalStore::commit(
+    const BrokerReversalRecord &record) {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "broker reversal store is unavailable");
+        return BrokerReversalCommitStatus::io_error;
+    }
+    if (!record.valid()) {
+        set_error(last_error_, "invalid broker reversal record");
+        return BrokerReversalCommitStatus::invalid_record;
+    }
+    const auto bytes = serialize_broker_reversal(record);
+    if (!bytes) {
+        set_error(last_error_, "broker reversal record exceeds storage limits");
+        return BrokerReversalCommitStatus::invalid_record;
+    }
+
+    FileLock lock(directory_ / L".broker-reversal.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return BrokerReversalCommitStatus::io_error;
+    }
+
+    const auto target = broker_reversal_path(directory_, record.key());
+    std::optional<BrokerReversalRecord> existing;
+    std::string read_error;
+    const auto status = read_broker_reversal_file(target, existing, read_error);
+    if (status == ReadStatus::malformed) {
+        set_error(last_error_, "malformed broker reversal record");
+        return BrokerReversalCommitStatus::invalid_record;
+    }
+    if (status == ReadStatus::io_error) {
+        set_error(last_error_, read_error);
+        return BrokerReversalCommitStatus::io_error;
+    }
+    if (status == ReadStatus::valid && existing) {
+        if (*existing == record)
+            return BrokerReversalCommitStatus::already_committed;
+        return BrokerReversalCommitStatus::conflict;
+    }
+
+    const std::filesystem::path temporary(target.wstring() + L".tmp");
+    DeleteFileW(temporary.c_str());
+    if (!write_file(temporary, *bytes, last_error_))
+        return BrokerReversalCommitStatus::io_error;
+    if (!MoveFileExW(temporary.c_str(), target.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        last_error_ = win32_error("MoveFileExW(broker reversal)");
+        DeleteFileW(temporary.c_str());
+        return BrokerReversalCommitStatus::io_error;
+    }
+    return BrokerReversalCommitStatus::committed;
+#else
+    (void)record;
+    set_error(last_error_, "WindowsFileBrokerReversalStore requires Windows");
+    return BrokerReversalCommitStatus::io_error;
+#endif
+}
+
+BrokerReversalLoadResult WindowsFileBrokerReversalStore::load(
+    const BrokerReversalKey &key) const {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "broker reversal store is unavailable");
+        return {BrokerReversalLoadStatus::io_error, std::nullopt};
+    }
+    if (!key.valid())
+        return {BrokerReversalLoadStatus::invalid_record, std::nullopt};
+
+    FileLock lock(directory_ / L".broker-reversal.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return {BrokerReversalLoadStatus::io_error, std::nullopt};
+    }
+    std::optional<BrokerReversalRecord> record;
+    std::string error;
+    const auto status = read_broker_reversal_file(
+        broker_reversal_path(directory_, key), record, error);
+    if (status == ReadStatus::valid && record && record->key() == key)
+        return {BrokerReversalLoadStatus::found, std::move(record)};
+    if (status == ReadStatus::malformed) {
+        set_error(last_error_, error.empty() ? "malformed broker reversal record" : error);
+        return {BrokerReversalLoadStatus::invalid_record, std::nullopt};
+    }
+    if (status == ReadStatus::io_error) {
+        set_error(last_error_, error);
+        return {BrokerReversalLoadStatus::io_error, std::nullopt};
+    }
+    if (status == ReadStatus::valid) {
+        set_error(last_error_, "broker reversal filename collision");
+        return {BrokerReversalLoadStatus::invalid_record, std::nullopt};
+    }
+    return {BrokerReversalLoadStatus::not_found, std::nullopt};
+#else
+    (void)key;
+    set_error(last_error_, "WindowsFileBrokerReversalStore requires Windows");
+    return {BrokerReversalLoadStatus::io_error, std::nullopt};
+#endif
+}
+
+BrokerReversalScanResult WindowsFileBrokerReversalStore::scan() const {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "broker reversal store is unavailable");
+        return {BrokerReversalScanStatus::io_error, {}};
+    }
+
+    FileLock lock(directory_ / L".broker-reversal.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return {BrokerReversalScanStatus::io_error, {}};
+    }
+
+    std::vector<BrokerReversalRecord> records;
+    try {
+        for (const auto &entry : std::filesystem::directory_iterator(directory_)) {
+            const auto filename = entry.path().filename().wstring();
+            if (entry.path().extension() != L".bin" ||
+                filename.rfind(L"rev-", 0) != 0)
+                continue;
+            if (!entry.is_regular_file()) {
+                set_error(last_error_, "broker reversal record is not a regular file");
+                return {BrokerReversalScanStatus::invalid_record, {}};
+            }
+            std::optional<BrokerReversalRecord> record;
+            std::string error;
+            const auto status = read_broker_reversal_file(entry.path(), record, error);
+            if (status == ReadStatus::malformed) {
+                set_error(last_error_, error.empty() ? "malformed broker reversal record"
+                                                      : error);
+                return {BrokerReversalScanStatus::invalid_record, {}};
+            }
+            if (status != ReadStatus::valid || !record) {
+                set_error(last_error_, error.empty() ? "could not read broker reversal record"
+                                                      : error);
+                return {BrokerReversalScanStatus::io_error, {}};
+            }
+            if (broker_reversal_path(directory_, record->key()).filename() !=
+                    entry.path().filename() ||
+                !record->valid()) {
+                set_error(last_error_, "broker reversal identity or metadata mismatch");
+                return {BrokerReversalScanStatus::invalid_record, {}};
+            }
+            records.push_back(std::move(*record));
+        }
+    } catch (const std::filesystem::filesystem_error &error) {
+        set_error(last_error_, error.what());
+        return {BrokerReversalScanStatus::io_error, {}};
+    }
+
+    std::sort(records.begin(), records.end(),
+              [](const BrokerReversalRecord &left, const BrokerReversalRecord &right) {
+                  return left.key() < right.key();
+              });
+    for (std::size_t index = 1; index < records.size(); ++index) {
+        if (records[index - 1].key() == records[index].key()) {
+            set_error(last_error_, "duplicate broker reversal key");
+            return {BrokerReversalScanStatus::invalid_record, {}};
+        }
+    }
+    return {BrokerReversalScanStatus::complete, std::move(records)};
+#else
+    set_error(last_error_, "WindowsFileBrokerReversalStore requires Windows");
+    return {BrokerReversalScanStatus::io_error, {}};
 #endif
 }
 

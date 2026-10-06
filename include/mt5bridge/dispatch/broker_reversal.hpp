@@ -67,18 +67,13 @@ constexpr bool opposite_broker_position_directions(
             right == BrokerPositionDirection::buy);
 }
 
-/// \enum BrokerPositionIdentityRelation
-/// \brief Describes whether a reversal retained or replaced its position identity.
-enum class BrokerPositionIdentityRelation : std::uint32_t {
-    continuous = 1, ///< Pre and post observations carry one identifier.
-    replaced = 2,   ///< Reversal produced a new position identifier.
-};
-
-/// \enum BrokerDealPositionBinding
-/// \brief Identifies which proven position identity the deal references.
-enum class BrokerDealPositionBinding : std::uint32_t {
-    pre = 1,  ///< DEAL_POSITION_ID matches the pre-deal position.
-    post = 2, ///< DEAL_POSITION_ID matches the post-deal position.
+/// \enum BrokerDealEntry
+/// \brief Broker classification of the deal entry mode.
+enum class BrokerDealEntry : std::uint32_t {
+    in = 0,    ///< Deal opens or adds to a position.
+    out = 1,   ///< Deal closes a position.
+    inout = 2, ///< Deal reverses a netting position.
+    out_by = 3, ///< Deal closes by an opposite position.
 };
 
 /// \struct BrokerVolume
@@ -186,8 +181,7 @@ struct BrokerReversalObservation {
     std::uint64_t deal_ticket = 0; ///< MT5 DEAL_TICKET.
     std::uint64_t order_ticket = 0; ///< MT5 DEAL_ORDER.
     std::uint64_t deal_position_id = 0; ///< MT5 DEAL_POSITION_ID.
-    BrokerDealPositionBinding deal_position_binding =
-        BrokerDealPositionBinding::post;
+    BrokerDealEntry deal_entry = BrokerDealEntry::inout;
     std::uint64_t pre_position_identifier = 0;
     BrokerPositionDirection pre_direction = BrokerPositionDirection::unknown;
     BrokerVolume pre_volume;
@@ -195,8 +189,6 @@ struct BrokerReversalObservation {
     BrokerPositionDirection post_direction = BrokerPositionDirection::unknown;
     BrokerVolume post_volume;
     BrokerPositionDirection deal_direction = BrokerPositionDirection::unknown;
-    BrokerPositionIdentityRelation identity_relation =
-        BrokerPositionIdentityRelation::continuous;
     BrokerVolume deal_volume;
     BrokerReversalProvenance provenance;
 };
@@ -214,8 +206,7 @@ struct BrokerReversalRecord {
     std::uint64_t deal_ticket = 0; ///< MT5 DEAL_TICKET.
     std::uint64_t order_ticket = 0; ///< MT5 DEAL_ORDER.
     std::uint64_t deal_position_id = 0; ///< MT5 DEAL_POSITION_ID.
-    BrokerDealPositionBinding deal_position_binding =
-        BrokerDealPositionBinding::post;
+    BrokerDealEntry deal_entry = BrokerDealEntry::inout;
     std::uint64_t pre_position_identifier = 0; ///< POSITION_IDENTIFIER before deal.
     BrokerPositionDirection pre_direction = BrokerPositionDirection::unknown;
     BrokerVolume pre_volume;
@@ -223,8 +214,6 @@ struct BrokerReversalRecord {
     BrokerPositionDirection post_direction = BrokerPositionDirection::unknown;
     BrokerVolume post_volume;
     BrokerPositionDirection deal_direction = BrokerPositionDirection::unknown;
-    BrokerPositionIdentityRelation identity_relation =
-        BrokerPositionIdentityRelation::continuous;
     BrokerVolume deal_volume;
     BrokerVolume broker_close_leg;
     BrokerVolume broker_reverse_open_leg;
@@ -244,6 +233,7 @@ struct BrokerReversalRecord {
             !valid_broker_position_direction(pre_direction) ||
             !valid_broker_position_direction(post_direction) ||
             !valid_broker_position_direction(deal_direction) ||
+            deal_entry != BrokerDealEntry::inout ||
             !opposite_broker_position_directions(pre_direction, post_direction) ||
             deal_direction != post_direction || !pre_volume.valid() ||
             !post_volume.valid() || !deal_volume.valid() ||
@@ -259,23 +249,8 @@ struct BrokerReversalRecord {
             !provenance.valid())
             return false;
 
-        if (identity_relation == BrokerPositionIdentityRelation::continuous) {
-            if (pre_position_identifier != post_position_identifier)
-                return false;
-        } else if (identity_relation == BrokerPositionIdentityRelation::replaced) {
-            if (pre_position_identifier == post_position_identifier)
-                return false;
-        } else {
-            return false;
-        }
-
-        if (deal_position_binding == BrokerDealPositionBinding::pre) {
-            if (deal_position_id != pre_position_identifier)
-                return false;
-        } else if (deal_position_binding == BrokerDealPositionBinding::post) {
-            if (deal_position_id != post_position_identifier)
-                return false;
-        } else {
+        if (pre_position_identifier != post_position_identifier ||
+            deal_position_id != pre_position_identifier) {
             return false;
         }
 
@@ -301,13 +276,12 @@ struct BrokerReversalRecord {
                symbol == other.symbol && deal_ticket == other.deal_ticket &&
                order_ticket == other.order_ticket &&
                deal_position_id == other.deal_position_id &&
-               deal_position_binding == other.deal_position_binding &&
+               deal_entry == other.deal_entry &&
                pre_position_identifier == other.pre_position_identifier &&
                pre_direction == other.pre_direction && pre_volume == other.pre_volume &&
                post_position_identifier == other.post_position_identifier &&
                post_direction == other.post_direction &&
                post_volume == other.post_volume && deal_direction == other.deal_direction &&
-               identity_relation == other.identity_relation &&
                deal_volume == other.deal_volume &&
                broker_close_leg == other.broker_close_leg &&
                broker_reverse_open_leg == other.broker_reverse_open_leg &&
@@ -327,7 +301,7 @@ inline std::optional<BrokerReversalRecord> derive_broker_reversal_record(
     record.deal_ticket = observation.deal_ticket;
     record.order_ticket = observation.order_ticket;
     record.deal_position_id = observation.deal_position_id;
-    record.deal_position_binding = observation.deal_position_binding;
+    record.deal_entry = observation.deal_entry;
     record.pre_position_identifier = observation.pre_position_identifier;
     record.pre_direction = observation.pre_direction;
     record.pre_volume = observation.pre_volume;
@@ -335,7 +309,6 @@ inline std::optional<BrokerReversalRecord> derive_broker_reversal_record(
     record.post_direction = observation.post_direction;
     record.post_volume = observation.post_volume;
     record.deal_direction = observation.deal_direction;
-    record.identity_relation = observation.identity_relation;
     record.deal_volume = observation.deal_volume;
     record.broker_close_leg = observation.pre_volume;
     record.broker_reverse_open_leg = observation.post_volume;

@@ -33,6 +33,7 @@ broker reversal record with at least:
 ```text
 account key and account margin mode
 broker deal ticket and order ticket
+DEAL_ENTRY = INOUT
 DEAL_POSITION_ID
 pre-deal POSITION_IDENTIFIER, direction, and volume
 post-deal POSITION_IDENTIFIER, direction, and volume
@@ -90,9 +91,10 @@ For an accepted broker decomposition, the following must hold:
    proven close leg is accounted for; an unexplained residual is ambiguous.
 4. The position direction flips and the pre/post position evidence is
    consistent with the selected account mode.
-5. `POSITION_IDENTIFIER` continuity and the deal's `DEAL_POSITION_ID` mapping
-   are explicitly known; a generic symbol, ticket, or order match is
-   insufficient.
+5. The pre- and post-deal `POSITION_IDENTIFIER` are the same continuous
+   identity, and `DEAL_POSITION_ID` equals that identifier. A generic symbol,
+   ticket, or order match is insufficient; identity replacement is outside
+   this bounded slice.
 6. The decomposition is bound to one account, deal ticket, and graph
    provenance chain. Applying the same deal ticket or durable broker record
    twice is a no-op or a fail-closed conflict; it cannot increase either leg

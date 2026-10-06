@@ -37,7 +37,7 @@ constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
 constexpr std::size_t kMaxBodyBytes = 2U * (kMaxPayloadBytes + kMaxStringBytes) + 256U;
 constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
-constexpr std::uint32_t kBrokerReversalFormatVersion = 1;
+constexpr std::uint32_t kBrokerReversalFormatVersion = 2;
 constexpr std::size_t kBrokerReversalEnvelopeBytes = kBrokerReversalMagic.size() +
                                                       sizeof(std::uint32_t) +
                                                       2U * sizeof(std::uint64_t);
@@ -454,7 +454,7 @@ std::optional<std::vector<std::uint8_t>> serialize_broker_reversal_body(
     append_u64(body, record.deal_ticket);
     append_u64(body, record.order_ticket);
     append_u64(body, record.deal_position_id);
-    append_u32(body, static_cast<std::uint32_t>(record.deal_position_binding));
+    append_u32(body, static_cast<std::uint32_t>(record.deal_entry));
     append_u64(body, record.pre_position_identifier);
     append_u32(body, static_cast<std::uint32_t>(record.pre_direction));
     append_broker_volume(body, record.pre_volume);
@@ -462,7 +462,6 @@ std::optional<std::vector<std::uint8_t>> serialize_broker_reversal_body(
     append_u32(body, static_cast<std::uint32_t>(record.post_direction));
     append_broker_volume(body, record.post_volume);
     append_u32(body, static_cast<std::uint32_t>(record.deal_direction));
-    append_u32(body, static_cast<std::uint32_t>(record.identity_relation));
     append_broker_volume(body, record.deal_volume);
     append_broker_volume(body, record.broker_close_leg);
     append_broker_volume(body, record.broker_reverse_open_leg);
@@ -518,11 +517,10 @@ std::optional<BrokerReversalRecord> deserialize_broker_reversal(
     BrokerReversalRecord record;
     std::size_t body_offset = 0;
     std::uint32_t margin_mode = 0;
-    std::uint32_t deal_binding = 0;
+    std::uint32_t deal_entry = 0;
     std::uint32_t pre_direction = 0;
     std::uint32_t post_direction = 0;
     std::uint32_t deal_direction = 0;
-    std::uint32_t identity_relation = 0;
     if (!read_string(body, body_offset, record.account.server) ||
         !read_string(body, body_offset, record.symbol) ||
         !read_u64(body, body_offset, record.account.login) ||
@@ -530,7 +528,7 @@ std::optional<BrokerReversalRecord> deserialize_broker_reversal(
         !read_u64(body, body_offset, record.deal_ticket) ||
         !read_u64(body, body_offset, record.order_ticket) ||
         !read_u64(body, body_offset, record.deal_position_id) ||
-        !read_u32(body, body_offset, deal_binding) ||
+        !read_u32(body, body_offset, deal_entry) ||
         !read_u64(body, body_offset, record.pre_position_identifier) ||
         !read_u32(body, body_offset, pre_direction) ||
         !read_broker_volume(body, body_offset, record.pre_volume) ||
@@ -538,7 +536,6 @@ std::optional<BrokerReversalRecord> deserialize_broker_reversal(
         !read_u32(body, body_offset, post_direction) ||
         !read_broker_volume(body, body_offset, record.post_volume) ||
         !read_u32(body, body_offset, deal_direction) ||
-        !read_u32(body, body_offset, identity_relation) ||
         !read_broker_volume(body, body_offset, record.deal_volume) ||
         !read_broker_volume(body, body_offset, record.broker_close_leg) ||
         !read_broker_volume(body, body_offset, record.broker_reverse_open_leg) ||
@@ -552,13 +549,10 @@ std::optional<BrokerReversalRecord> deserialize_broker_reversal(
         body_offset != body.size())
         return std::nullopt;
     record.margin_mode = static_cast<BrokerMarginMode>(margin_mode);
-    record.deal_position_binding =
-        static_cast<BrokerDealPositionBinding>(deal_binding);
+    record.deal_entry = static_cast<BrokerDealEntry>(deal_entry);
     record.pre_direction = static_cast<BrokerPositionDirection>(pre_direction);
     record.post_direction = static_cast<BrokerPositionDirection>(post_direction);
     record.deal_direction = static_cast<BrokerPositionDirection>(deal_direction);
-    record.identity_relation =
-        static_cast<BrokerPositionIdentityRelation>(identity_relation);
     return record.valid() ? std::optional<BrokerReversalRecord>(std::move(record))
                           : std::nullopt;
 }

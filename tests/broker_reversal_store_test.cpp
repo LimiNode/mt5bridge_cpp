@@ -24,16 +24,15 @@ mt5bridge::BrokerReversalObservation observation() {
     value.symbol = "EURUSD";
     value.deal_ticket = 701;
     value.order_ticket = 702;
-    value.deal_position_id = 801;
-    value.deal_position_binding = mt5bridge::BrokerDealPositionBinding::post;
+    value.deal_position_id = 800;
+    value.deal_entry = mt5bridge::BrokerDealEntry::inout;
     value.pre_position_identifier = 800;
     value.pre_direction = mt5bridge::BrokerPositionDirection::buy;
     value.pre_volume = {500, 2, 1};
-    value.post_position_identifier = 801;
+    value.post_position_identifier = 800;
     value.post_direction = mt5bridge::BrokerPositionDirection::sell;
     value.post_volume = {100, 2, 1};
     value.deal_direction = mt5bridge::BrokerPositionDirection::sell;
-    value.identity_relation = mt5bridge::BrokerPositionIdentityRelation::replaced;
     value.deal_volume = {600, 2, 1};
     value.provenance = {9, 10, 11, 10, 11, 11, 0xD00DFEED};
     return value;
@@ -64,6 +63,24 @@ void check_validation_boundaries() {
     auto contradictory = value;
     contradictory.broker_close_leg = {400, 2, 1};
     require(!contradictory.valid(), "contradictory decomposition must fail closed");
+
+    auto changed_identity = value;
+    changed_identity.post_position_identifier = 801;
+    require(!changed_identity.valid(),
+            "position identity replacement must fail closed");
+
+    auto mismatched_deal_position = value;
+    mismatched_deal_position.deal_position_id = 801;
+    require(!mismatched_deal_position.valid(),
+            "deal position identity mismatch must fail closed");
+
+    auto non_inout = observation();
+    non_inout.deal_entry = mt5bridge::BrokerDealEntry::in;
+    require(!mt5bridge::derive_broker_reversal_record(non_inout).has_value(),
+            "DEAL_ENTRY_IN must fail closed");
+    non_inout.deal_entry = mt5bridge::BrokerDealEntry::out;
+    require(!mt5bridge::derive_broker_reversal_record(non_inout).has_value(),
+            "DEAL_ENTRY_OUT must fail closed");
 }
 
 void check_durable_replay() {

@@ -21,6 +21,7 @@ extern "C" int mt5bridge_probe_dispatch_journal_store_header();
 extern "C" int mt5bridge_probe_dispatch_broker_reversal_header();
 extern "C" int mt5bridge_probe_dispatch_broker_reversal_reconciliation_header();
 extern "C" int mt5bridge_probe_dispatch_broker_allocation_envelope_header();
+extern "C" int mt5bridge_probe_dispatch_managed_ownership_basis_header();
 extern "C" int mt5bridge_probe_dispatch_lease_header();
 extern "C" int mt5bridge_probe_dispatch_admission_header();
 extern "C" int mt5bridge_probe_environment_consistency_header();
@@ -48,6 +49,7 @@ int main() {
            mt5bridge_probe_dispatch_broker_reversal_header() |
            mt5bridge_probe_dispatch_broker_reversal_reconciliation_header() |
            mt5bridge_probe_dispatch_broker_allocation_envelope_header() |
+           mt5bridge_probe_dispatch_managed_ownership_basis_header() |
            mt5bridge_probe_dispatch_lease_header() |
            mt5bridge_probe_dispatch_admission_header() |
            mt5bridge_probe_environment_consistency_header() |

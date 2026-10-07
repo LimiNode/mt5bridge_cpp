@@ -63,27 +63,38 @@ Mt5DealSnapshot deal(std::uint64_t ticket, std::uint64_t order_ticket,
 }
 
 mt5bridge::ObservationBatch positions_batch(
-    std::vector<Mt5PositionSnapshot> positions,
-    std::int64_t observed_at_msc = 0) {
+    std::vector<Mt5PositionSnapshot> positions) {
     mt5bridge::ObservationBatch batch;
     batch.account = kAccount;
     batch.observed_domains = mt5bridge::ObservationDomain::positions;
-    batch.positions_observed_at_msc = observed_at_msc;
     batch.positions = std::move(positions);
+    return batch;
+}
+
+mt5bridge::ObservationBatch pre_batch(
+    std::vector<Mt5PositionSnapshot> positions,
+    std::vector<Mt5DealSnapshot> deals,
+    mt5bridge::ObservationWindow window) {
+    auto batch = positions_batch(std::move(positions));
+    batch.observed_domains = batch.observed_domains |
+                             mt5bridge::ObservationDomain::history_deals;
+    batch.history_deals_window = window;
+    batch.position_history_order =
+        mt5bridge::PositionHistoryOrder::positions_before_history_deals;
+    batch.history_deals = std::move(deals);
     return batch;
 }
 
 mt5bridge::ObservationBatch post_batch(
     std::vector<Mt5PositionSnapshot> positions,
     std::vector<Mt5DealSnapshot> deals,
-    mt5bridge::ObservationWindow window = kWindow,
-    std::int64_t history_deals_observed_at_msc = 1500,
-    std::int64_t positions_observed_at_msc = 2000) {
-    auto batch = positions_batch(std::move(positions), positions_observed_at_msc);
+    mt5bridge::ObservationWindow window,
+    mt5bridge::PositionHistoryOrder order) {
+    auto batch = positions_batch(std::move(positions));
     batch.observed_domains = batch.observed_domains |
                              mt5bridge::ObservationDomain::history_deals;
     batch.history_deals_window = window;
-    batch.history_deals_observed_at_msc = history_deals_observed_at_msc;
+    batch.position_history_order = order;
     batch.history_deals = std::move(deals);
     return batch;
 }
@@ -155,32 +166,26 @@ struct Samples {
     mt5bridge::ObservationSample post;
 };
 
-struct TestClock {
-    std::int64_t next_msc = 0;
-
-    std::int64_t operator()() {
-        next_msc += 1000;
-        return next_msc;
-    }
-};
-
 Samples make_samples(std::vector<Mt5PositionSnapshot> post_positions,
                      std::vector<Mt5DealSnapshot> deals,
                      mt5bridge::ObservationWindow window = kWindow,
-                     std::int64_t history_deals_observed_at_msc = 1500,
-                     std::int64_t positions_observed_at_msc = 2000) {
+                     std::vector<Mt5DealSnapshot> pre_deals = {},
+                     mt5bridge::PositionHistoryOrder post_order =
+                         mt5bridge::PositionHistoryOrder::history_deals_before_positions) {
     auto provider = std::make_unique<Provider>(std::vector<mt5bridge::ObservationBatch>{
-        positions_batch({position(100, 800, 0, 5.0)}, 1000),
-        post_batch(std::move(post_positions), std::move(deals), window,
-                   history_deals_observed_at_msc, positions_observed_at_msc)});
-    TestClock clock;
+        pre_batch({position(100, 800, 0, 5.0)}, std::move(pre_deals), window),
+        post_batch(std::move(post_positions), std::move(deals), window, post_order)});
     auto coordinator = std::make_unique<mt5bridge::ObservationCoordinator>(
-        *provider, kAccount, clock);
+        *provider, kAccount);
     mt5bridge::ObservationCollectionRequest pre_request;
     pre_request.observe_active_orders = false;
+    pre_request.history_deals_window = window;
+    pre_request.position_history_order =
+        mt5bridge::PositionHistoryOrder::positions_before_history_deals;
     mt5bridge::ObservationCollectionRequest post_request;
     post_request.observe_active_orders = false;
     post_request.history_deals_window = window;
+    post_request.position_history_order = post_order;
     const auto pre_refresh = coordinator->refresh(pre_request);
     require(pre_refresh.sample.has_value(), "pre-reversal sample was not admitted");
     const auto post_refresh = coordinator->refresh(post_request);
@@ -192,9 +197,6 @@ Samples make_samples(std::vector<Mt5PositionSnapshot> post_positions,
 void check_commit_and_replay() {
     auto samples = make_samples({position(101, 800, 1, 1.0)},
                                  {deal(701, 702, 800, 1, 2, 6.0)});
-    require(samples.pre.observed_at_msc() == 1000 &&
-                samples.post.observed_at_msc() == 2000,
-            "test observation clock did not bracket the samples");
     MemoryStore store;
     const auto first = mt5bridge::reconcile_broker_reversal(
         samples.coordinator->graph(), samples.pre, samples.post, request(), store);
@@ -242,7 +244,8 @@ void check_fail_closed_boundaries() {
     const mt5bridge::ObservationWindow broad_window{0, 3000};
     auto old_deal = make_samples({position(101, 800, 1, 1.0)},
                                  {deal(701, 702, 800, 1, 2, 6.0, 500)},
-                                 broad_window);
+                                 broad_window,
+                                 {deal(701, 702, 800, 1, 2, 6.0, 500)});
     auto old_deal_request = request();
     old_deal_request.history_window = broad_window;
     const auto before_pre_snapshot = mt5bridge::reconcile_broker_reversal(
@@ -250,22 +253,24 @@ void check_fail_closed_boundaries() {
         old_deal_request, store);
     require(before_pre_snapshot.status ==
                 mt5bridge::BrokerReversalReconcileStatus::invalid_observation,
-            "deal before pre-observation bound crossed the runtime boundary");
+            "target deal already present in pre history crossed the runtime boundary");
 
     auto late_deal = make_samples({position(101, 800, 1, 1.0)},
                                   {deal(701, 702, 800, 1, 2, 6.0, 2500)},
-                                  broad_window);
+                                  broad_window, {},
+                                  mt5bridge::PositionHistoryOrder::positions_before_history_deals);
     const auto after_post_snapshot = mt5bridge::reconcile_broker_reversal(
         late_deal.coordinator->graph(), late_deal.pre, late_deal.post,
         old_deal_request, store);
     require(after_post_snapshot.status ==
                 mt5bridge::BrokerReversalReconcileStatus::invalid_observation,
-            "deal after post-observation bound crossed the runtime boundary");
+            "post history/positions order crossed the runtime boundary");
 
     auto post_position_before_deal = make_samples(
         {position(101, 800, 1, 1.0)},
         {deal(701, 702, 800, 1, 2, 6.0, 1600)},
-        broad_window, 2000, 1500);
+        broad_window, {},
+        mt5bridge::PositionHistoryOrder::positions_before_history_deals);
     const auto post_position_before_deal_result = mt5bridge::reconcile_broker_reversal(
         post_position_before_deal.coordinator->graph(),
         post_position_before_deal.pre, post_position_before_deal.post,

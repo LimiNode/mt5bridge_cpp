@@ -6,9 +6,7 @@
 #include <mt5bridge/client.hpp>
 #include "engine.hpp"
 
-#include <chrono>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -17,18 +15,6 @@
 /// \brief Contains the lightweight C++ consumer API.
 namespace mt5bridge {
 
-/// \brief Returns the current UTC wall-clock time in milliseconds.
-/// \return Non-negative Unix epoch milliseconds used at observation boundaries.
-inline std::int64_t current_observation_time_msc() {
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    const auto milliseconds =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-    return milliseconds > 0 ? milliseconds : 0;
-}
-
-/// \brief Supplies a broker-compatible observation boundary timestamp.
-using ObservationTimestampSource = std::function<std::int64_t()>;
-
 /// \struct ObservationCollectionRequest
 /// \brief Selects account-wide domains for one authoritative collection.
 struct ObservationCollectionRequest {
@@ -36,6 +22,9 @@ struct ObservationCollectionRequest {
     bool observe_positions = true; ///< Collect the complete position snapshot.
     std::optional<ObservationWindow> history_orders_window; ///< Optional complete order window.
     std::optional<ObservationWindow> history_deals_window; ///< Optional complete deal window.
+    /// Collection order when both positions and deal history are requested.
+    PositionHistoryOrder position_history_order =
+        PositionHistoryOrder::unspecified;
 
     /// \brief Tests whether requested history windows are valid.
     /// \return True when at least one domain is selected and every supplied
@@ -66,16 +55,9 @@ public:
 /// \brief Adapts typed `Client` observations to the coordinator provider seam.
 class ClientObservationProvider final : public ObservationProvider {
 public:
-    /// \brief Binds the provider to a caller-owned client and observation clock.
+    /// \brief Binds the provider to a caller-owned client.
     /// \param client Initialized client used for typed observation calls.
-    /// \param timestamp_source Clock sampled after positions/history-deals queries.
-    explicit ClientObservationProvider(
-        Client &client,
-        ObservationTimestampSource timestamp_source = current_observation_time_msc)
-        : client_(client), timestamp_source_(std::move(timestamp_source)) {
-        if (!timestamp_source_)
-            throw std::invalid_argument("observation timestamp source is empty");
-    }
+    explicit ClientObservationProvider(Client &client) : client_(client) {}
 
     /// \brief Collects account-wide active and optional bounded history evidence.
     /// \param request Domains and windows to query.
@@ -103,7 +85,16 @@ public:
             query.to_msc = request.history_orders_window->to_msc;
             batch.history_orders = client_.history_orders(query);
         }
-        if (request.history_deals_window) {
+        const auto collect_positions = [&] {
+            if (!request.observe_positions)
+                return;
+            batch.observed_domains = batch.observed_domains |
+                                     ObservationDomain::positions;
+            batch.positions = client_.positions();
+        };
+        const auto collect_history_deals = [&] {
+            if (!request.history_deals_window)
+                return;
             batch.observed_domains = batch.observed_domains |
                                      ObservationDomain::history_deals;
             batch.history_deals_window = request.history_deals_window;
@@ -111,18 +102,21 @@ public:
             query.from_msc = request.history_deals_window->from_msc;
             query.to_msc = request.history_deals_window->to_msc;
             batch.history_deals = client_.history_deals(query);
-            batch.history_deals_observed_at_msc = timestamp_source_();
-            if (batch.history_deals_observed_at_msc <= 0)
-                throw std::runtime_error("history-deals observation timestamp unavailable");
+        };
+        const auto collection_order =
+            request.position_history_order == PositionHistoryOrder::unspecified
+                ? PositionHistoryOrder::positions_before_history_deals
+                : request.position_history_order;
+        if (collection_order ==
+            PositionHistoryOrder::history_deals_before_positions) {
+            collect_history_deals();
+            collect_positions();
+        } else {
+            collect_positions();
+            collect_history_deals();
         }
-        if (request.observe_positions) {
-            batch.observed_domains = batch.observed_domains |
-                                     ObservationDomain::positions;
-            batch.positions = client_.positions();
-            batch.positions_observed_at_msc = timestamp_source_();
-            if (batch.positions_observed_at_msc <= 0)
-                throw std::runtime_error("positions observation timestamp unavailable");
-        }
+        if (request.observe_positions && request.history_deals_window)
+            batch.position_history_order = collection_order;
         const auto account_after = make_account_key(client_.account_info());
         if (!account_after.valid())
             throw std::runtime_error("account identity unavailable after observation");
@@ -133,7 +127,6 @@ public:
 
 private:
     Client &client_;
-    ObservationTimestampSource timestamp_source_;
 };
 
 /// \class ObservationSample
@@ -160,30 +153,22 @@ public:
     /// \return Strictly increasing owner-loop revision.
     std::uint64_t graph_revision() const { return graph_revision_; }
 
-    /// \brief Returns the collection boundary timestamp captured by the coordinator.
-    /// \return UTC wall-clock milliseconds after provider collection completed.
-    std::int64_t observed_at_msc() const { return observed_at_msc_; }
-
 private:
     static ObservationSample create(ObservationBatch batch,
                                     std::uint64_t graph_instance_id,
-                                    std::uint64_t graph_revision,
-                                    std::int64_t observed_at_msc) {
-        return ObservationSample(std::move(batch), graph_instance_id, graph_revision,
-                                 observed_at_msc);
+                                    std::uint64_t graph_revision) {
+        return ObservationSample(std::move(batch), graph_instance_id, graph_revision);
     }
 
     ObservationSample(ObservationBatch batch, std::uint64_t graph_instance_id,
-                      std::uint64_t graph_revision, std::int64_t observed_at_msc)
+                      std::uint64_t graph_revision)
         : batch_(std::move(batch)),
           graph_instance_id_(graph_instance_id),
-          graph_revision_(graph_revision),
-          observed_at_msc_(observed_at_msc) {}
+          graph_revision_(graph_revision) {}
 
     ObservationBatch batch_;
     std::uint64_t graph_instance_id_ = 0;
     std::uint64_t graph_revision_ = 0;
-    std::int64_t observed_at_msc_ = 0;
 
     friend class ObservationCoordinator;
 };
@@ -199,23 +184,13 @@ struct ObservationRefreshResult {
 /// \brief Owns one synchronous graph update loop without runtime side effects.
 class ObservationCoordinator {
 public:
-    using TimestampSource = ObservationTimestampSource;
-
     /// \brief Binds a provider and optionally fixes the graph account scope.
     /// \param provider Observation source owned by the caller.
     /// \param account Optional account scope known before the first collection.
-    /// \param timestamp_source Clock sampled after provider collection. The
-    /// default is the UTC system clock; tests may inject a deterministic source.
     explicit ObservationCoordinator(ObservationProvider &provider,
-                                    AccountKey account = {},
-                                    TimestampSource timestamp_source =
-                                        current_observation_time_msc)
+                                    AccountKey account = {})
         : provider_(provider),
-          graph_(std::move(account)),
-          timestamp_source_(std::move(timestamp_source)) {
-        if (!timestamp_source_)
-            throw std::invalid_argument("observation timestamp source is empty");
-    }
+          graph_(std::move(account)) {}
 
     ObservationCoordinator(const ObservationCoordinator &) = delete;
     ObservationCoordinator &operator=(const ObservationCoordinator &) = delete;
@@ -230,18 +205,13 @@ public:
         if (!request.valid())
             return {{ObservationApplyStatus::invalid_evidence, graph_.revision()}, std::nullopt};
         auto batch = provider_.collect(request);
-        const auto observed_at_msc = timestamp_source_();
-        if (observed_at_msc <= 0)
-            return {{ObservationApplyStatus::invalid_evidence, graph_.revision()},
-                    std::nullopt};
         if (!matches_request(request, batch))
             return {{ObservationApplyStatus::invalid_evidence, graph_.revision()}, std::nullopt};
         const auto admission = graph_.apply(batch);
         ObservationRefreshResult result{admission, std::nullopt};
         if (admission.accepted())
             result.sample.emplace(ObservationSample::create(
-                std::move(batch), graph_.instance_id(), admission.revision,
-                observed_at_msc));
+                std::move(batch), graph_.instance_id(), admission.revision));
         return result;
     }
 
@@ -283,6 +253,10 @@ private:
         if (request.history_deals_window)
             expected_domains = expected_domains | ObservationDomain::history_deals;
 
+        const bool order_matches =
+            !request.observe_positions || !request.history_deals_window ||
+            request.position_history_order == PositionHistoryOrder::unspecified ||
+            batch.position_history_order == request.position_history_order;
         return batch.observed_domains == expected_domains &&
                (request.observe_active_orders || batch.active_orders.empty()) &&
                (request.observe_positions || batch.positions.empty()) &&
@@ -291,12 +265,12 @@ private:
                ((!request.history_deals_window && batch.history_deals.empty()) ||
                 request.history_deals_window.has_value()) &&
                same_window(request.history_orders_window, batch.history_orders_window) &&
-               same_window(request.history_deals_window, batch.history_deals_window);
+               same_window(request.history_deals_window, batch.history_deals_window) &&
+               order_matches;
     }
 
     ObservationProvider &provider_;
     ObservationGraph graph_;
-    TimestampSource timestamp_source_;
 };
 
 /// \enum DispatchConsistencyState

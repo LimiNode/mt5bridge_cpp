@@ -226,10 +226,10 @@ For a proven netting `DEAL_ENTRY_INOUT`, the focused dispatch adapter
 `<mt5bridge/dispatch/broker_reversal_reconciliation.hpp>` accepts only two
 sequential `ObservationSample` values from the same graph. The caller supplies
 the post-action history query window and an exact symbol-volume normalization
-proof. The production observation provider queries history deals before
-positions and records both domain boundaries; the adapter then requires
-`pre_positions_observed_at_msc < deal.time_msc <=
-post_history_deals_observed_at_msc <= post_positions_observed_at_msc`, plus one
+proof. The reversal collection uses complete deal-history evidence on both
+samples: positions precede the pre history query, while history precedes post
+positions. The adapter requires the target deal to be absent from the complete
+pre window and present exactly once in the complete post window, plus one
 matching deal, continuous
 `POSITION_IDENTIFIER`, matching `DEAL_POSITION_ID`, and complete pre/post
 position evidence before deriving and committing the broker-only reversal

@@ -111,8 +111,8 @@ src/
 
 The public dispatch domain is exposed through `dispatch.hpp` and its focused
 headers under `dispatch/`. The durable admission contract remains header-only;
-the concrete file store is implemented by the Python-free
-`src/dispatch/file_journal_store.cpp` source in the separate
+the Python-free concrete journal, broker-envelope, and ownership-basis stores
+are implemented by `src/dispatch/file_*.cpp` in the separate
 `mt5bridge::journal` target. The private one-shot execution seam lives in
 `src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific
@@ -178,6 +178,12 @@ only same-graph, revision-ordered pre/post samples with complete history
 windows, explicit positions/history ordering, and target absence-before/
 presence-after evidence, plus exact volume-step proof; it then commits a durable broker
 decomposition without assigning managed ownership or changing exposure.
+The first managed ownership boundary is specified in
+[ADR-0031](adr/0031-durable-managed-ownership-basis.md) and exposed by
+`include/mt5bridge/dispatch/managed_ownership_basis.hpp`. Its composite-key
+proof records a durable association between a settled close operation and a
+durable broker envelope, while leaving per-deal volume attribution,
+broker-volume conversion, and both broker legs unallocated.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

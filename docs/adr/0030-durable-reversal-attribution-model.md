@@ -76,6 +76,14 @@ The envelope uses its own versioned `MT5ENV01` record magic and `env-*` file
 namespace; any earlier experimental managed-link files are rejected rather
 than interpreted as envelopes.
 
+The next boundary is specified by
+[ADR-0031](0031-durable-managed-ownership-basis.md). Its
+`ManagedOwnershipBasis` is keyed by `(BrokerReversalKey, OperationKey)` and is
+proof-gated by both the durable broker envelope and the durable close
+operation. It records only a durable association; it does not infer a per-deal
+logical volume, convert anything to broker step units, or allocate either
+broker leg. Per-deal settlement attribution is a later bounded slice.
+
 The runtime integration accepts two sequential `ObservationSample` values from
 one `ObservationGraph`. The post sample must carry the explicit post-action
 history query window containing the target deal; both samples must carry authoritative

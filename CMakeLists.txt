@@ -31,7 +31,8 @@ set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 # persistence link this small native target alongside mt5bridge::client.
 add_library(mt5bridge_journal STATIC
             src/dispatch/file_journal_store.cpp
-            src/dispatch/file_broker_allocation_store.cpp)
+            src/dispatch/file_broker_allocation_store.cpp
+            src/dispatch/file_managed_ownership_basis_store.cpp)
 target_include_directories(mt5bridge_journal PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
@@ -138,6 +139,12 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_broker_allocation_envelope_store
              COMMAND mt5bridge_broker_allocation_envelope_store_test)
+    add_executable(mt5bridge_managed_ownership_basis_store_test
+                   tests/managed_ownership_basis_store_test.cpp)
+    target_link_libraries(mt5bridge_managed_ownership_basis_store_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
+    add_test(NAME mt5bridge_managed_ownership_basis_store
+             COMMAND mt5bridge_managed_ownership_basis_store_test)
     add_executable(mt5bridge_dispatch_admission_header_only_test
                    tests/dispatch_admission_header_only_test.cpp)
     target_link_libraries(mt5bridge_dispatch_admission_header_only_test PRIVATE
@@ -173,6 +180,7 @@ if(BUILD_TESTING)
                    tests/header_self_containment_dispatch_broker_reversal.cpp
                    tests/header_self_containment_dispatch_broker_reversal_reconciliation.cpp
                    tests/header_self_containment_dispatch_broker_allocation_envelope.cpp
+                   tests/header_self_containment_dispatch_managed_ownership_basis.cpp
                    tests/header_self_containment_dispatch_lease.cpp
                    tests/header_self_containment_dispatch_admission.cpp
                    tests/header_self_containment_environment_consistency.cpp

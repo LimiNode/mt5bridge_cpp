@@ -635,6 +635,12 @@ reversals and CloseBy, respectively.
   now be captured in a durable broker-allocation envelope with both legs still
   unallocated; this bounded envelope does not assign a `TradeId`, select an
   allocation policy, or mutate managed exposure.
+  A later `ManagedOwnershipBasis` may link a durable settled close operation to
+  that envelope, but it records only durable association: cumulative operation
+  settlement is not a per-deal volume proof. It does not authorize
+  broker-volume conversion, reverse-open ownership, or managed exposure
+  mutation; see
+  [ADR-0031](adr/0031-durable-managed-ownership-basis.md).
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

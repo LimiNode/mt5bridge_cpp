@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted as the design boundary for `DEAL_ENTRY_INOUT`. The broker-only durable
-record and immutable file-store contract are implemented; managed allocation
-and runtime settlement remain deferred.
+Accepted as the design boundary for `DEAL_ENTRY_INOUT`. The broker durable
+record and a broker-only allocation envelope are implemented; ownership
+allocation policy and runtime settlement remain deferred.
 
 ## Context
 
@@ -63,6 +63,19 @@ store uses an immutable account/deal key, a checksummed versioned envelope,
 atomic replacement, duplicate-idempotent commit, conflict detection, and
 all-or-nothing scan for restart recovery.
 
+The bounded envelope slice provides `BrokerAllocationEnvelope` and
+`DurableBrokerAllocationStore`. One immutable envelope is allowed for one
+broker reversal key and copies the exact broker provenance and both broker
+legs. Both legs remain explicitly unallocated. The proof-gated commit loads
+the already durable `BrokerReversalRecord` first and rejects missing, corrupt,
+or mismatched broker evidence. A duplicate identical envelope is idempotent;
+a different serialized envelope for the same broker reversal conflicts. This
+slice contains no `TradeId`/`OperationKey`, does not choose FIFO, LIFO, or
+pro-rata, and does not mutate managed exposure.
+The envelope uses its own versioned `MT5ENV01` record magic and `env-*` file
+namespace; any earlier experimental managed-link files are rejected rather
+than interpreted as envelopes.
+
 The runtime integration accepts two sequential `ObservationSample` values from
 one `ObservationGraph`. The post sample must carry the explicit post-action
 history query window containing the target deal; both samples must carry authoritative
@@ -115,15 +128,24 @@ For an accepted broker decomposition, the following must hold:
 7. Recovery replays the durable broker record and never re-sends the side
    effect or recomputes a different decomposition from a later snapshot.
 
-Managed ownership is a separate future allocation contract. It may establish
-`managed_close_leg <= broker_close_leg` and
-`managed_reverse_open_leg <= broker_reverse_open_leg`, but it need not consume
-the full broker volume. For example, a broker BUY position of 5 may contain
-only 2 units owned by one managed trade; a SELL INOUT deal of 6 can have a
-broker close leg of 5 and reverse-open leg of 1 while that trade's proven
-managed close allocation is at most 2. Without an explicit ledger proof, the
-remaining broker legs stay unallocated and the managed operation remains
-unresolved.
+Managed ownership remains a separate future allocation contract. For example,
+a broker BUY position of 5 may contain only 2 units owned by one managed trade;
+a SELL INOUT deal of 6 can have a broker close leg of 5 and reverse-open leg of
+1 while the entire envelope remains unallocated. No managed operation may
+receive either leg until a later durable ownership basis authorizes the exact
+`TradeId` and volumes.
+
+For the implemented envelope, the additional durable invariants are:
+
+8. The envelope account and broker key identify the same account, and copied
+   provenance and broker legs exactly match the durable
+   `BrokerReversalRecord` loaded by that key.
+9. Both explicit unallocated legs use one step-normalized volume domain and
+   equal the corresponding broker legs exactly; there is no hidden managed
+   remainder.
+10. A broker reversal key has at most one immutable envelope. An exact replay
+    is a no-op; a malformed or different envelope is rejected rather than
+    becoming an ownership decision.
 
 If any invariant or provenance requirement cannot be proven, the operation
 remains `reconciling`/ambiguous and managed exposure is unchanged. In
@@ -165,14 +187,19 @@ record without changing managed exposure. Its regressions cover:
 - a deal observed between post-position and post-history collection remaining
   unresolved because the post order is invalid.
 
-The later managed allocation slice must still add regressions for:
+The envelope implementation adds focused regressions for:
 
-- a broker reversal whose ownership is split across managed and external
-  exposure, leaving managed allocation unresolved;
-- an external or concurrent position mutation between the two snapshots; and
-- hedging observations with independent position identities.
+- proof-gated commit only after a durable broker record is present;
+- partial managed attribution being rejected at the envelope boundary;
+- provenance mismatch and missing broker proof remaining fail-closed; and
+- duplicate commit and restart round-trip of the immutable broker envelope.
 
-Until the later managed allocation proof exists, managed settlement remains
-fail-closed for `DEAL_ENTRY_INOUT` as specified by
+The envelope intentionally leaves policy work for a later slice: allocation
+across one or multiple `TradeId` values, external/concurrent ownership changes,
+and hedging identity attribution remain unresolved and do not mutate managed
+exposure.
+
+Until managed allocation policy and runtime settlement proof exist, managed
+settlement remains fail-closed for `DEAL_ENTRY_INOUT` as specified by
 [ADR-0026](0026-managed-trade-reconciliation-settlement.md) and
 [ADR-0029](0029-durable-exit-settlement.md).

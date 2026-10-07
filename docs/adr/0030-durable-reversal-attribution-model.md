@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted as the design boundary for `DEAL_ENTRY_INOUT`. The broker-only durable
-record and immutable file-store contract are implemented; managed allocation
-and runtime settlement remain deferred.
+Accepted as the design boundary for `DEAL_ENTRY_INOUT`. The broker durable
+record and the first proof-gated managed-allocation link are implemented;
+allocation policy and runtime settlement remain deferred.
 
 ## Context
 
@@ -62,6 +62,17 @@ legs once, and rejects contradictory evidence before persistence. The file
 store uses an immutable account/deal key, a checksummed versioned envelope,
 atomic replacement, duplicate-idempotent commit, conflict detection, and
 all-or-nothing scan for restart recovery.
+
+The bounded managed-link slice provides `ManagedAllocationRecord` and
+`DurableManagedAllocationStore`. One immutable link is allowed for one broker
+reversal key and binds it to an `OperationKey` plus the exact broker provenance
+digest/revisions. It stores managed close/open legs and explicit unallocated
+remainders in the same step-normalized volume domain. The proof-gated commit
+loads the already durable `BrokerReversalRecord` first and rejects missing,
+corrupt, or mismatched broker evidence. A duplicate identical link is
+idempotent; a second link for the same broker reversal conflicts. This slice
+does not choose FIFO, LIFO, or pro-rata, does not split one reversal across
+multiple managed trades, and does not mutate managed exposure.
 
 The runtime integration accepts two sequential `ObservationSample` values from
 one `ObservationGraph`. The post sample must carry the explicit post-action
@@ -125,6 +136,18 @@ managed close allocation is at most 2. Without an explicit ledger proof, the
 remaining broker legs stay unallocated and the managed operation remains
 unresolved.
 
+For the implemented first link, the additional durable invariants are:
+
+8. The allocation account, broker key, and managed `OperationKey` all identify
+   the same account, and the copied broker provenance exactly matches the
+   durable `BrokerReversalRecord` loaded by that key.
+9. Managed and explicit unallocated legs use one scale/step domain, each is
+   step-aligned (including zero), and managed plus unallocated units conserve
+   each corresponding broker leg exactly.
+10. A broker reversal key has at most one immutable allocation link. An exact
+    replay is a no-op; another `TradeId`/`OperationId`, provenance, or leg
+    decomposition is a conflict rather than a replacement.
+
 If any invariant or provenance requirement cannot be proven, the operation
 remains `reconciling`/ambiguous and managed exposure is unchanged. In
 particular, the implementation must not fall back to treating INOUT as `IN`
@@ -165,14 +188,20 @@ record without changing managed exposure. Its regressions cover:
 - a deal observed between post-position and post-history collection remaining
   unresolved because the post order is invalid.
 
-The later managed allocation slice must still add regressions for:
+The managed-link implementation adds focused regressions for:
 
-- a broker reversal whose ownership is split across managed and external
-  exposure, leaving managed allocation unresolved;
-- an external or concurrent position mutation between the two snapshots; and
-- hedging observations with independent position identities.
+- proof-gated commit only after a durable broker record is present;
+- managed and explicit unallocated leg conservation, including a partial
+  managed assignment;
+- over-allocation, provenance mismatch, missing broker proof, and a second
+  conflicting owner remaining fail-closed; and
+- duplicate commit and restart round-trip of the immutable allocation link.
 
-Until the later managed allocation proof exists, managed settlement remains
-fail-closed for `DEAL_ENTRY_INOUT` as specified by
+The link intentionally leaves policy work for a later slice: allocation across
+multiple `TradeId` values, external/concurrent ownership changes, and hedging
+identity attribution remain unresolved and do not mutate managed exposure.
+
+Until managed allocation policy and runtime settlement proof exist, managed
+settlement remains fail-closed for `DEAL_ENTRY_INOUT` as specified by
 [ADR-0026](0026-managed-trade-reconciliation-settlement.md) and
 [ADR-0029](0029-durable-exit-settlement.md).

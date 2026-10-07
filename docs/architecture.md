@@ -341,6 +341,11 @@ worker process.
    proven; active-order absence alone cannot erase a late OPEN fill. The
    bounded restart slice persists requested/settled volume and reconstructs
    OPEN, CLOSE, and CANCEL exposure fail-closed from durable records.
+   `DEAL_ENTRY_INOUT` remains fail-closed in managed settlement, but its
+   broker-level decomposition can now be linked durably to one managed
+   `OperationKey` through a proof-gated allocation record. Managed and
+   explicit unallocated legs are conserved without selecting FIFO, LIFO, or
+   pro-rata policy, and this link does not mutate exposure.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

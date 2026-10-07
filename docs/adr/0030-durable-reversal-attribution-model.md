@@ -63,6 +63,19 @@ store uses an immutable account/deal key, a checksummed versioned envelope,
 atomic replacement, duplicate-idempotent commit, conflict detection, and
 all-or-nothing scan for restart recovery.
 
+The runtime integration accepts two sequential `ObservationSample` values from
+one `ObservationGraph`. The post sample must carry the explicit post-action
+history query window containing the target deal; both samples must carry authoritative
+position domains, and the reversal collection records explicit domain order:
+positions before the complete pre history query, then the complete post history
+query before post positions. The adapter requires the target deal to be absent
+from the complete pre window and present exactly once in the complete post
+window, one matching pre/post position, continuous identity, complete deal
+fields, and an exact symbol-volume normalization proof. Only after
+`derive_broker_reversal_record()` succeeds does it call
+`DurableBrokerReversalStore::commit()`. This path does not infer a managed
+`TradeId`, mutate managed exposure, or choose an ownership allocation policy.
+
 The model is account-mode aware:
 
 - On a netting account, `DEAL_POSITION_ID` together with the pre/post
@@ -141,16 +154,25 @@ The broker-only implementation now has focused regressions for:
 - duplicate commit, conflicting decomposition, and restart load of one durable
   broker record.
 
-The remaining runtime slice must connect fresh `ObservationGraph` evidence to
-this record without changing managed exposure. It must still add regressions
-for:
+The runtime adapter now connects fresh `ObservationGraph` evidence to this
+record without changing managed exposure. Its regressions cover:
+
+- same-graph, revision-ordered pre/post samples with complete history windows,
+  explicit positions/history ordering, and target absence-before/presence-after;
+- foreign-graph samples, duplicate position identities, non-INOUT deals, and
+  non-step-normalized volumes remaining unresolved;
+- target history evidence already present in the pre window remaining unresolved;
+- a deal observed between post-position and post-history collection remaining
+  unresolved because the post order is invalid.
+
+The later managed allocation slice must still add regressions for:
 
 - a broker reversal whose ownership is split across managed and external
   exposure, leaving managed allocation unresolved;
 - an external or concurrent position mutation between the two snapshots; and
 - hedging observations with independent position identities.
 
-Until that runtime integration and later managed allocation proof exist,
-`DEAL_ENTRY_INOUT` stays rejected by the managed settlement boundary as
-specified by [ADR-0026](0026-managed-trade-reconciliation-settlement.md) and
+Until the later managed allocation proof exists, managed settlement remains
+fail-closed for `DEAL_ENTRY_INOUT` as specified by
+[ADR-0026](0026-managed-trade-reconciliation-settlement.md) and
 [ADR-0029](0029-durable-exit-settlement.md).

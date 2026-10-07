@@ -89,6 +89,14 @@ enum class ObservationDomain : std::uint32_t {
     history_deals = 1u << 3,  ///< Bounded history-deal evidence.
 };
 
+/// \enum PositionHistoryOrder
+/// \brief Records the collection order of positions and deal history domains.
+enum class PositionHistoryOrder : std::uint8_t {
+    unspecified, ///< The batch does not contain both domains.
+    positions_before_history_deals, ///< Positions completed before deal history.
+    history_deals_before_positions, ///< Deal history completed before positions.
+};
+
 /// \brief Combines two observation-domain flags.
 /// \param left First domain mask.
 /// \param right Second domain mask.
@@ -144,6 +152,8 @@ struct ObservationBatch {
     ObservationDomain observed_domains = ObservationDomain::none; ///< Complete domains below.
     std::optional<ObservationWindow> history_orders_window; ///< Optional complete-query coverage.
     std::optional<ObservationWindow> history_deals_window; ///< Optional complete-query coverage.
+    /// Collection order when both positions and deal history are present.
+    PositionHistoryOrder position_history_order = PositionHistoryOrder::unspecified;
     std::vector<Mt5OrderSnapshot> active_orders; ///< Full active-order snapshot when observed.
     std::vector<Mt5PositionSnapshot> positions; ///< Full position snapshot when observed.
     std::vector<Mt5HistoryOrderSnapshot> history_orders; ///< Bounded history-order evidence.
@@ -587,7 +597,9 @@ private:
         if ((!active_orders && !batch.active_orders.empty()) ||
             (!positions && !batch.positions.empty()) ||
             (!history_orders && (!batch.history_orders.empty() || batch.history_orders_window)) ||
-            (!history_deals && (!batch.history_deals.empty() || batch.history_deals_window)))
+            (!history_deals && (!batch.history_deals.empty() || batch.history_deals_window)) ||
+            ((!positions || !history_deals) &&
+             batch.position_history_order != PositionHistoryOrder::unspecified))
             return false;
         if (history_orders && batch.history_orders_window &&
             !batch.history_orders_window->valid())

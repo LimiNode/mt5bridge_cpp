@@ -33,9 +33,12 @@ provider reference. `refresh()` is synchronous and caller-driven: it does not
 create a worker thread, retry a failed call, or infer a deadline. After a
 successful graph apply it returns an `ObservationRefreshResult` containing an
 `ObservationSample` whose constructor is private to the coordinator. The
-sample carries the accepted batch, graph instance identity, and exact graph
-revision, so a later policy cannot treat a copied batch as a new observation or
-silently combine samples from another graph. The caller captures a
+sample carries the accepted batch and graph provenance. Domain-aware providers
+may additionally record collection ordering in the batch; the broker-reversal
+provider uses explicit positions-before-history and history-before-positions
+orders for its pre/post evidence. A later policy still cannot treat a copied
+batch as a new observation or silently combine samples from another graph. The
+caller captures a
 `ReconciliationBaseline` after an initial observation and retains it for
 subsequent checks on that same coordinator graph.
 

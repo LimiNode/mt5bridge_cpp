@@ -234,7 +234,14 @@ an account switch discards the whole batch. The `ObservationCoordinator` owns
 one non-copyable graph and applies a provider batch only after collection
 completes, so a provider failure cannot leave a partial graph update.
 `refresh()` is synchronous and caller-driven: it does not start a worker, retry
-a failed call, or invoke `order_send`.
+a failed call, or invoke `order_send`. Each accepted sample retains the
+coordinator provenance. The bounded broker-reversal path additionally requires
+complete pre/post deal-history windows: the target ticket is absent before the
+reversal and present after it, with positions collected before the pre history
+query and after the post history query. Set
+`ObservationCollectionRequest::position_history_order` to
+`positions_before_history_deals` for the pre collection and
+`history_deals_before_positions` for the post collection.
 
 Capture the baseline on the coordinator graph, refresh the requested domains,
 then pass a `DispatchConsistencyRequest` to `DispatchConsistencyGate`. The gate

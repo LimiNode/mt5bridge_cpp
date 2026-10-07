@@ -22,6 +22,9 @@ struct ObservationCollectionRequest {
     bool observe_positions = true; ///< Collect the complete position snapshot.
     std::optional<ObservationWindow> history_orders_window; ///< Optional complete order window.
     std::optional<ObservationWindow> history_deals_window; ///< Optional complete deal window.
+    /// Collection order when both positions and deal history are requested.
+    PositionHistoryOrder position_history_order =
+        PositionHistoryOrder::unspecified;
 
     /// \brief Tests whether requested history windows are valid.
     /// \return True when at least one domain is selected and every supplied
@@ -73,11 +76,6 @@ public:
                                      ObservationDomain::active_orders;
             batch.active_orders = client_.orders();
         }
-        if (request.observe_positions) {
-            batch.observed_domains = batch.observed_domains |
-                                     ObservationDomain::positions;
-            batch.positions = client_.positions();
-        }
         if (request.history_orders_window) {
             batch.observed_domains = batch.observed_domains |
                                      ObservationDomain::history_orders;
@@ -87,7 +85,16 @@ public:
             query.to_msc = request.history_orders_window->to_msc;
             batch.history_orders = client_.history_orders(query);
         }
-        if (request.history_deals_window) {
+        const auto collect_positions = [&] {
+            if (!request.observe_positions)
+                return;
+            batch.observed_domains = batch.observed_domains |
+                                     ObservationDomain::positions;
+            batch.positions = client_.positions();
+        };
+        const auto collect_history_deals = [&] {
+            if (!request.history_deals_window)
+                return;
             batch.observed_domains = batch.observed_domains |
                                      ObservationDomain::history_deals;
             batch.history_deals_window = request.history_deals_window;
@@ -95,7 +102,21 @@ public:
             query.from_msc = request.history_deals_window->from_msc;
             query.to_msc = request.history_deals_window->to_msc;
             batch.history_deals = client_.history_deals(query);
+        };
+        const auto collection_order =
+            request.position_history_order == PositionHistoryOrder::unspecified
+                ? PositionHistoryOrder::positions_before_history_deals
+                : request.position_history_order;
+        if (collection_order ==
+            PositionHistoryOrder::history_deals_before_positions) {
+            collect_history_deals();
+            collect_positions();
+        } else {
+            collect_positions();
+            collect_history_deals();
         }
+        if (request.observe_positions && request.history_deals_window)
+            batch.position_history_order = collection_order;
         const auto account_after = make_account_key(client_.account_info());
         if (!account_after.valid())
             throw std::runtime_error("account identity unavailable after observation");
@@ -168,7 +189,8 @@ public:
     /// \param account Optional account scope known before the first collection.
     explicit ObservationCoordinator(ObservationProvider &provider,
                                     AccountKey account = {})
-        : provider_(provider), graph_(std::move(account)) {}
+        : provider_(provider),
+          graph_(std::move(account)) {}
 
     ObservationCoordinator(const ObservationCoordinator &) = delete;
     ObservationCoordinator &operator=(const ObservationCoordinator &) = delete;
@@ -231,6 +253,10 @@ private:
         if (request.history_deals_window)
             expected_domains = expected_domains | ObservationDomain::history_deals;
 
+        const bool order_matches =
+            !request.observe_positions || !request.history_deals_window ||
+            request.position_history_order == PositionHistoryOrder::unspecified ||
+            batch.position_history_order == request.position_history_order;
         return batch.observed_domains == expected_domains &&
                (request.observe_active_orders || batch.active_orders.empty()) &&
                (request.observe_positions || batch.positions.empty()) &&
@@ -239,7 +265,8 @@ private:
                ((!request.history_deals_window && batch.history_deals.empty()) ||
                 request.history_deals_window.has_value()) &&
                same_window(request.history_orders_window, batch.history_orders_window) &&
-               same_window(request.history_deals_window, batch.history_deals_window);
+               same_window(request.history_deals_window, batch.history_deals_window) &&
+               order_matches;
     }
 
     ObservationProvider &provider_;

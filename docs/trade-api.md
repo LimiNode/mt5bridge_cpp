@@ -631,7 +631,10 @@ reversals and CloseBy, respectively.
   Closing one `TradeId` therefore uses an attribution ledger. The policy is
   explicit virtual lots (FIFO, LIFO, or pro-rata may be selected by the
   manager); an unconfigured netting close or an external mutation that makes
-  remaining volume unknowable is `AMBIGUOUS`.
+  remaining volume unknowable is `AMBIGUOUS`. An `INOUT` broker reversal can
+  now be captured in a durable broker-allocation envelope with both legs still
+  unallocated; this bounded envelope does not assign a `TradeId`, select an
+  allocation policy, or mutate managed exposure.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

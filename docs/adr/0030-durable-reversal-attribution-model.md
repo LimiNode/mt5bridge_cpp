@@ -80,9 +80,9 @@ The next boundary is specified by
 [ADR-0031](0031-durable-managed-ownership-basis.md). Its
 `ManagedOwnershipBasis` is keyed by `(BrokerReversalKey, OperationKey)` and is
 proof-gated by both the durable broker envelope and the durable close
-operation. It records only an operation-level managed logical-volume upper
-bound; it does not convert that bound to broker step units or allocate either
-broker leg.
+operation. It records only a durable association; it does not infer a per-deal
+logical volume, convert anything to broker step units, or allocate either
+broker leg. Per-deal settlement attribution is a later bounded slice.
 
 The runtime integration accepts two sequential `ObservationSample` values from
 one `ObservationGraph`. The post sample must carry the explicit post-action

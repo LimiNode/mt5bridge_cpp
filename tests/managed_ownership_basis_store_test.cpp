@@ -96,7 +96,6 @@ mt5bridge::ManagedOwnershipBasis basis(
     value.basis_key = {source.broker_key, operation.key};
     value.broker_provenance = source.broker_provenance;
     value.operation_revision = operation.revision;
-    value.max_managed_close_units = operation.settled_volume;
     return value;
 }
 
@@ -242,13 +241,6 @@ void check_proof_gate() {
                 mt5bridge::ManagedOwnershipBasisCommitStatus::already_committed,
             "identical ownership basis replay was not idempotent");
 
-    auto invented_volume = expected;
-    invented_volume.max_managed_close_units += 1;
-    require(mt5bridge::commit_managed_ownership_basis(
-                invented_volume, journal, envelopes, destination) ==
-                mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
-            "caller-supplied managed close cap bypassed the journal proof");
-
     auto stale_revision = expected;
     stale_revision.operation_revision -= 1;
     require(mt5bridge::commit_managed_ownership_basis(
@@ -265,6 +257,17 @@ void check_proof_gate() {
                 expected, journal, envelopes, destination) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
             "operation without the target deal authorized ownership");
+
+    auto multiple_deal_operation = operation;
+    multiple_deal_operation.reconciliation_descriptor->predicates = {
+        mt5bridge::require_history_deal(701, mt5bridge::ObservationWindow{1000, 2000}),
+        mt5bridge::require_history_deal(999, mt5bridge::ObservationWindow{1000, 2000})};
+    require(multiple_deal_operation.valid(), "multiple-deal operation fixture is invalid");
+    journal.records[operation.key] = multiple_deal_operation;
+    require(mt5bridge::commit_managed_ownership_basis(
+                expected, journal, envelopes, destination) ==
+                mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
+            "operation with multiple deal predicates authorized ambiguous ownership");
 
     auto open_operation = operation;
     open_operation.operation_kind = mt5bridge::OperationKind::open;

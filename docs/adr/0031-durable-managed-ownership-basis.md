@@ -15,10 +15,11 @@ the broker close leg. Treating a caller-supplied volume as proof would recreate
 the attribution bug that this boundary is meant to prevent.
 
 The managed journal already retains a durable operation identity, immutable
-operation kind, reconciliation descriptor, result-derived deal bindings,
-revision, and authoritative managed `settled_volume`. Those facts can establish
-an operation-scoped upper bound in the journal's logical volume domain, but they
-do not establish a conversion to the broker's normalized symbol-step domain.
+operation kind, reconciliation descriptor, result-derived deal bindings, and a
+revision. Those facts can establish a durable association with one settled
+close operation, but cumulative `settled_volume` is not a per-deal attribution
+proof and does not establish a conversion to the broker's normalized
+symbol-step domain.
 
 ## Decision
 
@@ -40,23 +41,19 @@ broker reversal key
 managed operation key
 broker provenance copied from the envelope
 source operation revision
-max_managed_close_units
 ```
 
-`max_managed_close_units` is exactly the durable operation's non-zero
-`settled_volume`. It remains in the managed journal's logical unit domain. The
-basis therefore says only:
+The basis says only:
 
 ```text
-this settled close operation is associated with this proven broker deal,
-and no later allocation may claim more than its durable logical settlement
-without a newer basis
+this settled close operation is durably associated with this proven broker deal
 ```
 
-It does **not** say that those logical units equal any number of broker
-`broker_close_leg` units. A later allocation slice must provide an explicit,
-exact volume-domain conversion and per-deal settlement evidence before it may
-create a broker allocation entry.
+It does not claim that the operation's cumulative settled volume belongs to
+this one deal, nor that any managed logical units equal broker
+`broker_close_leg` units. A later allocation slice must provide a per-deal
+logical settlement proof and an explicit, exact volume-domain conversion before
+it may create an allocation entry.
 
 The proof-gated commit requires all of the following durable facts:
 
@@ -70,8 +67,9 @@ The proof-gated commit requires all of the following durable facts:
 4. The broker-only allocation envelope exists for the same reversal key and
    has matching account and provenance. Its two legs must still be completely
    unallocated.
-5. The basis cap exactly equals the operation record's settled volume and the
-   source operation revision exactly matches the basis revision.
+5. The source operation revision exactly matches the basis revision. A
+   non-zero settled volume proves that the operation is settled, but is not
+   copied into the basis as a per-deal cap.
 
 Missing, stale, malformed, mismatched, or non-close source evidence fails
 closed. A later operation revision does not silently update an old basis; it
@@ -88,7 +86,7 @@ future proof establish why that opposite exposure belongs to a managed trade.
   identities.
 - A basis is accepted only after the broker envelope and operation record are
   already durable.
-- The source operation revision and managed settled-volume cap are immutable.
+- The source operation revision and broker association are immutable.
 - One broker reversal may have many operation-scoped basis records; one
   composite key has at most one immutable basis. Exact replay is idempotent and
   a different record for the same composite key conflicts.
@@ -108,17 +106,16 @@ future proof establish why that opposite exposure belongs to a managed trade.
   can split it across several `TradeId` values without migrating this basis
   store.
 - Managed `DEAL_ENTRY_INOUT` settlement remains fail-closed until the later
-  volume-mapping and allocation-entry slices are proven.
+  per-deal volume-mapping and allocation-entry slices are proven.
 
 ## Verification boundary
 
 The implementation regressions cover:
 
 - proof-gated commit from matching operation and broker-envelope records;
-- caller-supplied cap, stale revision, wrong deal, open operation, missing
-  operation, and missing envelope rejection;
+- stale revision, wrong deal, multiple deal predicates, open operation,
+  missing operation, and missing envelope rejection;
 - two operation keys sharing one broker reversal without conflict;
 - exact replay, checksum-backed persistence, restart load, and composite-key
   scan; and
 - header self-containment without adding runtime or public side effects.
-

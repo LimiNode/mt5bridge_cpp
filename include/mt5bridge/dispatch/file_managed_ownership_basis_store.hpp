@@ -11,7 +11,7 @@
 namespace mt5bridge {
 
 /// \class WindowsFileManagedOwnershipBasisStore
-/// \brief Persists immutable operation-scoped ownership upper bounds.
+/// \brief Persists immutable operation/reversal associations.
 class WindowsFileManagedOwnershipBasisStore final
     : public DurableManagedOwnershipBasisStore {
 public:

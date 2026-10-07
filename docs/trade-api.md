@@ -636,9 +636,10 @@ reversals and CloseBy, respectively.
   unallocated; this bounded envelope does not assign a `TradeId`, select an
   allocation policy, or mutate managed exposure.
   A later `ManagedOwnershipBasis` may link a durable settled close operation to
-  that envelope, but its cap remains in the managed journal's logical volume
-  domain. It does not authorize broker-volume conversion, reverse-open
-  ownership, or managed exposure mutation; see
+  that envelope, but it records only durable association: cumulative operation
+  settlement is not a per-deal volume proof. It does not authorize
+  broker-volume conversion, reverse-open ownership, or managed exposure
+  mutation; see
   [ADR-0031](adr/0031-durable-managed-ownership-basis.md).
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.

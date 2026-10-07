@@ -22,7 +22,9 @@ namespace mt5bridge {
 namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'O', 'W', 'N', '0', '1'}};
-constexpr std::uint32_t kFormatVersion = 1;
+// Version 2 removes the non-proof-bearing managed-volume cap from the body.
+// Older records are rejected rather than reinterpreted as associations.
+constexpr std::uint32_t kFormatVersion = 2;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
 constexpr std::size_t kMaxStringBytes = 1U << 20;
@@ -147,7 +149,6 @@ std::optional<std::vector<std::uint8_t>> serialize_body(
     append_u64(body, record.basis_key.operation_key.operation_id);
     append_provenance(body, record.broker_provenance);
     append_u64(body, record.operation_revision);
-    append_u64(body, record.max_managed_close_units);
     return body.size() <= kMaxBodyBytes
                ? std::optional<std::vector<std::uint8_t>>(std::move(body))
                : std::nullopt;
@@ -201,7 +202,6 @@ std::optional<ManagedOwnershipBasis> deserialize_record(
         !read_u64(body, body_offset, record.basis_key.operation_key.operation_id) ||
         !read_provenance(body, body_offset, record.broker_provenance) ||
         !read_u64(body, body_offset, record.operation_revision) ||
-        !read_u64(body, body_offset, record.max_managed_close_units) ||
         body_offset != body.size())
         return std::nullopt;
     return record.valid() ? std::optional<ManagedOwnershipBasis>(std::move(record))

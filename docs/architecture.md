@@ -181,9 +181,9 @@ decomposition without assigning managed ownership or changing exposure.
 The first managed ownership boundary is specified in
 [ADR-0031](adr/0031-durable-managed-ownership-basis.md) and exposed by
 `include/mt5bridge/dispatch/managed_ownership_basis.hpp`. Its composite-key
-proof links a durable close operation to a durable broker envelope, records an
-operation-level logical-volume cap, and leaves broker-volume conversion and
-both broker legs unallocated.
+proof records a durable association between a settled close operation and a
+durable broker envelope, while leaving per-deal volume attribution,
+broker-volume conversion, and both broker legs unallocated.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

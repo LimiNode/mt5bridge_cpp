@@ -1,7 +1,7 @@
 #pragma once
 
 /// \file dispatch/managed_ownership_basis.hpp
-/// \brief Defines the durable, operation-scoped ownership basis for reversal close legs.
+/// \brief Defines the durable association between a close operation and a reversal.
 
 #include "broker_allocation_envelope.hpp"
 #include "journal_store.hpp"
@@ -41,31 +41,29 @@ struct ManagedOwnershipBasisKey {
 };
 
 /// \struct ManagedOwnershipBasis
-/// \brief Durable upper bound linking one settled close operation to one reversal.
+/// \brief Durable association linking one settled close operation to one reversal.
 ///
-/// `max_managed_close_units` stays in the managed journal's logical volume
-/// domain. It is deliberately not a `BrokerVolume`: this slice does not claim
-/// that managed logical units can be converted to broker step units, and it
-/// grants no ownership of `broker_reverse_open_leg`. A later allocation ledger
-/// must provide that conversion and may split one reversal across many keys.
+/// This slice records only durable identity and source revisions. It does not
+/// attribute any per-deal volume: the operation's cumulative `settled_volume`
+/// cannot be used as a cap for one broker deal without a separate logical
+/// settlement proof.
 struct ManagedOwnershipBasis {
     AccountKey account; ///< Account shared by both durable source records.
     ManagedOwnershipBasisKey basis_key; ///< Broker/operation composite identity.
     BrokerReversalProvenance broker_provenance; ///< Exact broker envelope provenance.
     std::uint64_t operation_revision = 0; ///< Pinned durable operation revision.
-    std::uint64_t max_managed_close_units = 0; ///< Operation-level logical upper bound.
 
     /// \brief Returns the composite durable identity.
     /// \return Broker reversal and managed operation key.
     const ManagedOwnershipBasisKey &key() const { return basis_key; }
 
-    /// \brief Tests all local identity and upper-bound invariants.
+    /// \brief Tests all local identity and association invariants.
     /// \return True only for a non-empty, account-consistent basis.
     bool valid() const {
         return account.valid() && basis_key.valid() &&
                account == basis_key.broker_key.account &&
                account == basis_key.operation_key.account && broker_provenance.valid() &&
-               operation_revision != 0 && max_managed_close_units != 0;
+               operation_revision != 0;
     }
 
     /// \brief Compares every durable basis field for idempotent replay.
@@ -74,8 +72,7 @@ struct ManagedOwnershipBasis {
     bool operator==(const ManagedOwnershipBasis &other) const {
         return account == other.account && basis_key == other.basis_key &&
                broker_provenance == other.broker_provenance &&
-               operation_revision == other.operation_revision &&
-               max_managed_close_units == other.max_managed_close_units;
+               operation_revision == other.operation_revision;
     }
 };
 
@@ -147,7 +144,7 @@ enum class ManagedOwnershipBasisProofStatus {
 };
 
 /// \class DurableManagedOwnershipBasisStore
-/// \brief Persistence seam for operation-scoped ownership upper bounds.
+/// \brief Persistence seam for durable operation/reversal associations.
 class DurableManagedOwnershipBasisStore {
 public:
     virtual ~DurableManagedOwnershipBasisStore() = default;
@@ -180,26 +177,30 @@ inline bool operation_binds_deal(const OperationRecord &operation,
     if (!operation.reconciliation_descriptor || deal_ticket == 0)
         return false;
 
-    std::size_t matches = 0;
+    std::size_t history_deal_predicates = 0;
+    std::uint64_t resolved_ticket = 0;
     for (const auto &predicate : operation.reconciliation_descriptor->predicates) {
         if (predicate.kind != ReconciliationPredicateKind::history_deal_present)
             continue;
-        std::uint64_t resolved_ticket = predicate.ticket;
+        if (++history_deal_predicates != 1)
+            return false;
+        resolved_ticket = predicate.ticket;
         if (resolved_ticket == 0) {
             if (predicate.correlation_id == 0)
                 return false;
+            std::size_t binding_matches = 0;
             for (const auto &binding : operation.reconciliation_bindings) {
                 if (binding.correlation_id == predicate.correlation_id) {
-                    if (resolved_ticket != 0 && resolved_ticket != binding.broker_ticket)
+                    if (++binding_matches != 1 || !binding.valid())
                         return false;
                     resolved_ticket = binding.broker_ticket;
                 }
             }
+            if (binding_matches != 1)
+                return false;
         }
-        if (resolved_ticket == deal_ticket)
-            ++matches;
     }
-    return matches == 1;
+    return history_deal_predicates == 1 && resolved_ticket == deal_ticket;
 }
 
 } // namespace detail
@@ -237,7 +238,7 @@ inline ManagedOwnershipBasisProofStatus validate_managed_ownership_basis(
              OperationState::partially_filled &&
          source.reconciliation_descriptor->settled_state != OperationState::filled) ||
         source.reconciliation_descriptor->requested_volume == 0 ||
-        source.settled_volume == 0 || source.settled_volume != basis.max_managed_close_units ||
+        source.settled_volume == 0 ||
         source.settled_volume > source.reconciliation_descriptor->requested_volume ||
         !detail::operation_binds_deal(source, basis.basis_key.broker_key.deal_ticket))
         return ManagedOwnershipBasisProofStatus::invalid_operation_record;

@@ -144,6 +144,10 @@ struct ObservationBatch {
     ObservationDomain observed_domains = ObservationDomain::none; ///< Complete domains below.
     std::optional<ObservationWindow> history_orders_window; ///< Optional complete-query coverage.
     std::optional<ObservationWindow> history_deals_window; ///< Optional complete-query coverage.
+    /// Timestamp after the complete positions query, or zero when unavailable.
+    std::int64_t positions_observed_at_msc = 0;
+    /// Timestamp after the complete history-deals query, or zero when unavailable.
+    std::int64_t history_deals_observed_at_msc = 0;
     std::vector<Mt5OrderSnapshot> active_orders; ///< Full active-order snapshot when observed.
     std::vector<Mt5PositionSnapshot> positions; ///< Full position snapshot when observed.
     std::vector<Mt5HistoryOrderSnapshot> history_orders; ///< Bounded history-order evidence.
@@ -587,7 +591,11 @@ private:
         if ((!active_orders && !batch.active_orders.empty()) ||
             (!positions && !batch.positions.empty()) ||
             (!history_orders && (!batch.history_orders.empty() || batch.history_orders_window)) ||
-            (!history_deals && (!batch.history_deals.empty() || batch.history_deals_window)))
+            (!history_deals && (!batch.history_deals.empty() || batch.history_deals_window)) ||
+            (!positions && batch.positions_observed_at_msc != 0) ||
+            (!history_deals && batch.history_deals_observed_at_msc != 0) ||
+            batch.positions_observed_at_msc < 0 ||
+            batch.history_deals_observed_at_msc < 0)
             return false;
         if (history_orders && batch.history_orders_window &&
             !batch.history_orders_window->valid())

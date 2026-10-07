@@ -66,11 +66,13 @@ all-or-nothing scan for restart recovery.
 The runtime integration accepts two sequential `ObservationSample` values from
 one `ObservationGraph`. The post sample must carry the explicit post-action
 history query window containing the target deal; both samples must carry authoritative
-position domains, and the coordinator stamps each sample at the collection
-boundary. The adapter requires `pre_observed_at_msc < deal.time_msc <=
-post_observed_at_msc`, one matching pre/post position, continuous identity,
-complete deal fields, and an exact symbol-volume normalization proof. Only
-after `derive_broker_reversal_record()` succeeds does it call
+position domains, and the production provider records domain boundaries after
+each query, with history deals collected before post positions. The adapter
+requires `pre_positions_observed_at_msc < deal.time_msc <=
+post_history_deals_observed_at_msc <= post_positions_observed_at_msc`, one
+matching pre/post position, continuous identity, complete deal fields, and an
+exact symbol-volume normalization proof. Only after
+`derive_broker_reversal_record()` succeeds does it call
 `DurableBrokerReversalStore::commit()`. This path does not infer a managed
 `TradeId`, mutate managed exposure, or choose an ownership allocation policy.
 
@@ -156,11 +158,14 @@ The runtime adapter now connects fresh `ObservationGraph` evidence to this
 record without changing managed exposure. Its regressions cover:
 
 - same-graph, revision-ordered pre/post samples with an explicit post-action
-  history query window and collection timestamps bracketing the deal;
+  history query window and domain timestamps bracketing the deal and proving
+  history-before-post-positions order;
 - foreign-graph samples, duplicate position identities, non-INOUT deals, and
   non-step-normalized volumes remaining unresolved;
 - deals older than the pre-observation bound or newer than the post-observation
-  bound remaining unresolved.
+  bound remaining unresolved; and
+- a deal observed between post-position and post-history collection remaining
+  unresolved.
 
 The later managed allocation slice must still add regressions for:
 

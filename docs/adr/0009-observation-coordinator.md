@@ -35,10 +35,13 @@ successful graph apply it returns an `ObservationRefreshResult` containing an
 `ObservationSample` whose constructor is private to the coordinator. The
 sample carries the accepted batch, graph instance identity, exact graph
 revision, and the coordinator's positive wall-clock collection-boundary
-timestamp. This timestamp is provenance, not a caller-supplied event time, so a
-later policy can reject broker history that falls outside the two observation
-boundaries. A later policy still cannot treat a copied batch as a new
-observation or silently combine samples from another graph. The caller captures a
+timestamp. Domain-aware providers may additionally record query-completion
+timestamps in the batch; the production provider records history-deals before
+positions for the broker-reversal proof. These timestamps are provenance, not
+caller-supplied event times, so a later policy can reject broker history that
+falls outside the relevant domain boundaries. A later policy still cannot treat
+a copied batch as a new observation or silently combine samples from another
+graph. The caller captures a
 `ReconciliationBaseline` after an initial observation and retains it for
 subsequent checks on that same coordinator graph.
 

@@ -234,11 +234,12 @@ an account switch discards the whole batch. The `ObservationCoordinator` owns
 one non-copyable graph and applies a provider batch only after collection
 completes, so a provider failure cannot leave a partial graph update.
 `refresh()` is synchronous and caller-driven: it does not start a worker, retry
-a failed call, or invoke `order_send`. Each accepted `ObservationSample` also
-retains a coordinator-captured UTC wall-clock boundary timestamp; callers cannot
-manufacture or supply that value. Reversal reconciliation uses the timestamps
-from its pre/post samples to require the target deal time to be strictly after
-the pre boundary and no later than the post boundary.
+a failed call, or invoke `order_send`. Each accepted sample retains the
+coordinator provenance plus provider-captured positions/history-deals domain
+boundaries when those domains are queried. The production provider queries
+history deals before positions, and reversal reconciliation requires the target
+deal time to be after the pre-position boundary and no later than the
+post-history boundary, which must precede the post-position boundary.
 
 Capture the baseline on the coordinator graph, refresh the requested domains,
 then pass a `DispatchConsistencyRequest` to `DispatchConsistencyGate`. The gate

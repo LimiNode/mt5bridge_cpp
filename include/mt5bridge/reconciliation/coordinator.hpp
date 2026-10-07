@@ -26,6 +26,9 @@ inline std::int64_t current_observation_time_msc() {
     return milliseconds > 0 ? milliseconds : 0;
 }
 
+/// \brief Supplies a broker-compatible observation boundary timestamp.
+using ObservationTimestampSource = std::function<std::int64_t()>;
+
 /// \struct ObservationCollectionRequest
 /// \brief Selects account-wide domains for one authoritative collection.
 struct ObservationCollectionRequest {
@@ -63,9 +66,16 @@ public:
 /// \brief Adapts typed `Client` observations to the coordinator provider seam.
 class ClientObservationProvider final : public ObservationProvider {
 public:
-    /// \brief Binds the provider to a caller-owned client.
+    /// \brief Binds the provider to a caller-owned client and observation clock.
     /// \param client Initialized client used for typed observation calls.
-    explicit ClientObservationProvider(Client &client) : client_(client) {}
+    /// \param timestamp_source Clock sampled after positions/history-deals queries.
+    explicit ClientObservationProvider(
+        Client &client,
+        ObservationTimestampSource timestamp_source = current_observation_time_msc)
+        : client_(client), timestamp_source_(std::move(timestamp_source)) {
+        if (!timestamp_source_)
+            throw std::invalid_argument("observation timestamp source is empty");
+    }
 
     /// \brief Collects account-wide active and optional bounded history evidence.
     /// \param request Domains and windows to query.
@@ -84,11 +94,6 @@ public:
                                      ObservationDomain::active_orders;
             batch.active_orders = client_.orders();
         }
-        if (request.observe_positions) {
-            batch.observed_domains = batch.observed_domains |
-                                     ObservationDomain::positions;
-            batch.positions = client_.positions();
-        }
         if (request.history_orders_window) {
             batch.observed_domains = batch.observed_domains |
                                      ObservationDomain::history_orders;
@@ -106,6 +111,17 @@ public:
             query.from_msc = request.history_deals_window->from_msc;
             query.to_msc = request.history_deals_window->to_msc;
             batch.history_deals = client_.history_deals(query);
+            batch.history_deals_observed_at_msc = timestamp_source_();
+            if (batch.history_deals_observed_at_msc <= 0)
+                throw std::runtime_error("history-deals observation timestamp unavailable");
+        }
+        if (request.observe_positions) {
+            batch.observed_domains = batch.observed_domains |
+                                     ObservationDomain::positions;
+            batch.positions = client_.positions();
+            batch.positions_observed_at_msc = timestamp_source_();
+            if (batch.positions_observed_at_msc <= 0)
+                throw std::runtime_error("positions observation timestamp unavailable");
         }
         const auto account_after = make_account_key(client_.account_info());
         if (!account_after.valid())
@@ -117,6 +133,7 @@ public:
 
 private:
     Client &client_;
+    ObservationTimestampSource timestamp_source_;
 };
 
 /// \class ObservationSample
@@ -182,7 +199,7 @@ struct ObservationRefreshResult {
 /// \brief Owns one synchronous graph update loop without runtime side effects.
 class ObservationCoordinator {
 public:
-    using TimestampSource = std::function<std::int64_t()>;
+    using TimestampSource = ObservationTimestampSource;
 
     /// \brief Binds a provider and optionally fixes the graph account scope.
     /// \param provider Observation source owned by the caller.

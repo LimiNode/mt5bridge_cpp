@@ -175,8 +175,9 @@ The broker-only `DEAL_ENTRY_INOUT` integration boundary is specified in
 [ADR-0030](adr/0030-durable-reversal-attribution-model.md) and exposed by
 `include/mt5bridge/dispatch/broker_reversal_reconciliation.hpp`. It accepts
 only same-graph, revision-ordered pre/post samples with an explicit post-action
-history query window and coordinator-captured collection timestamps bracketing
-the deal, plus exact volume-step proof; it then commits a durable broker
+history query window and provider-captured domain timestamps proving
+history-before-post-positions order and bracketing the deal, plus exact
+volume-step proof; it then commits a durable broker
 decomposition without assigning managed ownership or changing exposure.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and

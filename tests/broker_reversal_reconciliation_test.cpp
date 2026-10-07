@@ -73,11 +73,12 @@ mt5bridge::ObservationBatch positions_batch(
 
 mt5bridge::ObservationBatch post_batch(
     std::vector<Mt5PositionSnapshot> positions,
-    std::vector<Mt5DealSnapshot> deals) {
+    std::vector<Mt5DealSnapshot> deals,
+    mt5bridge::ObservationWindow window = kWindow) {
     auto batch = positions_batch(std::move(positions));
     batch.observed_domains = batch.observed_domains |
                              mt5bridge::ObservationDomain::history_deals;
-    batch.history_deals_window = kWindow;
+    batch.history_deals_window = window;
     batch.history_deals = std::move(deals);
     return batch;
 }
@@ -149,18 +150,29 @@ struct Samples {
     mt5bridge::ObservationSample post;
 };
 
+struct TestClock {
+    std::int64_t next_msc = 0;
+
+    std::int64_t operator()() {
+        next_msc += 1000;
+        return next_msc;
+    }
+};
+
 Samples make_samples(std::vector<Mt5PositionSnapshot> post_positions,
-                     std::vector<Mt5DealSnapshot> deals) {
+                     std::vector<Mt5DealSnapshot> deals,
+                     mt5bridge::ObservationWindow window = kWindow) {
     auto provider = std::make_unique<Provider>(std::vector<mt5bridge::ObservationBatch>{
         positions_batch({position(100, 800, 0, 5.0)}),
-        post_batch(std::move(post_positions), std::move(deals))});
+        post_batch(std::move(post_positions), std::move(deals), window)});
+    TestClock clock;
     auto coordinator = std::make_unique<mt5bridge::ObservationCoordinator>(
-        *provider, kAccount);
+        *provider, kAccount, clock);
     mt5bridge::ObservationCollectionRequest pre_request;
     pre_request.observe_active_orders = false;
     mt5bridge::ObservationCollectionRequest post_request;
     post_request.observe_active_orders = false;
-    post_request.history_deals_window = kWindow;
+    post_request.history_deals_window = window;
     const auto pre_refresh = coordinator->refresh(pre_request);
     require(pre_refresh.sample.has_value(), "pre-reversal sample was not admitted");
     const auto post_refresh = coordinator->refresh(post_request);
@@ -172,6 +184,9 @@ Samples make_samples(std::vector<Mt5PositionSnapshot> post_positions,
 void check_commit_and_replay() {
     auto samples = make_samples({position(101, 800, 1, 1.0)},
                                  {deal(701, 702, 800, 1, 2, 6.0)});
+    require(samples.pre.observed_at_msc() == 1000 &&
+                samples.post.observed_at_msc() == 2000,
+            "test observation clock did not bracket the samples");
     MemoryStore store;
     const auto first = mt5bridge::reconcile_broker_reversal(
         samples.coordinator->graph(), samples.pre, samples.post, request(), store);
@@ -216,6 +231,29 @@ void check_fail_closed_boundaries() {
                 mt5bridge::BrokerReversalReconcileStatus::invalid_observation,
             "non-step-normalized broker volume crossed the runtime boundary");
 
+    const mt5bridge::ObservationWindow broad_window{0, 3000};
+    auto old_deal = make_samples({position(101, 800, 1, 1.0)},
+                                 {deal(701, 702, 800, 1, 2, 6.0, 500)},
+                                 broad_window);
+    auto old_deal_request = request();
+    old_deal_request.history_window = broad_window;
+    const auto before_pre_snapshot = mt5bridge::reconcile_broker_reversal(
+        old_deal.coordinator->graph(), old_deal.pre, old_deal.post,
+        old_deal_request, store);
+    require(before_pre_snapshot.status ==
+                mt5bridge::BrokerReversalReconcileStatus::invalid_observation,
+            "deal before pre-observation bound crossed the runtime boundary");
+
+    auto late_deal = make_samples({position(101, 800, 1, 1.0)},
+                                  {deal(701, 702, 800, 1, 2, 6.0, 2500)},
+                                  broad_window);
+    const auto after_post_snapshot = mt5bridge::reconcile_broker_reversal(
+        late_deal.coordinator->graph(), late_deal.pre, late_deal.post,
+        old_deal_request, store);
+    require(after_post_snapshot.status ==
+                mt5bridge::BrokerReversalReconcileStatus::invalid_observation,
+            "deal after post-observation bound crossed the runtime boundary");
+
     auto wrong_window_request = request();
     wrong_window_request.history_window = {0, 2000};
     const auto wrong_window = mt5bridge::reconcile_broker_reversal(
@@ -223,7 +261,7 @@ void check_fail_closed_boundaries() {
         wrong_window_request, store);
     require(wrong_window.status ==
                 mt5bridge::BrokerReversalReconcileStatus::invalid_observation,
-            "non-causal history window crossed the runtime boundary");
+            "post-action history query window crossed the runtime boundary");
 
     const auto reversed_samples = mt5bridge::reconcile_broker_reversal(
         unrelated.coordinator->graph(), unrelated.post, unrelated.pre, request(),

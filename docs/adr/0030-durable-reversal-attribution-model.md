@@ -64,14 +64,15 @@ atomic replacement, duplicate-idempotent commit, conflict detection, and
 all-or-nothing scan for restart recovery.
 
 The runtime integration accepts two sequential `ObservationSample` values from
-one `ObservationGraph`. The post sample must carry the explicit causal
-history window containing the target deal; both samples must carry authoritative
-position domains, and the adapter requires one matching pre/post position,
-continuous identity, complete deal fields, and an exact symbol-volume
-normalization proof. Only after `derive_broker_reversal_record()` succeeds does
-it call `DurableBrokerReversalStore::commit()`. This path does not infer a
-managed `TradeId`, mutate managed exposure, or choose an ownership allocation
-policy.
+one `ObservationGraph`. The post sample must carry the explicit post-action
+history query window containing the target deal; both samples must carry authoritative
+position domains, and the coordinator stamps each sample at the collection
+boundary. The adapter requires `pre_observed_at_msc < deal.time_msc <=
+post_observed_at_msc`, one matching pre/post position, continuous identity,
+complete deal fields, and an exact symbol-volume normalization proof. Only
+after `derive_broker_reversal_record()` succeeds does it call
+`DurableBrokerReversalStore::commit()`. This path does not infer a managed
+`TradeId`, mutate managed exposure, or choose an ownership allocation policy.
 
 The model is account-mode aware:
 
@@ -154,10 +155,12 @@ The broker-only implementation now has focused regressions for:
 The runtime adapter now connects fresh `ObservationGraph` evidence to this
 record without changing managed exposure. Its regressions cover:
 
-- same-graph, revision-ordered pre/post samples with an explicit causal
-  history window;
+- same-graph, revision-ordered pre/post samples with an explicit post-action
+  history query window and collection timestamps bracketing the deal;
 - foreign-graph samples, duplicate position identities, non-INOUT deals, and
-  non-step-normalized volumes remaining unresolved.
+  non-step-normalized volumes remaining unresolved;
+- deals older than the pre-observation bound or newer than the post-observation
+  bound remaining unresolved.
 
 The later managed allocation slice must still add regressions for:
 

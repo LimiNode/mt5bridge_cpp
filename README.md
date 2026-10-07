@@ -225,8 +225,11 @@ authorize `order_send`; its contract is recorded in
 For a proven netting `DEAL_ENTRY_INOUT`, the focused dispatch adapter
 `<mt5bridge/dispatch/broker_reversal_reconciliation.hpp>` accepts only two
 sequential `ObservationSample` values from the same graph. The caller supplies
-the causal post-action history window and an exact symbol-volume normalization
-proof; the adapter requires one matching deal, continuous
+the post-action history query window and an exact symbol-volume normalization
+proof. The coordinator stamps each accepted sample at the collection boundary;
+the adapter then requires the deal time to satisfy
+`pre_observed_at_msc < deal.time_msc <= post_observed_at_msc`, plus one matching
+deal, continuous
 `POSITION_IDENTIFIER`, matching `DEAL_POSITION_ID`, and complete pre/post
 position evidence before deriving and committing the broker-only reversal
 record. It never assigns a managed `TradeId`, changes managed exposure, or

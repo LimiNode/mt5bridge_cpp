@@ -60,7 +60,7 @@ inline std::optional<BrokerVolume> normalize_broker_volume(
 struct BrokerReversalObservationRequest {
     std::uint64_t deal_ticket = 0; ///< DEAL_TICKET expected in the post sample.
     BrokerMarginMode margin_mode = BrokerMarginMode::retail_netting;
-    ObservationWindow history_window; ///< Causal post-action history window.
+    ObservationWindow history_window; ///< Post-action history query window.
     BrokerVolumeNormalization volume;
 
     /// \brief Tests whether the request can produce broker evidence.
@@ -222,6 +222,8 @@ inline std::optional<BrokerReversalObservation> derive_broker_reversal_observati
         post.graph_instance_id() != graph.instance_id() ||
         pre.graph_instance_id() != post.graph_instance_id() ||
         pre.graph_revision() == 0 || post.graph_revision() <= pre.graph_revision() ||
+        pre.observed_at_msc() <= 0 ||
+        post.observed_at_msc() <= pre.observed_at_msc() ||
         post.graph_revision() > graph.revision() ||
         pre.batch().account != graph.account_key() ||
         post.batch().account != graph.account_key() ||
@@ -249,6 +251,8 @@ inline std::optional<BrokerReversalObservation> derive_broker_reversal_observati
     if (!deal || (deal->known_fields & kRequiredDealFields) != kRequiredDealFields ||
         deal->position_id == 0 || deal->order_ticket == 0 ||
         deal->entry != static_cast<std::uint32_t>(BrokerDealEntry::inout) ||
+        deal->time_msc <= pre.observed_at_msc() ||
+        deal->time_msc > post.observed_at_msc() ||
         deal->time_msc < request.history_window.from_msc ||
         deal->time_msc > request.history_window.to_msc)
         return std::nullopt;
@@ -312,6 +316,8 @@ inline std::optional<BrokerReversalObservation> derive_broker_reversal_observati
     detail::BrokerReversalDigest digest;
     digest.add_u64(pre.graph_revision());
     digest.add_u64(post.graph_revision());
+    digest.add_u64(static_cast<std::uint64_t>(pre.observed_at_msc()));
+    digest.add_u64(static_cast<std::uint64_t>(post.observed_at_msc()));
     digest.add_u64(request.history_window.from_msc);
     digest.add_u64(request.history_window.to_msc);
     detail::add_position_digest(&digest, *pre_position);

@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace {
@@ -184,8 +185,34 @@ void check_incremental_frontier() {
     require(!frontier_to_remove.empty(), "frontier fixture was not written");
     std::filesystem::remove(frontier_to_remove);
     const auto orphan_scan = store.scan();
-    require(orphan_scan.status == mt5bridge::ManagedDealSettlementScanStatus::invalid_record,
-            "restart scan accepted an orphan immutable deal fact");
+    require(orphan_scan.complete() && orphan_scan.facts.size() == 1 &&
+                orphan_scan.pending_facts.size() == 1 && orphan_scan.frontiers.size() == 1,
+            "restart scan did not preserve an unpublished fact as pending");
+
+    require(store.commit(*second_proof, journal) ==
+                mt5bridge::ManagedDealSettlementCommitStatus::committed,
+            "pending fact/frontier replay was not recoverable");
+    const auto recovered_scan = store.scan();
+    require(recovered_scan.complete() && recovered_scan.facts.size() == 2 &&
+                recovered_scan.pending_facts.empty() && recovered_scan.frontiers.size() == 2,
+            "pending fact/frontier replay did not restore the committed set");
+
+    std::filesystem::path first_fact_to_remove;
+    const std::wstring first_fact_suffix = L"-00000000000002bd.bin";
+    for (const auto &entry : std::filesystem::directory_iterator(root)) {
+        const auto filename = entry.path().filename().wstring();
+        if (entry.path().extension() == L".bin" && filename.rfind(L"deal-", 0) == 0 &&
+            filename.size() >= first_fact_suffix.size() &&
+            filename.compare(filename.size() - first_fact_suffix.size(),
+                             first_fact_suffix.size(), first_fact_suffix) == 0) {
+            first_fact_to_remove = entry.path();
+            break;
+        }
+    }
+    require(!first_fact_to_remove.empty(), "first fact fixture was not written");
+    std::filesystem::remove(first_fact_to_remove);
+    require(store.scan().status == mt5bridge::ManagedDealSettlementScanStatus::invalid_record,
+            "restart scan accepted a frontier with a missing fact");
     std::filesystem::remove_all(root);
 }
 

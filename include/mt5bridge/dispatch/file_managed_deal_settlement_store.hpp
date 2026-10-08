@@ -15,11 +15,12 @@ namespace mt5bridge {
 enum class ManagedDealSettlementScanStatus { complete, invalid_record, io_error };
 
 /// \struct ManagedDealSettlementScanResult
-/// \brief Carries durable facts and frontiers recovered after restart.
+/// \brief Carries committed facts, pending facts, and frontiers recovered after restart.
 struct ManagedDealSettlementScanResult {
     ManagedDealSettlementScanStatus status = ManagedDealSettlementScanStatus::io_error;
-    std::vector<ManagedDealSettlement> facts;
+    std::vector<ManagedDealSettlement> facts; ///< Facts referenced by a committed frontier.
     std::vector<ManagedSettlementFrontier> frontiers;
+    std::vector<ManagedDealSettlement> pending_facts; ///< Valid facts awaiting publication.
 
     /// \brief Tests whether the complete durable set was recovered.
     /// \return True only when no record was malformed or unreadable.

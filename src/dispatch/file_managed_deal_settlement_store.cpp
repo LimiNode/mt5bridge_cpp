@@ -549,28 +549,6 @@ ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::commit(
     if (frontier_status == ReadStatus::valid && fact_status == ReadStatus::valid)
         return ManagedDealSettlementCommitStatus::already_committed;
 
-    if (frontier_status == ReadStatus::absent) {
-        const auto bytes = serialize_record(frontier);
-        if (!bytes) {
-            set_error(last_error_, "managed settlement frontier exceeds storage limits");
-            return ManagedDealSettlementCommitStatus::invalid_record;
-        }
-        const auto target = frontier_path(directory_, frontier);
-        const std::filesystem::path temporary(target.wstring() + L".tmp");
-        DeleteFileW(temporary.c_str());
-        if (!write_file(temporary, *bytes, last_error_))
-            return ManagedDealSettlementCommitStatus::io_error;
-        if (!MoveFileExW(temporary.c_str(), target.c_str(),
-                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            last_error_ = win32_error("MoveFileExW(managed settlement frontier)");
-            DeleteFileW(temporary.c_str());
-            return ManagedDealSettlementCommitStatus::io_error;
-        }
-    }
-
-    // Publish the frontier first. If the process stops before the fact is
-    // published, restart scan rejects the frontier's missing reference and
-    // never treats a partial pair as committed.
     if (fact_status == ReadStatus::absent) {
         const auto bytes = serialize_record(fact);
         if (!bytes) {
@@ -585,6 +563,27 @@ ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::commit(
         if (!MoveFileExW(temporary.c_str(), target.c_str(),
                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
             last_error_ = win32_error("MoveFileExW(managed deal settlement fact)");
+            DeleteFileW(temporary.c_str());
+            return ManagedDealSettlementCommitStatus::io_error;
+        }
+    }
+
+    // The frontier is the publication marker. A crash before it is published
+    // leaves a recoverable pending fact, never a partially committed frontier.
+    if (frontier_status == ReadStatus::absent) {
+        const auto bytes = serialize_record(frontier);
+        if (!bytes) {
+            set_error(last_error_, "managed settlement frontier exceeds storage limits");
+            return ManagedDealSettlementCommitStatus::invalid_record;
+        }
+        const auto target = frontier_path(directory_, frontier);
+        const std::filesystem::path temporary(target.wstring() + L".tmp");
+        DeleteFileW(temporary.c_str());
+        if (!write_file(temporary, *bytes, last_error_))
+            return ManagedDealSettlementCommitStatus::io_error;
+        if (!MoveFileExW(temporary.c_str(), target.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            last_error_ = win32_error("MoveFileExW(managed settlement frontier)");
             DeleteFileW(temporary.c_str());
             return ManagedDealSettlementCommitStatus::io_error;
         }
@@ -739,6 +738,10 @@ ManagedDealSettlementScanResult WindowsFileManagedDealSettlementStore::scan() co
             }
         }
     }
+    std::vector<ManagedDealSettlement> committed_facts;
+    std::vector<ManagedDealSettlement> pending_facts;
+    committed_facts.reserve(result.facts.size());
+    pending_facts.reserve(result.facts.size());
     for (const auto &fact : result.facts) {
         const auto referenced = std::any_of(
             result.frontiers.begin(), result.frontiers.end(),
@@ -755,11 +758,10 @@ ManagedDealSettlementScanResult WindowsFileManagedDealSettlementStore::scan() co
                                entry.managed_logical_units == fact.managed_logical_units;
                     });
             });
-        if (!referenced) {
-            set_error(last_error_, "orphan managed deal settlement fact");
-            return {ManagedDealSettlementScanStatus::invalid_record, {}, {}};
-        }
+        (referenced ? committed_facts : pending_facts).push_back(fact);
     }
+    result.facts.swap(committed_facts);
+    result.pending_facts.swap(pending_facts);
     result.status = ManagedDealSettlementScanStatus::complete;
     return result;
 #else

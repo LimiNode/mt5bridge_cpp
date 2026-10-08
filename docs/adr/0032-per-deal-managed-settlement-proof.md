@@ -84,6 +84,12 @@ frontier and that the exact sum of their logical units equals
 `settled_volume` at that revision. A later frontier may append a newly proven
 deal without rewriting an earlier per-deal fact or its provenance.
 
+The file store publishes the immutable fact before the frontier and treats the
+frontier as the publication marker. A restart may therefore find a valid fact
+that has not yet been published into a frontier; the scan reports it as a
+pending fact, while only frontier-referenced facts are part of the committed
+settlement set. A frontier that references a missing fact remains invalid.
+
 For an operation settled by more than one deal, the producer must emit the
 complete frontier proof in addition to the immutable per-deal facts. If the
 decomposition is incomplete, duplicated, stale, or cannot distinguish one

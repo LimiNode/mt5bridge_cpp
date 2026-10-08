@@ -106,14 +106,16 @@ src/
 ├── bridge/mt5_bridge.cpp
 ├── runtime/{runtime_lane.*,python_ref.hpp}
 ├── trade/python_dispatch_transport.*
-└── dispatch/{file_journal_store,one_shot_backend}.*
+└── dispatch/{file_journal_store,file_broker_allocation_store,
+              file_managed_ownership_basis_store,
+              file_managed_deal_settlement_store,one_shot_backend}.*
 ```
 
 The public dispatch domain is exposed through `dispatch.hpp` and its focused
 headers under `dispatch/`. The durable admission contract remains header-only;
-the Python-free concrete journal, broker-envelope, and ownership-basis stores
-are implemented by `src/dispatch/file_*.cpp` in the separate
-`mt5bridge::journal` target. The private one-shot execution seam lives in
+the Python-free concrete journal, broker-envelope, ownership-basis, and
+managed-deal-settlement stores are implemented by `src/dispatch/file_*.cpp` in
+the separate `mt5bridge::journal` target. The private one-shot execution seam lives in
 `src/dispatch/one_shot_backend.hpp/.cpp` and is built as
 `mt5bridge::one_shot_backend`; the CPython-specific
 `src/trade/python_dispatch_transport.hpp/.cpp` adapter is compiled only into
@@ -188,7 +190,9 @@ The next quantitative boundary is specified by
 [ADR-0032](adr/0032-per-deal-managed-settlement-proof.md): it must prove an
 exact managed logical contribution for each `(OperationKey, DEAL_TICKET)`
 without treating cumulative operation settlement as a per-deal cap or mapping
-it to broker volume.
+it to broker volume. The current bounded implementation persists immutable
+deal facts and revision-pinned cumulative frontiers; owner-loop wiring and
+broker-volume mapping remain separate.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

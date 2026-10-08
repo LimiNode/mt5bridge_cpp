@@ -105,8 +105,9 @@ and mutually consistent:
 2. The entry identifies a deal from authoritative observation; an arbitrary
    caller-selected ticket is insufficient. Its source revision and provenance
    are immutable once committed.
-3. The observation belongs to the same account/operation and carries complete
-   deal identity and provenance for the exact logical contribution.
+3. The observation is account-consistent and is bound to the operation through
+   the reconciliation proof/context; it carries complete deal identity and
+   provenance for the exact logical contribution.
 
 A frontier proof may be committed only when all of these additional facts are
    durable:

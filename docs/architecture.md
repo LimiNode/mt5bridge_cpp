@@ -184,6 +184,11 @@ The first managed ownership boundary is specified in
 proof records a durable association between a settled close operation and a
 durable broker envelope, while leaving per-deal volume attribution,
 broker-volume conversion, and both broker legs unallocated.
+The next quantitative boundary is specified by
+[ADR-0032](adr/0032-per-deal-managed-settlement-proof.md): it must prove an
+exact managed logical contribution for each `(OperationKey, DEAL_TICKET)`
+without treating cumulative operation settlement as a per-deal cap or mapping
+it to broker volume.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

@@ -192,7 +192,10 @@ exact managed logical contribution for each `(OperationKey, DEAL_TICKET)`
 without treating cumulative operation settlement as a per-deal cap or mapping
 it to broker volume. The current bounded implementation persists immutable
 deal facts and revision-pinned cumulative frontiers; owner-loop wiring and
-broker-volume mapping remain separate.
+broker-leg allocation remain separate. The exact decimal conversion boundary
+is specified by [ADR-0033](adr/0033-exact-managed-broker-volume-mapping.md):
+it binds existing managed and broker deal proofs with integer-only scale
+conversion, but does not consume broker legs or allocate ownership.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

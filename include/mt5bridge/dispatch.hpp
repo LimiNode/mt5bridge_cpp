@@ -10,6 +10,7 @@
 #include "dispatch/broker_allocation_envelope.hpp"
 #include "dispatch/managed_ownership_basis.hpp"
 #include "dispatch/managed_deal_settlement.hpp"
+#include "dispatch/managed_broker_volume_mapping.hpp"
 #include "dispatch/lease.hpp"
 #include "dispatch/admission.hpp"
 #include "dispatch/file_journal_store.hpp"

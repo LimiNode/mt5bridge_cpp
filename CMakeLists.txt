@@ -154,6 +154,12 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_managed_deal_settlement_store
              COMMAND mt5bridge_managed_deal_settlement_store_test)
+    add_executable(mt5bridge_managed_broker_volume_mapping_test
+                   tests/managed_broker_volume_mapping_test.cpp)
+    target_link_libraries(mt5bridge_managed_broker_volume_mapping_test PRIVATE
+                          mt5bridge::client)
+    add_test(NAME mt5bridge_managed_broker_volume_mapping
+             COMMAND mt5bridge_managed_broker_volume_mapping_test)
     add_executable(mt5bridge_dispatch_admission_header_only_test
                    tests/dispatch_admission_header_only_test.cpp)
     target_link_libraries(mt5bridge_dispatch_admission_header_only_test PRIVATE
@@ -191,6 +197,7 @@ if(BUILD_TESTING)
                    tests/header_self_containment_dispatch_broker_allocation_envelope.cpp
                    tests/header_self_containment_dispatch_managed_ownership_basis.cpp
                    tests/header_self_containment_dispatch_managed_deal_settlement.cpp
+                   tests/header_self_containment_dispatch_managed_broker_volume_mapping.cpp
                    tests/header_self_containment_dispatch_lease.cpp
                    tests/header_self_containment_dispatch_admission.cpp
                    tests/header_self_containment_environment_consistency.cpp

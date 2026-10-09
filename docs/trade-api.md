@@ -642,7 +642,10 @@ reversals and CloseBy, respectively.
   mutation. The bounded per-deal logical settlement proof in
   [ADR-0032](adr/0032-per-deal-managed-settlement-proof.md) now persists
   immutable deal facts and cumulative frontiers, while remaining separate from
-  broker-volume mapping and allocation policy; see
+  broker-volume mapping and allocation policy. ADR-0033 defines the exact
+  integer-only logical-to-broker conversion proof without consuming either
+  broker leg; see
+  [ADR-0033](adr/0033-exact-managed-broker-volume-mapping.md) and
   [ADR-0031](adr/0031-durable-managed-ownership-basis.md).
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.

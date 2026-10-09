@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted as a design-only boundary after ADR-0031. The durable association
-between a close operation and a broker reversal exists, but no per-deal logical
-settlement record or runtime producer is introduced by this ADR.
+Accepted as the first implementation boundary after ADR-0031. The durable
+per-deal/frontier store and private graph-bound producer are implemented;
+broker-volume mapping, allocation policy, and managed-exposure integration
+remain deferred.
 
 ## Context
 
@@ -33,7 +34,7 @@ to broker step-normalized volume or consumes a broker allocation envelope.
 
 ## Decision
 
-The future immutable per-deal fact is keyed by the composite:
+The immutable per-deal fact is keyed by the composite:
 
 ```text
 (OperationKey, DEAL_TICKET)
@@ -82,6 +83,14 @@ revision. It proves that the referenced entry set is complete for that
 frontier and that the exact sum of their logical units equals
 `settled_volume` at that revision. A later frontier may append a newly proven
 deal without rewriting an earlier per-deal fact or its provenance.
+
+The file store publishes the immutable fact before the frontier and treats the
+frontier as the publication marker. A restart may therefore find a valid fact
+that has not yet been published into a frontier; the scan reports it as a
+pending fact, while only frontier-referenced facts are part of the committed
+settlement set. A frontier that references a missing fact remains invalid.
+The publication manifest is retained as an idempotent recovery receipt; an
+exactly committed pair is not reported as pending.
 
 For an operation settled by more than one deal, the producer must emit the
 complete frontier proof in addition to the immutable per-deal facts. If the
@@ -141,15 +150,18 @@ an incomplete deal set, or a conflicting replay fails closed.
 - A cumulative journal frontier can no longer be reused as a per-deal cap.
 - Multi-deal close settlement has an explicit place to record exact logical
   contributions before volume-domain mapping is considered.
-- The next implementation slice must define the authoritative producer and
-  durable replay format together; a value object with caller-supplied units is
-  not sufficient proof.
-- Until that implementation exists, managed `INOUT` settlement and broker-leg
-  allocation remain unchanged and fail closed.
+- The private producer derives the fact from a fresh graph-bound observation
+  while the owner supplies only the already-authoritative logical delta. The
+  durable store rejects missing, stale, or conflicting source evidence.
+- Owner-loop wiring that commits these facts alongside managed state, and any
+  exact broker-volume mapping, remain separate follow-up slices.
+- Until owner-loop integration and a later allocation policy exist, managed
+  `INOUT` settlement and broker-leg allocation remain unchanged and fail
+  closed.
 
 ## Verification boundary
 
-The eventual implementation must cover at least:
+The implementation regressions cover:
 
 - one operation with two deals proven at different revisions, plus a frontier
   whose logical contributions sum exactly to its cumulative settled value;
@@ -160,3 +172,6 @@ The eventual implementation must cover at least:
 - restart reconstruction from immutable per-deal records and frontier proofs;
 - proof that no broker-volume or managed-exposure mutation occurs in this
   slice.
+
+Owner-loop integration and exact volume-domain mapping remain future
+verification boundaries.

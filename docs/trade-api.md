@@ -639,9 +639,10 @@ reversals and CloseBy, respectively.
   that envelope, but it records only durable association: cumulative operation
   settlement is not a per-deal volume proof. It does not authorize
   broker-volume conversion, reverse-open ownership, or managed exposure
-  mutation. The next bounded contract is the per-deal logical settlement proof
-  in [ADR-0032](adr/0032-per-deal-managed-settlement-proof.md); it must remain
-  separate from broker-volume mapping and allocation policy; see
+  mutation. The bounded per-deal logical settlement proof in
+  [ADR-0032](adr/0032-per-deal-managed-settlement-proof.md) now persists
+  immutable deal facts and cumulative frontiers, while remaining separate from
+  broker-volume mapping and allocation policy; see
   [ADR-0031](adr/0031-durable-managed-ownership-basis.md).
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.

@@ -189,9 +189,9 @@ void check_incremental_frontier() {
                 orphan_scan.pending_facts.size() == 1 && orphan_scan.frontiers.size() == 1,
             "restart scan did not preserve an unpublished fact as pending");
 
-    require(store.commit(*second_proof, journal) ==
+    require(store.recover_pending(journal) ==
                 mt5bridge::ManagedDealSettlementCommitStatus::committed,
-            "pending fact/frontier replay was not recoverable");
+            "pending publication replay was not recoverable");
     const auto recovered_scan = store.scan();
     require(recovered_scan.complete() && recovered_scan.facts.size() == 2 &&
                 recovered_scan.pending_facts.empty() && recovered_scan.frontiers.size() == 2,
@@ -216,6 +216,71 @@ void check_incremental_frontier() {
     std::filesystem::remove_all(root);
 }
 
+void check_restart_recovery() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("mt5bridge_managed_deal_restart_" +
+                       std::to_string(std::chrono::steady_clock::now()
+                                          .time_since_epoch()
+                                          .count()));
+    std::filesystem::remove_all(root);
+
+    mt5bridge::OperationRecord durable_operation;
+    {
+        MemoryJournalStore journal;
+        mt5bridge::ObservationGraph graph(account());
+        mt5bridge::ObservationBatch baseline_batch;
+        baseline_batch.account = account();
+        baseline_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+        baseline_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+        require(graph.apply(baseline_batch).accepted(), "restart baseline failed");
+        const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
+        const auto source_operation = operation(baseline, 8, 2);
+        journal.records[source_operation.key] = source_operation;
+        durable_operation = source_operation;
+
+        mt5bridge::ObservationBatch deal_batch;
+        deal_batch.account = account();
+        deal_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+        deal_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+        deal_batch.history_deals = {deal(701, 2.0)};
+        require(graph.apply(deal_batch).accepted(), "restart deal observation failed");
+        const auto proof = mt5bridge::dispatch::ManagedDealSettlementProducer::create(
+            source_operation, baseline, graph, 701, 2);
+        require(proof.has_value(), "restart proof was not derived");
+
+        mt5bridge::WindowsFileManagedDealSettlementStore store(root);
+        require(store.ready(), "restart store did not open");
+        require(store.commit(*proof, journal) ==
+                    mt5bridge::ManagedDealSettlementCommitStatus::committed,
+                "restart fixture commit failed");
+    }
+
+    for (const auto &entry : std::filesystem::directory_iterator(root)) {
+        const auto filename = entry.path().filename().wstring();
+        if (entry.path().extension() == L".bin" && filename.rfind(L"frontier-", 0) == 0) {
+            std::filesystem::remove(entry.path());
+            break;
+        }
+    }
+
+    MemoryJournalStore restarted_journal;
+    restarted_journal.records[durable_operation.key] = durable_operation;
+    mt5bridge::WindowsFileManagedDealSettlementStore restarted_store(root);
+    require(restarted_store.ready(), "restarted store did not open");
+    const auto pending = restarted_store.scan();
+    require(pending.complete() && pending.facts.empty() && pending.frontiers.empty() &&
+                pending.pending_facts.size() == 1,
+            "restart scan did not recover the durable pending publication");
+    require(restarted_store.recover_pending(restarted_journal) ==
+                mt5bridge::ManagedDealSettlementCommitStatus::committed,
+            "restart recovery did not publish the durable frontier");
+    const auto recovered = restarted_store.scan();
+    require(recovered.complete() && recovered.facts.size() == 1 &&
+                recovered.pending_facts.empty() && recovered.frontiers.size() == 1,
+            "restart recovery did not reconstruct the committed settlement");
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 /// \brief Runs immutable deal-fact and incremental-frontier checks.
@@ -223,6 +288,7 @@ void check_incremental_frontier() {
 int main() {
     try {
         check_incremental_frontier();
+        check_restart_recovery();
         std::cout << "managed deal settlement checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {

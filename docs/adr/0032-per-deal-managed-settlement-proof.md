@@ -89,6 +89,8 @@ frontier as the publication marker. A restart may therefore find a valid fact
 that has not yet been published into a frontier; the scan reports it as a
 pending fact, while only frontier-referenced facts are part of the committed
 settlement set. A frontier that references a missing fact remains invalid.
+The publication manifest is retained as an idempotent recovery receipt; an
+exactly committed pair is not reported as pending.
 
 For an operation settled by more than one deal, the producer must emit the
 complete frontier proof in addition to the immutable per-deal facts. If the

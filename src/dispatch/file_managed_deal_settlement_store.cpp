@@ -21,6 +21,7 @@ namespace mt5bridge {
 namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'M', 'D', 'S', '0', '1'}};
+constexpr std::array<char, 8> kPendingMagic{{'M', 'T', '5', 'M', 'D', 'P', '0', '1'}};
 constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
@@ -28,6 +29,11 @@ constexpr std::size_t kMaxStringBytes = 1U << 20;
 constexpr std::size_t kMaxEntries = 4096;
 constexpr std::size_t kMaxBodyBytes = 1U << 20;
 constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
+
+struct PendingPublication {
+    ManagedDealSettlement fact;
+    ManagedSettlementFrontier frontier;
+};
 
 std::uint64_t checksum(const std::vector<std::uint8_t> &bytes) {
     std::uint64_t result = 1469598103934665603ULL;
@@ -185,12 +191,42 @@ std::optional<std::vector<std::uint8_t>> serialize_record(const Record &record) 
     return result;
 }
 
+std::optional<std::vector<std::uint8_t>> serialize_pending(
+    const PendingPublication &pending) {
+    if (!pending.fact.valid() || !pending.frontier.valid() ||
+        pending.fact.key.account != pending.frontier.account ||
+        pending.fact.key.operation_key != pending.frontier.operation_key ||
+        pending.fact.source_operation_revision != pending.frontier.operation_revision)
+        return std::nullopt;
+    const auto fact = serialize_record(pending.fact);
+    const auto frontier = serialize_record(pending.frontier);
+    if (!fact || !frontier || fact->size() > kMaxRecordBytes ||
+        frontier->size() > kMaxRecordBytes)
+        return std::nullopt;
+    std::vector<std::uint8_t> body;
+    append_u64(body, static_cast<std::uint64_t>(fact->size()));
+    body.insert(body.end(), fact->begin(), fact->end());
+    append_u64(body, static_cast<std::uint64_t>(frontier->size()));
+    body.insert(body.end(), frontier->begin(), frontier->end());
+    if (body.size() > kMaxBodyBytes)
+        return std::nullopt;
+    std::vector<std::uint8_t> result;
+    result.reserve(kEnvelopeBytes + body.size());
+    result.insert(result.end(), kPendingMagic.begin(), kPendingMagic.end());
+    append_u32(result, kFormatVersion);
+    append_u64(result, static_cast<std::uint64_t>(body.size()));
+    append_u64(result, checksum(body));
+    result.insert(result.end(), body.begin(), body.end());
+    return result;
+}
+
 bool read_envelope(const std::vector<std::uint8_t> &bytes,
+                   const std::array<char, 8> &magic,
                    std::vector<std::uint8_t> &body) {
     if (bytes.size() < kEnvelopeBytes || bytes.size() > kMaxRecordBytes ||
-        !std::equal(kMagic.begin(), kMagic.end(), bytes.begin()))
+        !std::equal(magic.begin(), magic.end(), bytes.begin()))
         return false;
-    std::size_t offset = kMagic.size();
+    std::size_t offset = magic.size();
     std::uint32_t version = 0;
     std::uint64_t body_size = 0;
     std::uint64_t expected_checksum = 0;
@@ -202,10 +238,15 @@ bool read_envelope(const std::vector<std::uint8_t> &bytes,
     return checksum(body) == expected_checksum;
 }
 
+bool read_record_envelope(const std::vector<std::uint8_t> &bytes,
+                          std::vector<std::uint8_t> &body) {
+    return read_envelope(bytes, kMagic, body);
+}
+
 std::optional<ManagedDealSettlement> deserialize_fact(
     const std::vector<std::uint8_t> &bytes) {
     std::vector<std::uint8_t> body;
-    if (!read_envelope(bytes, body))
+    if (!read_record_envelope(bytes, body))
         return std::nullopt;
     ManagedDealSettlement record;
     std::size_t offset = 0;
@@ -227,7 +268,7 @@ std::optional<ManagedDealSettlement> deserialize_fact(
 std::optional<ManagedSettlementFrontier> deserialize_frontier(
     const std::vector<std::uint8_t> &bytes) {
     std::vector<std::uint8_t> body;
-    if (!read_envelope(bytes, body))
+    if (!read_record_envelope(bytes, body))
         return std::nullopt;
     ManagedSettlementFrontier record;
     std::size_t offset = 0;
@@ -255,6 +296,47 @@ std::optional<ManagedSettlementFrontier> deserialize_frontier(
     if (offset != body.size() || !record.valid())
         return std::nullopt;
     return record;
+}
+
+std::optional<PendingPublication> deserialize_pending(
+    const std::vector<std::uint8_t> &bytes) {
+    std::vector<std::uint8_t> body;
+    if (!read_envelope(bytes, kPendingMagic, body))
+        return std::nullopt;
+    std::size_t offset = 0;
+    std::uint64_t fact_size = 0;
+    std::uint64_t frontier_size = 0;
+    if (!read_u64(body, offset, fact_size) || fact_size > kMaxRecordBytes ||
+        offset > body.size() || body.size() - offset < fact_size)
+        return std::nullopt;
+    const auto fact_begin = body.begin() + static_cast<std::ptrdiff_t>(offset);
+    const auto fact_end = fact_begin + static_cast<std::ptrdiff_t>(fact_size);
+    std::vector<std::uint8_t> fact_bytes(fact_begin, fact_end);
+    offset += static_cast<std::size_t>(fact_size);
+    if (!read_u64(body, offset, frontier_size) || frontier_size > kMaxRecordBytes ||
+        offset > body.size() || body.size() - offset != frontier_size)
+        return std::nullopt;
+    const auto frontier_begin = body.begin() + static_cast<std::ptrdiff_t>(offset);
+    const auto frontier_end = frontier_begin + static_cast<std::ptrdiff_t>(frontier_size);
+    std::vector<std::uint8_t> frontier_bytes(frontier_begin, frontier_end);
+    const auto fact = deserialize_fact(fact_bytes);
+    const auto frontier = deserialize_frontier(frontier_bytes);
+    if (!fact || !frontier || fact->key.account != frontier->account ||
+        fact->key.operation_key != frontier->operation_key ||
+        fact->source_operation_revision != frontier->operation_revision)
+        return std::nullopt;
+    bool referenced = false;
+    for (const auto &entry : frontier->entries) {
+        if (entry.deal_ticket == fact->key.deal_ticket) {
+            if (entry.source_operation_revision != fact->source_operation_revision ||
+                entry.managed_logical_units != fact->managed_logical_units)
+                return std::nullopt;
+            referenced = true;
+        }
+    }
+    return referenced ? std::optional<PendingPublication>(
+                            PendingPublication{std::move(*fact), std::move(*frontier)})
+                      : std::nullopt;
 }
 
 #if defined(_WIN32)
@@ -409,7 +491,66 @@ std::filesystem::path frontier_path(const std::filesystem::path &directory,
 #endif
 }
 
+std::filesystem::path pending_path(const std::filesystem::path &directory,
+                                   const PendingPublication &pending) {
+    const std::string suffix =
+        "pending-" + hex_u64(fnv1a(pending.fact.key.account.server)) + "-" +
+        hex_u64(pending.fact.key.account.login) + "-" +
+        hex_u64(pending.fact.key.operation_key.trade_id) + "-" +
+        hex_u64(pending.fact.key.operation_key.operation_id) + "-" +
+        hex_u64(pending.frontier.operation_revision) + "-" +
+        hex_u64(pending.fact.key.deal_ticket) + ".bin";
+#if defined(_WIN32)
+    return directory / widen_ascii(suffix);
+#else
+    return directory / suffix;
+#endif
+}
+
 void set_error(std::string &target, std::string value) { target = std::move(value); }
+
+#if defined(_WIN32)
+
+struct PendingFile {
+    PendingPublication publication;
+};
+
+enum class PendingFilesStatus { complete, invalid_record, io_error };
+
+PendingFilesStatus collect_pending_files(const std::filesystem::path &directory,
+                                         std::vector<PendingFile> &pending,
+                                         std::string &error) {
+    try {
+        for (const auto &entry : std::filesystem::directory_iterator(directory)) {
+            const auto filename = entry.path().filename().wstring();
+            if (entry.path().extension() != L".bin" ||
+                filename.rfind(L"pending-", 0) != 0)
+                continue;
+            if (!entry.is_regular_file()) {
+                error = "managed deal settlement pending record is not a regular file";
+                return PendingFilesStatus::invalid_record;
+            }
+            std::optional<PendingPublication> publication;
+            const auto status = read_decoded_file(entry.path(), publication, error,
+                                                  deserialize_pending);
+            if (status == ReadStatus::io_error)
+                return PendingFilesStatus::io_error;
+            if (status != ReadStatus::valid || !publication ||
+                pending_path(directory, *publication).filename() != entry.path().filename()) {
+                if (error.empty())
+                    error = "malformed managed deal settlement pending record";
+                return PendingFilesStatus::invalid_record;
+            }
+            pending.push_back({std::move(*publication)});
+        }
+    } catch (const std::filesystem::filesystem_error &filesystem_error) {
+        error = filesystem_error.what();
+        return PendingFilesStatus::io_error;
+    }
+    return PendingFilesStatus::complete;
+}
+
+#endif
 
 } // namespace
 
@@ -455,26 +596,6 @@ ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::commit(
                                                      frontier.operation_revision)
         return ManagedDealSettlementCommitStatus::invalid_record;
 
-    const auto operation = journal_store.load(frontier.operation_key);
-    if (operation.status == StoreLoadStatus::not_found)
-        return ManagedDealSettlementCommitStatus::missing_operation_record;
-    if (operation.status == StoreLoadStatus::invalid_record ||
-        operation.status == StoreLoadStatus::io_error || !operation.record)
-        return operation.status == StoreLoadStatus::io_error
-                   ? ManagedDealSettlementCommitStatus::io_error
-                   : ManagedDealSettlementCommitStatus::invalid_operation_record;
-    const auto &source = *operation.record;
-    if (!source.valid() || source.key != frontier.operation_key ||
-        source.revision != frontier.operation_revision ||
-        source.operation_kind != OperationKind::close ||
-        (source.operation_state != OperationState::partially_filled &&
-         source.operation_state != OperationState::filled) ||
-        !journal_at_least_result_persisted(source.journal_state) ||
-        !source.reconciliation_descriptor || source.reconciliation_descriptor->requested_volume == 0 ||
-        source.settled_volume == 0 || source.settled_volume != frontier.settled_volume ||
-        source.settled_volume > source.reconciliation_descriptor->requested_volume)
-        return ManagedDealSettlementCommitStatus::invalid_operation_record;
-
     FileLock lock(directory_ / L".managed-deal-settlement.lock");
     if (!lock.acquired()) {
         last_error_ = lock.error();
@@ -513,6 +634,25 @@ ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::commit(
         !(*existing_frontier == frontier))
         return ManagedDealSettlementCommitStatus::conflict;
 
+    PendingPublication pending{fact, frontier};
+    std::optional<PendingPublication> existing_pending;
+    read_error.clear();
+    const auto pending_status = read_decoded_file(
+        pending_path(directory_, pending), existing_pending, read_error,
+        deserialize_pending);
+    if (pending_status == ReadStatus::malformed) {
+        set_error(last_error_, "malformed managed deal settlement pending record");
+        return ManagedDealSettlementCommitStatus::invalid_record;
+    }
+    if (pending_status == ReadStatus::io_error) {
+        set_error(last_error_, read_error);
+        return ManagedDealSettlementCommitStatus::io_error;
+    }
+    if (pending_status == ReadStatus::valid && existing_pending &&
+        (!(existing_pending->fact == pending.fact) ||
+         !(existing_pending->frontier == pending.frontier)))
+        return ManagedDealSettlementCommitStatus::conflict;
+
     bool candidate_referenced = false;
     for (const auto &entry : frontier.entries) {
         if (entry.deal_ticket == fact.key.deal_ticket) {
@@ -548,6 +688,45 @@ ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::commit(
 
     if (frontier_status == ReadStatus::valid && fact_status == ReadStatus::valid)
         return ManagedDealSettlementCommitStatus::already_committed;
+
+    const auto operation = journal_store.load(frontier.operation_key);
+    if (operation.status == StoreLoadStatus::not_found)
+        return ManagedDealSettlementCommitStatus::missing_operation_record;
+    if (operation.status == StoreLoadStatus::invalid_record ||
+        operation.status == StoreLoadStatus::io_error || !operation.record)
+        return operation.status == StoreLoadStatus::io_error
+                   ? ManagedDealSettlementCommitStatus::io_error
+                   : ManagedDealSettlementCommitStatus::invalid_operation_record;
+    const auto &source = *operation.record;
+    if (!source.valid() || source.key != frontier.operation_key ||
+        source.revision != frontier.operation_revision ||
+        source.operation_kind != OperationKind::close ||
+        (source.operation_state != OperationState::partially_filled &&
+         source.operation_state != OperationState::filled) ||
+        !journal_at_least_result_persisted(source.journal_state) ||
+        !source.reconciliation_descriptor || source.reconciliation_descriptor->requested_volume == 0 ||
+        source.settled_volume == 0 || source.settled_volume != frontier.settled_volume ||
+        source.settled_volume > source.reconciliation_descriptor->requested_volume)
+        return ManagedDealSettlementCommitStatus::invalid_operation_record;
+
+    if (pending_status == ReadStatus::absent) {
+        const auto bytes = serialize_pending(pending);
+        if (!bytes) {
+            set_error(last_error_, "managed deal settlement pending record exceeds storage limits");
+            return ManagedDealSettlementCommitStatus::invalid_record;
+        }
+        const auto target = pending_path(directory_, pending);
+        const std::filesystem::path temporary(target.wstring() + L".tmp");
+        DeleteFileW(temporary.c_str());
+        if (!write_file(temporary, *bytes, last_error_))
+            return ManagedDealSettlementCommitStatus::io_error;
+        if (!MoveFileExW(temporary.c_str(), target.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            last_error_ = win32_error("MoveFileExW(managed deal settlement pending)");
+            DeleteFileW(temporary.c_str());
+            return ManagedDealSettlementCommitStatus::io_error;
+        }
+    }
 
     if (fact_status == ReadStatus::absent) {
         const auto bytes = serialize_record(fact);
@@ -591,6 +770,73 @@ ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::commit(
     return ManagedDealSettlementCommitStatus::committed;
 #else
     (void)proof;
+    (void)journal_store;
+    set_error(last_error_, "WindowsFileManagedDealSettlementStore requires Windows");
+    return ManagedDealSettlementCommitStatus::io_error;
+#endif
+}
+
+ManagedDealSettlementCommitStatus WindowsFileManagedDealSettlementStore::recover_pending(
+    const DurableJournalStore &journal_store) {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "managed deal settlement store is unavailable");
+        return ManagedDealSettlementCommitStatus::io_error;
+    }
+
+    std::vector<PendingFile> pending_files;
+    {
+        FileLock lock(directory_ / L".managed-deal-settlement.lock");
+        if (!lock.acquired()) {
+            last_error_ = lock.error();
+            return ManagedDealSettlementCommitStatus::io_error;
+        }
+        std::string error;
+        const auto status = collect_pending_files(directory_, pending_files, error);
+        if (status != PendingFilesStatus::complete) {
+            set_error(last_error_, error.empty()
+                                     ? "unable to read managed deal settlement pending records"
+                                     : error);
+            return status == PendingFilesStatus::io_error
+                       ? ManagedDealSettlementCommitStatus::io_error
+                       : ManagedDealSettlementCommitStatus::invalid_record;
+        }
+    }
+    if (pending_files.empty())
+        return ManagedDealSettlementCommitStatus::no_pending;
+
+    std::vector<bool> recovered(pending_files.size(), false);
+    std::size_t remaining = pending_files.size();
+    bool committed = false;
+    while (remaining != 0) {
+        bool progress = false;
+        ManagedDealSettlementCommitStatus deferred =
+            ManagedDealSettlementCommitStatus::missing_fact;
+        for (std::size_t index = 0; index != pending_files.size(); ++index) {
+            if (recovered[index])
+                continue;
+            auto &publication = pending_files[index].publication;
+            ManagedDealSettlementCommit proof(publication.fact, publication.frontier);
+            const auto status = commit(proof, journal_store);
+            if (status == ManagedDealSettlementCommitStatus::missing_fact) {
+                deferred = status;
+                continue;
+            }
+            if (status != ManagedDealSettlementCommitStatus::committed &&
+                status != ManagedDealSettlementCommitStatus::already_committed)
+                return status;
+            recovered[index] = true;
+            --remaining;
+            progress = true;
+            committed = committed || status == ManagedDealSettlementCommitStatus::committed;
+        }
+        if (!progress)
+            return deferred;
+    }
+    return committed ? ManagedDealSettlementCommitStatus::committed
+                     : ManagedDealSettlementCommitStatus::already_committed;
+#else
     (void)journal_store;
     set_error(last_error_, "WindowsFileManagedDealSettlementStore requires Windows");
     return ManagedDealSettlementCommitStatus::io_error;
@@ -651,6 +897,7 @@ ManagedDealSettlementScanResult WindowsFileManagedDealSettlementStore::scan() co
         return {ManagedDealSettlementScanStatus::io_error, {}, {}};
     }
     ManagedDealSettlementScanResult result;
+    std::vector<PendingFile> pending_files;
     try {
         for (const auto &entry : std::filesystem::directory_iterator(directory_)) {
             const auto filename = entry.path().filename().wstring();
@@ -701,6 +948,18 @@ ManagedDealSettlementScanResult WindowsFileManagedDealSettlementStore::scan() co
         set_error(last_error_, error.what());
         return {ManagedDealSettlementScanStatus::io_error, {}, {}};
     }
+    std::string pending_error;
+    const auto pending_status =
+        collect_pending_files(directory_, pending_files, pending_error);
+    if (pending_status != PendingFilesStatus::complete) {
+        set_error(last_error_, pending_error.empty()
+                                 ? "unable to read managed deal settlement pending records"
+                                 : pending_error);
+        return {pending_status == PendingFilesStatus::io_error
+                    ? ManagedDealSettlementScanStatus::io_error
+                    : ManagedDealSettlementScanStatus::invalid_record,
+                {}, {}};
+    }
     std::sort(result.facts.begin(), result.facts.end(),
               [](const auto &left, const auto &right) { return left.key < right.key; });
     std::sort(result.frontiers.begin(), result.frontiers.end(),
@@ -738,6 +997,30 @@ ManagedDealSettlementScanResult WindowsFileManagedDealSettlementStore::scan() co
             }
         }
     }
+    for (const auto &pending : pending_files) {
+        const auto fact = std::find_if(
+            result.facts.begin(), result.facts.end(),
+            [&pending](const auto &candidate) {
+                return candidate.key == pending.publication.fact.key;
+            });
+        if (fact != result.facts.end() && !(*fact == pending.publication.fact)) {
+            set_error(last_error_, "pending managed deal settlement fact conflicts with published fact");
+            return {ManagedDealSettlementScanStatus::invalid_record, {}, {}};
+        }
+        const auto frontier = std::find_if(
+            result.frontiers.begin(), result.frontiers.end(),
+            [&pending](const auto &candidate) {
+                return candidate.operation_key == pending.publication.frontier.operation_key &&
+                       candidate.operation_revision ==
+                           pending.publication.frontier.operation_revision;
+            });
+        if (frontier != result.frontiers.end() &&
+            !(*frontier == pending.publication.frontier)) {
+            set_error(last_error_,
+                      "pending managed settlement frontier conflicts with published frontier");
+            return {ManagedDealSettlementScanStatus::invalid_record, {}, {}};
+        }
+    }
     std::vector<ManagedDealSettlement> committed_facts;
     std::vector<ManagedDealSettlement> pending_facts;
     committed_facts.reserve(result.facts.size());
@@ -762,6 +1045,29 @@ ManagedDealSettlementScanResult WindowsFileManagedDealSettlementStore::scan() co
     }
     result.facts.swap(committed_facts);
     result.pending_facts.swap(pending_facts);
+    const auto append_pending_fact = [&result](const ManagedDealSettlement &fact) {
+        const auto found = std::find_if(
+            result.pending_facts.begin(), result.pending_facts.end(),
+            [&fact](const auto &candidate) { return candidate.key == fact.key; });
+        if (found == result.pending_facts.end())
+            result.pending_facts.push_back(fact);
+    };
+    for (const auto &pending : pending_files) {
+        const auto fact = std::find_if(
+            result.facts.begin(), result.facts.end(),
+            [&pending](const auto &candidate) {
+                return candidate.key == pending.publication.fact.key;
+            });
+        const auto frontier = std::find_if(
+            result.frontiers.begin(), result.frontiers.end(),
+            [&pending](const auto &candidate) {
+                return candidate.operation_key == pending.publication.frontier.operation_key &&
+                       candidate.operation_revision ==
+                           pending.publication.frontier.operation_revision;
+            });
+        if (fact == result.facts.end() || frontier == result.frontiers.end())
+            append_pending_fact(pending.publication.fact);
+    }
     result.status = ManagedDealSettlementScanStatus::complete;
     return result;
 #else

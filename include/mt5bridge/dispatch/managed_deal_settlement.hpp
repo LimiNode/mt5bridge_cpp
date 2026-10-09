@@ -18,6 +18,8 @@ namespace dispatch {
 class ManagedDealSettlementProducer;
 }
 
+class WindowsFileManagedDealSettlementStore;
+
 /// \struct ManagedSettlementProvenance
 /// \brief Identifies the observation proof that established one settlement fact.
 struct ManagedSettlementProvenance {
@@ -197,6 +199,7 @@ private:
     ManagedDealSettlement fact_;
     ManagedSettlementFrontier frontier_;
     friend class dispatch::ManagedDealSettlementProducer;
+    friend class WindowsFileManagedDealSettlementStore;
 };
 
 /// \enum ManagedDealSettlementCommitStatus
@@ -209,6 +212,7 @@ enum class ManagedDealSettlementCommitStatus {
     missing_operation_record, ///< The source operation is not durable.
     invalid_operation_record, ///< The source operation cannot authorize settlement.
     missing_fact, ///< A frontier references a fact not present in the store.
+    no_pending, ///< No pending publication manifest was present.
     io_error, ///< Storage or source-store I/O failed.
 };
 

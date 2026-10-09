@@ -51,6 +51,12 @@ public:
         const ManagedDealSettlementCommit &proof,
         const DurableJournalStore &journal_store) override;
 
+    /// \brief Completes durable publication manifests left by an earlier process.
+    /// \param journal_store Durable source operation store used to revalidate each pair.
+    /// \return Recovery, no-pending, validation, or I/O status.
+    ManagedDealSettlementCommitStatus recover_pending(
+        const DurableJournalStore &journal_store);
+
     /// \brief Loads one immutable deal fact by composite identity.
     /// \param key Operation/deal identity.
     /// \return Status-bearing lookup result.

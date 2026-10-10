@@ -198,6 +198,16 @@ private:
         managed_trade::ManagedTradeState candidate, OperationKind kind,
         ManagedTradeIntent intent);
 
+    /// \brief Validates the account-scoped request contract shared by prepare paths.
+    /// \param intent Caller request payload and reconciliation descriptor.
+    /// \return True only when the intent is usable for this owner account.
+    bool valid_managed_intent(const ManagedTradeIntent &intent) const;
+
+    /// \brief Validates the durable shape shared by recovery operation records.
+    /// \param record Candidate record recovered from the journal.
+    /// \return True only for a settled OPEN/CLOSE or an in-flight CANCEL shape.
+    static bool valid_settled_record_shape(const OperationRecord &record);
+
     /// \brief Finds the durable OPEN record that owns the current remainder.
     std::optional<OperationRecord> current_open_record_for_cancel() const;
 

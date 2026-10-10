@@ -259,18 +259,4 @@ inline ManagedOwnershipBasisProofStatus validate_managed_ownership_basis(
     return ManagedOwnershipBasisProofStatus::valid;
 }
 
-/// \brief Commits a basis only after both source records are durably present.
-/// \param basis Candidate ownership basis.
-/// \param journal_store Durable source of the managed operation.
-/// \param allocation_store Durable source of the broker envelope.
-/// \param basis_store Durable destination for ownership bases.
-/// \return Proof-gated commit status.
-inline ManagedOwnershipBasisCommitStatus commit_managed_ownership_basis(
-    const ManagedOwnershipBasis &basis,
-    const DurableJournalStore &journal_store,
-    const DurableBrokerAllocationStore &allocation_store,
-    DurableManagedOwnershipBasisStore &basis_store) {
-    return basis_store.commit(basis, journal_store, allocation_store);
-}
-
 } // namespace mt5bridge

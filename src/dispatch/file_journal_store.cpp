@@ -3,9 +3,7 @@
 
 #include <algorithm>
 #include <array>
-#include <iomanip>
 #include <limits>
-#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -19,8 +17,12 @@
 #include <mt5bridge/dispatch/file_journal_store.hpp>
 #include <mt5bridge/dispatch/file_broker_reversal_store.hpp>
 
+#include "file_store_support.hpp"
+
 namespace mt5bridge {
 namespace {
+
+using namespace file_store_support;
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'J', 'N', 'L', '0', '1'}};
 constexpr std::array<char, 8> kBrokerReversalMagic{{'M', 'T', '5', 'R', 'V', 'L', '0', '1'}};
@@ -30,8 +32,6 @@ constexpr std::uint32_t kManagedVolumeFormatVersion = 3;
 constexpr std::uint32_t kFormatVersion = 4;
 constexpr std::array<char, 8> kEpochMagic{{'M', 'T', '5', 'E', 'P', 'C', '0', '1'}};
 constexpr std::uint32_t kEpochFormatVersion = 1;
-constexpr std::size_t kMaxStringBytes = 1U << 20;
-constexpr std::size_t kMaxPayloadBytes = 16U << 20;
 constexpr std::uint32_t kMaxReconciliationPredicates = 1U << 20;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
@@ -50,97 +50,6 @@ constexpr std::size_t kMaxEpochRecordBytes = kEpochEnvelopeBytes + kMaxStringByt
                                               sizeof(std::uint32_t) +
                                               2U * sizeof(std::uint64_t);
 
-std::uint64_t fnv1a(const std::string &value) {
-    std::uint64_t result = 1469598103934665603ULL;
-    for (const unsigned char byte : value) {
-        result ^= byte;
-        result *= 1099511628211ULL;
-    }
-    return result;
-}
-
-std::string hex_u64(std::uint64_t value) {
-    std::ostringstream stream;
-    stream << std::hex << std::setw(16) << std::setfill('0') << value;
-    return stream.str();
-}
-
-std::wstring widen_ascii(const std::string &value) {
-    return std::wstring(value.begin(), value.end());
-}
-
-void append_u32(std::vector<std::uint8_t> &bytes, std::uint32_t value) {
-    for (unsigned shift = 0; shift != 32; shift += 8)
-        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
-}
-
-void append_u64(std::vector<std::uint8_t> &bytes, std::uint64_t value) {
-    for (unsigned shift = 0; shift != 64; shift += 8)
-        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
-}
-
-bool read_u32(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-              std::uint32_t &value) {
-    if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint32_t))
-        return false;
-    value = 0;
-    for (unsigned shift = 0; shift != 32; shift += 8)
-        value |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
-    return true;
-}
-
-bool read_u64(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-              std::uint64_t &value) {
-    if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t))
-        return false;
-    value = 0;
-    for (unsigned shift = 0; shift != 64; shift += 8)
-        value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
-    return true;
-}
-
-bool append_bytes(std::vector<std::uint8_t> &bytes, const std::string &value) {
-    if (value.size() > kMaxStringBytes ||
-        value.size() > (std::numeric_limits<std::uint32_t>::max)())
-        return false;
-    append_u32(bytes, static_cast<std::uint32_t>(value.size()));
-    bytes.insert(bytes.end(), value.begin(), value.end());
-    return true;
-}
-
-bool append_payload(std::vector<std::uint8_t> &bytes,
-                    const std::vector<std::uint8_t> &value) {
-    if (value.size() > kMaxPayloadBytes ||
-        value.size() > (std::numeric_limits<std::uint32_t>::max)())
-        return false;
-    append_u32(bytes, static_cast<std::uint32_t>(value.size()));
-    bytes.insert(bytes.end(), value.begin(), value.end());
-    return true;
-}
-
-bool read_string(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-                 std::string &value) {
-    std::uint32_t size = 0;
-    if (!read_u32(bytes, offset, size) || size > kMaxStringBytes ||
-        offset > bytes.size() || bytes.size() - offset < size)
-        return false;
-    value.assign(reinterpret_cast<const char *>(bytes.data() + offset), size);
-    offset += size;
-    return true;
-}
-
-bool read_payload(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-                  std::vector<std::uint8_t> &value) {
-    std::uint32_t size = 0;
-    if (!read_u32(bytes, offset, size) || size > kMaxPayloadBytes ||
-        offset > bytes.size() || bytes.size() - offset < size)
-        return false;
-    value.assign(bytes.begin() + static_cast<std::ptrdiff_t>(offset),
-                 bytes.begin() + static_cast<std::ptrdiff_t>(offset + size));
-    offset += size;
-    return true;
-}
-
 bool append_reconciliation_descriptor(
     std::vector<std::uint8_t> &bytes,
     const std::optional<ReconciliationDescriptor> &descriptor) {
@@ -151,13 +60,13 @@ bool append_reconciliation_descriptor(
         descriptor->predicates.size() > (std::numeric_limits<std::uint32_t>::max)())
         return false;
     const auto &baseline = descriptor->baseline;
-    if (!append_bytes(bytes, descriptor->account.server))
+    if (!append_string(bytes, descriptor->account.server))
         return false;
     append_u64(bytes, descriptor->account.login);
     append_u64(bytes, descriptor->trade_id);
     append_u64(bytes, descriptor->operation_id);
     append_u64(bytes, descriptor->requested_volume);
-    if (!append_bytes(bytes, baseline.account().server))
+    if (!append_string(bytes, baseline.account().server))
         return false;
     append_u64(bytes, baseline.account().login);
     append_u64(bytes, baseline.graph_instance_id());
@@ -303,20 +212,11 @@ bool read_reconciliation_descriptor(
     return true;
 }
 
-std::uint64_t checksum(const std::vector<std::uint8_t> &bytes) {
-    std::uint64_t result = 1469598103934665603ULL;
-    for (const std::uint8_t byte : bytes) {
-        result ^= byte;
-        result *= 1099511628211ULL;
-    }
-    return result;
-}
-
 std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &record) {
     std::vector<std::uint8_t> body;
     body.reserve(128 + record.key.account.server.size() + record.request_payload.size() +
                  record.result_payload.size());
-    if (!append_bytes(body, record.key.account.server) ||
+    if (!append_string(body, record.key.account.server) ||
         !append_payload(body, record.request_payload) ||
         !append_payload(body, record.result_payload))
         return std::nullopt;
@@ -447,7 +347,7 @@ std::optional<std::vector<std::uint8_t>> serialize_broker_reversal_body(
         return std::nullopt;
     std::vector<std::uint8_t> body;
     body.reserve(256 + record.account.server.size() + record.symbol.size());
-    if (!append_bytes(body, record.account.server) || !append_bytes(body, record.symbol))
+    if (!append_string(body, record.account.server) || !append_string(body, record.symbol))
         return std::nullopt;
     append_u64(body, record.account.login);
     append_u32(body, static_cast<std::uint32_t>(record.margin_mode));
@@ -559,91 +459,6 @@ std::optional<BrokerReversalRecord> deserialize_broker_reversal(
 
 #if defined(_WIN32)
 
-std::string win32_error(const char *operation, DWORD error = GetLastError()) {
-    return std::string(operation) + " failed (Win32 error " + std::to_string(error) + ")";
-}
-
-class FileLock final {
-public:
-    explicit FileLock(const std::filesystem::path &path) {
-        handle_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (handle_ == INVALID_HANDLE_VALUE) {
-            error_ = win32_error("CreateFileW(lock)");
-            return;
-        }
-        OVERLAPPED overlapped{};
-        if (!LockFileEx(handle_, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD,
-                        &overlapped)) {
-            error_ = win32_error("LockFileEx");
-            CloseHandle(handle_);
-            handle_ = INVALID_HANDLE_VALUE;
-        }
-    }
-
-    FileLock(const FileLock &) = delete;
-    FileLock &operator=(const FileLock &) = delete;
-
-    ~FileLock() {
-        if (handle_ != INVALID_HANDLE_VALUE) {
-            OVERLAPPED overlapped{};
-            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
-            CloseHandle(handle_);
-        }
-    }
-
-    bool acquired() const { return handle_ != INVALID_HANDLE_VALUE; }
-    const std::string &error() const { return error_; }
-
-private:
-    HANDLE handle_ = INVALID_HANDLE_VALUE;
-    std::string error_;
-};
-
-enum class ReadStatus { absent, valid, malformed, io_error };
-
-ReadStatus read_bytes_file(const std::filesystem::path &path, std::size_t max_bytes,
-                           std::vector<std::uint8_t> &bytes, std::string &error) {
-    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
-        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
-            return ReadStatus::absent;
-        error = win32_error("CreateFileW(record)", code);
-        return ReadStatus::io_error;
-    }
-
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(handle, &size)) {
-        error = win32_error("GetFileSizeEx");
-        CloseHandle(handle);
-        return ReadStatus::io_error;
-    }
-    if (size.QuadPart < 0 || static_cast<unsigned long long>(size.QuadPart) > max_bytes) {
-        error = "durable record exceeds storage limits";
-        CloseHandle(handle);
-        return ReadStatus::malformed;
-    }
-    bytes.resize(static_cast<std::size_t>(size.QuadPart));
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const DWORD requested = static_cast<DWORD>(
-            std::min<std::size_t>(bytes.size() - offset, (std::numeric_limits<DWORD>::max)()));
-        DWORD read = 0;
-        if (!ReadFile(handle, bytes.data() + offset, requested, &read, nullptr) || read == 0) {
-            error = win32_error("ReadFile");
-            CloseHandle(handle);
-            return ReadStatus::io_error;
-        }
-        offset += read;
-    }
-    CloseHandle(handle);
-    return ReadStatus::valid;
-}
-
 ReadStatus read_file(const std::filesystem::path &path,
                      std::optional<OperationRecord> &record,
                      std::string &error) {
@@ -665,38 +480,6 @@ ReadStatus read_broker_reversal_file(
         return status;
     record = deserialize_broker_reversal(bytes);
     return record ? ReadStatus::valid : ReadStatus::malformed;
-}
-
-bool write_file(const std::filesystem::path &path,
-                const std::vector<std::uint8_t> &bytes, std::string &error) {
-    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                      FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        error = win32_error("CreateFileW(temp)");
-        return false;
-    }
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const DWORD requested = static_cast<DWORD>(
-            std::min<std::size_t>(bytes.size() - offset, (std::numeric_limits<DWORD>::max)()));
-        DWORD written = 0;
-        if (!WriteFile(handle, bytes.data() + offset, requested, &written, nullptr) ||
-            written == 0) {
-            error = win32_error("WriteFile");
-            CloseHandle(handle);
-            DeleteFileW(path.c_str());
-            return false;
-        }
-        offset += written;
-    }
-    if (!FlushFileBuffers(handle)) {
-        error = win32_error("FlushFileBuffers");
-        CloseHandle(handle);
-        DeleteFileW(path.c_str());
-        return false;
-    }
-    CloseHandle(handle);
-    return true;
 }
 
 std::string hex_bytes(const std::string &value) {
@@ -722,7 +505,7 @@ std::optional<std::vector<std::uint8_t>> serialize_epoch(const AccountKey &accou
     if (!account.valid() || epoch == 0)
         return std::nullopt;
     std::vector<std::uint8_t> body;
-    if (!append_bytes(body, account.server))
+    if (!append_string(body, account.server))
         return std::nullopt;
     append_u64(body, account.login);
     append_u64(body, epoch);

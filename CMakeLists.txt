@@ -30,6 +30,7 @@ set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 # the CPython-backed runtime DLL. Consumers that need durable operation
 # persistence link this small native target alongside mt5bridge::client.
 add_library(mt5bridge_journal STATIC
+            src/dispatch/file_store_support.cpp
             src/dispatch/file_journal_store.cpp
             src/dispatch/file_broker_allocation_store.cpp
             src/dispatch/file_managed_ownership_basis_store.cpp

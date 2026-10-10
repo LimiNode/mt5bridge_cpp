@@ -17,18 +17,11 @@ class MemoryJournalStore final : public mt5bridge::DurableJournalStore {
 public:
     /// \brief Commits a record into the fake journal.
     /// \param record Record to retain.
-    /// \param expected_revision Optional compare-and-swap revision.
-    /// \return Committed; this fixture does not simulate write failures.
+    /// \param expected_revision Ignored by this simple replacement fixture.
+    /// \return Committed; this fixture does not simulate CAS or write failures.
     mt5bridge::StoreCommitStatus commit(
         const mt5bridge::OperationRecord &record,
-        std::optional<std::uint64_t> expected_revision) override {
-        if (expected_revision.has_value()) {
-            const auto it = records.find(record.key);
-            if (it == records.end() || it->second.revision != *expected_revision)
-                return mt5bridge::StoreCommitStatus::conflict;
-        } else if (records.find(record.key) != records.end()) {
-            return mt5bridge::StoreCommitStatus::conflict;
-        }
+        std::optional<std::uint64_t>) override {
         records[record.key] = record;
         return mt5bridge::StoreCommitStatus::committed;
     }

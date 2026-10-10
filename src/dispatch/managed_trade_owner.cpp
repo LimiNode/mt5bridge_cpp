@@ -50,6 +50,35 @@ bool is_result_pending(const OperationRecord &record) {
 
 } // namespace
 
+bool ManagedTradeOwner::valid_managed_intent(const ManagedTradeIntent &intent) const {
+    return account_.valid() && !intent.request_payload.empty() &&
+           intent.reconciliation_descriptor.valid() &&
+           intent.reconciliation_descriptor.account == account_;
+}
+
+bool ManagedTradeOwner::valid_settled_record_shape(const OperationRecord &record) {
+    if (!record.valid() || record.journal_state != JournalState::reconciling ||
+        !record.reconciliation_descriptor ||
+        record.reconciliation_descriptor->requested_volume == 0 ||
+        record.settled_volume > record.reconciliation_descriptor->requested_volume)
+        return false;
+
+    switch (record.operation_kind) {
+    case OperationKind::open:
+    case OperationKind::close:
+        return record.settled_volume != 0 &&
+               (record.operation_state == OperationState::partially_filled ||
+                record.operation_state == OperationState::filled);
+    case OperationKind::cancel:
+        return record.settled_volume == 0 &&
+               (record.operation_state == OperationState::reconciling ||
+                record.operation_state == OperationState::cancelled);
+    case OperationKind::unspecified:
+        return false;
+    }
+    return false;
+}
+
 ManagedTradeOwner::ManagedTradeOwner(
     managed_trade::ManagedTradeState initial_state, AccountKey account,
     OperationJournal &journal, DispatchAdmissionBarrier &admission,
@@ -132,32 +161,8 @@ ManagedTradeOwner::recover_settled_trade(
         if (record.key.account != account ||
             record.key.trade_id != initial_state.trade_id.value)
             continue;
-        if (!record.valid() || record.journal_state != JournalState::reconciling ||
-            !record.reconciliation_descriptor || record.settled_volume >
-                                                       record.reconciliation_descriptor
-                                                           ->requested_volume)
+        if (!valid_settled_record_shape(record))
             return std::nullopt;
-        if (record.operation_kind == OperationKind::open) {
-            if (record.reconciliation_descriptor->requested_volume == 0 ||
-                record.settled_volume == 0 ||
-                (record.operation_state != OperationState::partially_filled &&
-                 record.operation_state != OperationState::filled))
-                return std::nullopt;
-        } else if (record.operation_kind == OperationKind::close) {
-            if (record.reconciliation_descriptor->requested_volume == 0 ||
-                record.settled_volume == 0 ||
-                (record.operation_state != OperationState::partially_filled &&
-                 record.operation_state != OperationState::filled))
-                return std::nullopt;
-        } else if (record.operation_kind == OperationKind::cancel) {
-            if (record.reconciliation_descriptor->requested_volume == 0 ||
-                (record.operation_state != OperationState::reconciling &&
-                 record.operation_state != OperationState::cancelled) ||
-                record.settled_volume != 0)
-                return std::nullopt;
-        } else {
-            return std::nullopt;
-        }
         records.push_back(&record);
     }
     std::sort(records.begin(), records.end(),
@@ -408,9 +413,7 @@ OwnerStepResult ManagedTradeOwner::prepare_durable_operation(
     ManagedTradeIntent intent) {
     intent.reconciliation_descriptor.requested_volume =
         candidate.slice.requested_volume;
-    if (!account_.valid() || !candidate.valid() || intent.request_payload.empty() ||
-        !intent.reconciliation_descriptor.valid() ||
-        intent.reconciliation_descriptor.account != account_ ||
+    if (!candidate.valid() || !valid_managed_intent(intent) ||
         (kind == OperationKind::open &&
          candidate.slice.kind != managed_trade::OperationKind::open) ||
         (kind == OperationKind::close &&
@@ -456,9 +459,7 @@ OwnerStepResult ManagedTradeOwner::prepare_durable_operation(
 
 OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
                                                 ManagedTradeIntent intent) {
-    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
-        !intent.reconciliation_descriptor.valid() ||
-        intent.reconciliation_descriptor.account != account_)
+    if (!state_.valid() || !valid_managed_intent(intent))
         return result_for(OwnerStepStatus::invalid_request);
     auto candidate = state_;
     if (candidate.start_open_slice(volume) != managed_trade::MutationStatus::applied)
@@ -469,9 +470,7 @@ OwnerStepResult ManagedTradeOwner::prepare_open(managed_trade::Volume volume,
 
 OwnerStepResult ManagedTradeOwner::prepare_close(managed_trade::Volume volume,
                                                  ManagedTradeIntent intent) {
-    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
-        !intent.reconciliation_descriptor.valid() ||
-        intent.reconciliation_descriptor.account != account_)
+    if (!state_.valid() || !valid_managed_intent(intent))
         return result_for(OwnerStepStatus::invalid_request);
     auto candidate = state_;
     if (!candidate.close_obligation.requested &&
@@ -484,9 +483,7 @@ OwnerStepResult ManagedTradeOwner::prepare_close(managed_trade::Volume volume,
 }
 
 OwnerStepResult ManagedTradeOwner::prepare_cancel(ManagedTradeIntent intent) {
-    if (!account_.valid() || !state_.valid() || intent.request_payload.empty() ||
-        !intent.reconciliation_descriptor.valid() ||
-        intent.reconciliation_descriptor.account != account_)
+    if (!state_.valid() || !valid_managed_intent(intent))
         return result_for(OwnerStepStatus::invalid_request);
     const auto open_record = current_open_record_for_cancel();
     if (!open_record ||

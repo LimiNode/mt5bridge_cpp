@@ -142,34 +142,29 @@ void check_validation_and_proof_gate() {
 
     MemoryBrokerStore broker_store(broker);
     MemoryEnvelopeStore envelope_store;
-    require(mt5bridge::commit_broker_allocation_envelope(
-                 expected, broker_store, envelope_store) ==
+    require(envelope_store.commit(expected, broker_store) ==
                 mt5bridge::BrokerAllocationCommitStatus::committed,
             "proof-gated envelope commit failed");
-    require(mt5bridge::commit_broker_allocation_envelope(
-                 expected, broker_store, envelope_store) ==
+    require(envelope_store.commit(expected, broker_store) ==
                 mt5bridge::BrokerAllocationCommitStatus::already_committed,
             "identical envelope replay was not idempotent");
 
     auto partial = expected;
     partial.unallocated_close_leg.units = 400;
     require(!partial.valid(), "partial managed attribution crossed envelope boundary");
-    require(mt5bridge::commit_broker_allocation_envelope(
-                 partial, broker_store, envelope_store) ==
+    require(envelope_store.commit(partial, broker_store) ==
                 mt5bridge::BrokerAllocationCommitStatus::invalid_record,
             "partial managed attribution was accepted as an envelope");
 
     MemoryBrokerStore missing;
     MemoryEnvelopeStore missing_destination;
-    require(mt5bridge::commit_broker_allocation_envelope(
-                 expected, missing, missing_destination) ==
+    require(missing_destination.commit(expected, missing) ==
                 mt5bridge::BrokerAllocationCommitStatus::missing_broker_record,
             "envelope committed without durable broker proof");
 
     auto wrong_provenance = expected;
     wrong_provenance.broker_provenance.evidence_digest += 1;
-    require(mt5bridge::commit_broker_allocation_envelope(
-                 wrong_provenance, broker_store, missing_destination) ==
+    require(missing_destination.commit(wrong_provenance, broker_store) ==
                 mt5bridge::BrokerAllocationCommitStatus::invalid_broker_record,
             "envelope accepted mismatched broker provenance");
 }

@@ -3,6 +3,8 @@
 
 #include <mt5bridge.hpp>
 
+#include "support/fake_observation_provider.hpp"
+
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -85,22 +87,7 @@ public:
     bool held = false;
 };
 
-class FakeObservationProvider final : public mt5bridge::ObservationProvider {
-public:
-    explicit FakeObservationProvider(std::vector<mt5bridge::ObservationBatch> batches)
-        : batches_(std::move(batches)) {}
-
-    mt5bridge::ObservationBatch collect(
-        const mt5bridge::ObservationCollectionRequest &) override {
-        if (next_ == batches_.size())
-            throw std::runtime_error("observation provider exhausted");
-        return std::move(batches_[next_++]);
-    }
-
-private:
-    std::vector<mt5bridge::ObservationBatch> batches_;
-    std::size_t next_ = 0;
-};
+using mt5bridge_test_support::FakeObservationProvider;
 
 Mt5OrderSnapshot active_order() {
     Mt5OrderSnapshot value{};

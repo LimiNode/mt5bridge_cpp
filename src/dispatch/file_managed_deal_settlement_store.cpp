@@ -3,10 +3,11 @@
 
 #include <algorithm>
 #include <array>
-#include <iomanip>
-#include <limits>
-#include <sstream>
 #include <utility>
+
+#include <mt5bridge/dispatch/file_managed_deal_settlement_store.hpp>
+
+#include "file_store_support.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -14,8 +15,6 @@
 #endif
 #include <windows.h>
 #endif
-
-#include <mt5bridge/dispatch/file_managed_deal_settlement_store.hpp>
 
 namespace mt5bridge {
 namespace {
@@ -25,7 +24,6 @@ constexpr std::array<char, 8> kPendingMagic{{'M', 'T', '5', 'M', 'D', 'P', '0', 
 constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
-constexpr std::size_t kMaxStringBytes = 1U << 20;
 constexpr std::size_t kMaxEntries = 4096;
 constexpr std::size_t kMaxBodyBytes = 1U << 20;
 constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
@@ -35,83 +33,7 @@ struct PendingPublication {
     ManagedSettlementFrontier frontier;
 };
 
-std::uint64_t checksum(const std::vector<std::uint8_t> &bytes) {
-    std::uint64_t result = 1469598103934665603ULL;
-    for (const auto byte : bytes) {
-        result ^= byte;
-        result *= 1099511628211ULL;
-    }
-    return result;
-}
-
-std::uint64_t fnv1a(const std::string &value) {
-    std::uint64_t result = 1469598103934665603ULL;
-    for (const unsigned char byte : value) {
-        result ^= byte;
-        result *= 1099511628211ULL;
-    }
-    return result;
-}
-
-std::string hex_u64(std::uint64_t value) {
-    std::ostringstream stream;
-    stream << std::hex << std::setw(16) << std::setfill('0') << value;
-    return stream.str();
-}
-
-std::wstring widen_ascii(const std::string &value) {
-    return std::wstring(value.begin(), value.end());
-}
-
-void append_u32(std::vector<std::uint8_t> &bytes, std::uint32_t value) {
-    for (unsigned shift = 0; shift != 32; shift += 8)
-        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
-}
-
-void append_u64(std::vector<std::uint8_t> &bytes, std::uint64_t value) {
-    for (unsigned shift = 0; shift != 64; shift += 8)
-        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
-}
-
-bool read_u32(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-              std::uint32_t &value) {
-    if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint32_t))
-        return false;
-    value = 0;
-    for (unsigned shift = 0; shift != 32; shift += 8)
-        value |= static_cast<std::uint32_t>(bytes[offset++]) << shift;
-    return true;
-}
-
-bool read_u64(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-              std::uint64_t &value) {
-    if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t))
-        return false;
-    value = 0;
-    for (unsigned shift = 0; shift != 64; shift += 8)
-        value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
-    return true;
-}
-
-bool append_string(std::vector<std::uint8_t> &bytes, const std::string &value) {
-    if (value.size() > kMaxStringBytes ||
-        value.size() > (std::numeric_limits<std::uint32_t>::max)())
-        return false;
-    append_u32(bytes, static_cast<std::uint32_t>(value.size()));
-    bytes.insert(bytes.end(), value.begin(), value.end());
-    return true;
-}
-
-bool read_string(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-                 std::string &value) {
-    std::uint32_t size = 0;
-    if (!read_u32(bytes, offset, size) || size > kMaxStringBytes ||
-        offset > bytes.size() || bytes.size() - offset < size)
-        return false;
-    value.assign(reinterpret_cast<const char *>(bytes.data() + offset), size);
-    offset += size;
-    return true;
-}
+using namespace file_store_support;
 
 void append_provenance(std::vector<std::uint8_t> &bytes,
                        const ManagedSettlementProvenance &provenance) {
@@ -341,125 +263,17 @@ std::optional<PendingPublication> deserialize_pending(
 
 #if defined(_WIN32)
 
-std::string win32_error(const char *operation, DWORD error = GetLastError()) {
-    return std::string(operation) + " failed (Win32 error " + std::to_string(error) + ")";
-}
-
-class FileLock final {
-public:
-    explicit FileLock(const std::filesystem::path &path) {
-        handle_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (handle_ == INVALID_HANDLE_VALUE) {
-            error_ = win32_error("CreateFileW(lock)");
-            return;
-        }
-        OVERLAPPED overlapped{};
-        if (!LockFileEx(handle_, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD,
-                        &overlapped)) {
-            error_ = win32_error("LockFileEx");
-            CloseHandle(handle_);
-            handle_ = INVALID_HANDLE_VALUE;
-        }
-    }
-    FileLock(const FileLock &) = delete;
-    FileLock &operator=(const FileLock &) = delete;
-    ~FileLock() {
-        if (handle_ != INVALID_HANDLE_VALUE) {
-            OVERLAPPED overlapped{};
-            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
-            CloseHandle(handle_);
-        }
-    }
-    bool acquired() const { return handle_ != INVALID_HANDLE_VALUE; }
-    const std::string &error() const { return error_; }
-
-private:
-    HANDLE handle_ = INVALID_HANDLE_VALUE;
-    std::string error_;
-};
-
-enum class ReadStatus { absent, valid, malformed, io_error };
-
-ReadStatus read_bytes_file(const std::filesystem::path &path,
-                           std::vector<std::uint8_t> &bytes, std::string &error) {
-    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
-        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
-            return ReadStatus::absent;
-        error = win32_error("CreateFileW(record)", code);
-        return ReadStatus::io_error;
-    }
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(handle, &size) || size.QuadPart < 0 ||
-        static_cast<unsigned long long>(size.QuadPart) > kMaxRecordBytes) {
-        error = "managed deal settlement has an invalid size";
-        CloseHandle(handle);
-        return ReadStatus::malformed;
-    }
-    bytes.resize(static_cast<std::size_t>(size.QuadPart));
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const DWORD requested = static_cast<DWORD>(
-            std::min<std::size_t>(bytes.size() - offset, (std::numeric_limits<DWORD>::max)()));
-        DWORD read = 0;
-        if (!ReadFile(handle, bytes.data() + offset, requested, &read, nullptr) || read == 0) {
-            error = win32_error("ReadFile");
-            CloseHandle(handle);
-            return ReadStatus::io_error;
-        }
-        offset += read;
-    }
-    CloseHandle(handle);
-    return ReadStatus::valid;
-}
-
 template <typename Record, typename Decoder>
 ReadStatus read_decoded_file(const std::filesystem::path &path,
                              std::optional<Record> &record, std::string &error,
                              Decoder decoder) {
     std::vector<std::uint8_t> bytes;
-    const auto status = read_bytes_file(path, bytes, error);
+    const auto status = read_bytes_file(path, kMaxRecordBytes, bytes, error,
+                                        ReadStatus::malformed);
     if (status != ReadStatus::valid)
         return status;
     record = decoder(bytes);
     return record ? ReadStatus::valid : ReadStatus::malformed;
-}
-
-bool write_file(const std::filesystem::path &path,
-                const std::vector<std::uint8_t> &bytes, std::string &error) {
-    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                      FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        error = win32_error("CreateFileW(temp)");
-        return false;
-    }
-    std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const DWORD requested = static_cast<DWORD>(
-            std::min<std::size_t>(bytes.size() - offset, (std::numeric_limits<DWORD>::max)()));
-        DWORD written = 0;
-        if (!WriteFile(handle, bytes.data() + offset, requested, &written, nullptr) ||
-            written == 0) {
-            error = win32_error("WriteFile");
-            CloseHandle(handle);
-            DeleteFileW(path.c_str());
-            return false;
-        }
-        offset += written;
-    }
-    if (!FlushFileBuffers(handle)) {
-        error = win32_error("FlushFileBuffers");
-        CloseHandle(handle);
-        DeleteFileW(path.c_str());
-        return false;
-    }
-    CloseHandle(handle);
-    return true;
 }
 
 #endif

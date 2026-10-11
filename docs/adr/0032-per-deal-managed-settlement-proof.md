@@ -4,8 +4,8 @@
 
 Accepted as the first implementation boundary after ADR-0031. The durable
 per-deal/frontier store and private graph-bound producer are implemented;
-broker-volume mapping, allocation policy, and managed-exposure integration
-remain deferred.
+exact decimal conversion is now specified separately by ADR-0033, while
+allocation policy and managed-exposure integration remain deferred.
 
 ## Context
 
@@ -153,8 +153,8 @@ an incomplete deal set, or a conflicting replay fails closed.
 - The private producer derives the fact from a fresh graph-bound observation
   while the owner supplies only the already-authoritative logical delta. The
   durable store rejects missing, stale, or conflicting source evidence.
-- Owner-loop wiring that commits these facts alongside managed state, and any
-  exact broker-volume mapping, remain separate follow-up slices.
+- Owner-loop wiring that commits these facts alongside managed state, broker-leg
+  allocation, and managed-exposure mutation remain separate follow-up slices.
 - Until owner-loop integration and a later allocation policy exist, managed
   `INOUT` settlement and broker-leg allocation remain unchanged and fail
   closed.
@@ -173,5 +173,6 @@ The implementation regressions cover:
 - proof that no broker-volume or managed-exposure mutation occurs in this
   slice.
 
-Owner-loop integration and exact volume-domain mapping remain future
-verification boundaries.
+Owner-loop integration and exact broker-leg allocation remain future
+verification boundaries; the pure conversion boundary is covered by
+[ADR-0033](0033-exact-managed-broker-volume-mapping.md).

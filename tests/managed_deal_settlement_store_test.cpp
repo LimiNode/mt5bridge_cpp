@@ -161,6 +161,9 @@ void check_incremental_frontier() {
     require(orphan_scan.complete() && orphan_scan.facts.size() == 1 &&
                 orphan_scan.pending_facts.size() == 1 && orphan_scan.frontiers.size() == 1,
             "restart scan did not preserve an unpublished fact as pending");
+    require(store.load(second_fact.key).status ==
+                mt5bridge::ManagedDealSettlementLoadStatus::not_found,
+            "pending settlement fact was returned as committed by load");
 
     require(store.recover_pending(journal) ==
                 mt5bridge::ManagedDealSettlementCommitStatus::committed,

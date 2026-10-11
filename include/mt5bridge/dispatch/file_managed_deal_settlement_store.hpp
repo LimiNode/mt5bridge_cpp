@@ -57,9 +57,9 @@ public:
     ManagedDealSettlementCommitStatus recover_pending(
         const DurableJournalStore &journal_store);
 
-    /// \brief Loads one immutable deal fact by composite identity.
+    /// \brief Loads one committed deal fact by composite identity.
     /// \param key Operation/deal identity.
-    /// \return Status-bearing lookup result.
+    /// \return Status-bearing lookup result. A pending-only fact is not found.
     ManagedDealSettlementLoadResult load(
         const ManagedDealSettlementKey &key) const override;
 

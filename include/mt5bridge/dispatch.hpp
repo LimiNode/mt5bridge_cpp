@@ -11,6 +11,7 @@
 #include "dispatch/managed_ownership_basis.hpp"
 #include "dispatch/managed_deal_settlement.hpp"
 #include "dispatch/managed_broker_volume_mapping.hpp"
+#include "dispatch/managed_broker_volume_admission.hpp"
 #include "dispatch/lease.hpp"
 #include "dispatch/admission.hpp"
 #include "dispatch/file_journal_store.hpp"

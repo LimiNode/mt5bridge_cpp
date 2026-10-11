@@ -364,6 +364,71 @@ PendingFilesStatus collect_pending_files(const std::filesystem::path &directory,
     return PendingFilesStatus::complete;
 }
 
+enum class CommittedFactStatus { committed, pending, invalid_record, io_error };
+
+CommittedFactStatus committed_fact_status(const std::filesystem::path &directory,
+                                          const ManagedDealSettlement &fact,
+                                          std::string &error) {
+    bool referenced = false;
+    try {
+        for (const auto &entry : std::filesystem::directory_iterator(directory)) {
+            const auto filename = entry.path().filename().wstring();
+            if (entry.path().extension() != L".bin" ||
+                filename.rfind(L"frontier-", 0) != 0)
+                continue;
+            if (!entry.is_regular_file()) {
+                error = "managed settlement frontier is not a regular file";
+                return CommittedFactStatus::invalid_record;
+            }
+
+            std::optional<ManagedSettlementFrontier> frontier;
+            const auto status = read_decoded_file(entry.path(), frontier, error,
+                                                  deserialize_frontier);
+            if (status == ReadStatus::io_error)
+                return CommittedFactStatus::io_error;
+            if (status != ReadStatus::valid || !frontier ||
+                frontier_path(directory, *frontier).filename() != entry.path().filename()) {
+                if (error.empty())
+                    error = "malformed managed settlement frontier";
+                return CommittedFactStatus::invalid_record;
+            }
+
+            for (const auto &frontier_entry : frontier->entries) {
+                const ManagedDealSettlementKey referenced_key{
+                    frontier->account, frontier->operation_key, frontier_entry.deal_ticket};
+                std::optional<ManagedDealSettlement> referenced_fact;
+                error.clear();
+                const auto fact_status = read_decoded_file(
+                    fact_path(directory, referenced_key), referenced_fact, error,
+                    deserialize_fact);
+                if (fact_status == ReadStatus::io_error)
+                    return CommittedFactStatus::io_error;
+                if (fact_status != ReadStatus::valid || !referenced_fact ||
+                    !(referenced_fact->key == referenced_key) ||
+                    referenced_fact->source_operation_revision !=
+                        frontier_entry.source_operation_revision ||
+                    referenced_fact->managed_logical_units !=
+                        frontier_entry.managed_logical_units) {
+                    if (error.empty())
+                        error = "settlement frontier references a missing or mismatched fact";
+                    return CommittedFactStatus::invalid_record;
+                }
+                if (referenced_fact->key == fact.key) {
+                    if (referenced_fact->source_operation_revision !=
+                            fact.source_operation_revision ||
+                        referenced_fact->managed_logical_units != fact.managed_logical_units)
+                        return CommittedFactStatus::invalid_record;
+                    referenced = true;
+                }
+            }
+        }
+    } catch (const std::filesystem::filesystem_error &filesystem_error) {
+        error = filesystem_error.what();
+        return CommittedFactStatus::io_error;
+    }
+    return referenced ? CommittedFactStatus::committed : CommittedFactStatus::pending;
+}
+
 #endif
 
 } // namespace
@@ -677,7 +742,21 @@ ManagedDealSettlementLoadResult WindowsFileManagedDealSettlementStore::load(
     const auto status = read_decoded_file(fact_path(directory_, key), record, error,
                                           deserialize_fact);
     if (status == ReadStatus::valid && record && record->key == key)
-        return {ManagedDealSettlementLoadStatus::found, std::move(record)};
+        {
+            error.clear();
+            const auto committed = committed_fact_status(directory_, *record, error);
+            if (committed == CommittedFactStatus::committed)
+                return {ManagedDealSettlementLoadStatus::found, std::move(record)};
+            if (committed == CommittedFactStatus::io_error) {
+                set_error(last_error_, error);
+                return {ManagedDealSettlementLoadStatus::io_error, std::nullopt};
+            }
+            if (committed == CommittedFactStatus::invalid_record) {
+                set_error(last_error_, error);
+                return {ManagedDealSettlementLoadStatus::invalid_record, std::nullopt};
+            }
+            return {ManagedDealSettlementLoadStatus::not_found, std::nullopt};
+        }
     if (status == ReadStatus::malformed) {
         set_error(last_error_, error.empty() ? "malformed managed deal settlement fact" : error);
         return {ManagedDealSettlementLoadStatus::invalid_record, std::nullopt};

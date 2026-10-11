@@ -205,6 +205,14 @@ match. Settlement lookup is committed-only; a fact in an unfinished
 publication manifest is not admission evidence until its frontier marker is
 durable. It remains read-only: no leg reservation, allocation policy,
 duplicate prevention, or managed exposure mutation is implied.
+The next allocation boundary is specified by
+[ADR-0035](adr/0035-durable-managed-allocation-ledger.md). It will consume an
+admitted mapping only through a lock-serialized durable entry commit; the
+read-only admission result itself is never a reservation. The first bounded
+entry type is close-leg-only, with remaining capacity derived from committed
+entries against the immutable broker envelope. Reverse-open attribution,
+allocation policy, owner-loop wiring, and managed exposure mutation remain
+deferred.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

@@ -62,40 +62,32 @@ mt5bridge::BrokerReversalRecord broker(std::uint64_t ticket) {
 
 void test_exact_scale_conversion() {
     const auto mapped = mt5bridge::map_managed_logical_units_to_broker_volume(
-        250, {2}, {2, 25});
-    require(mapped && mapped->units == 250 && mapped->scale == 2 &&
+        250, {0, 25});
+    require(mapped && mapped->units == 250 && mapped->scale == 0 &&
                 mapped->step_units == 25,
-            "equal decimal scales must preserve exact units");
+            "integer managed units must preserve exact units");
 
     const auto finer = mt5bridge::map_managed_logical_units_to_broker_volume(
-        3, {0}, {2, 100});
+        3, {2, 100});
     require(finer && finer->units == 300,
             "finer broker scale must multiply with integer arithmetic");
-
-    const auto coarser = mt5bridge::map_managed_logical_units_to_broker_volume(
-        300, {2}, {0, 1});
-    require(coarser && coarser->units == 3,
-            "coarser broker scale must divide only exactly");
 }
 
 void test_non_exact_values_fail_closed() {
     require(!mt5bridge::map_managed_logical_units_to_broker_volume(
-                250, {2}, {0, 1}),
-            "fractional coarsening must be rejected");
-    require(!mt5bridge::map_managed_logical_units_to_broker_volume(
-                250, {2}, {2, 30}),
+                25, {2, 30}),
             "non-step-aligned conversion must be rejected");
     require(!mt5bridge::map_managed_logical_units_to_broker_volume(
-                (std::numeric_limits<std::uint64_t>::max)(), {0}, {1, 1}),
+                (std::numeric_limits<std::uint64_t>::max)(), {1, 1}),
             "conversion overflow must be rejected");
     require(!mt5bridge::map_managed_logical_units_to_broker_volume(
-                0, {0}, {0, 1}),
+                0, {0, 1}),
             "zero logical units must be rejected");
     require(!mt5bridge::map_managed_logical_units_to_broker_volume(
-                1, {10}, {0, 1}),
-            "unsupported logical scale must be rejected");
+                1, {10, 1}),
+            "unsupported broker scale must be rejected");
     require(!mt5bridge::map_managed_logical_units_to_broker_volume(
-                1, {0}, {0, 0}),
+                1, {0, 0}),
             "missing broker step must be rejected");
 }
 
@@ -103,9 +95,9 @@ void test_proof_binding_does_not_allocate_legs() {
     const auto managed = settlement(701, 250);
     const auto broker_record = broker(701);
     const auto mapped = mt5bridge::derive_managed_broker_volume_mapping(
-        managed, broker_record, {2});
+        managed, broker_record);
     require(mapped && mapped->valid(), "matching durable proofs must map");
-    require(mapped->broker_volume().units == 250 &&
+    require(mapped->broker_volume().units == 25000 &&
                 !(mapped->broker_volume() == broker_record.broker_close_leg),
             "mapping must not silently consume the broker close leg");
 
@@ -118,13 +110,13 @@ void test_proof_binding_does_not_allocate_legs() {
 void test_identity_mismatch_fails_closed() {
     auto mismatched_ticket = broker(702);
     require(!mt5bridge::derive_managed_broker_volume_mapping(
-                settlement(701, 250), mismatched_ticket, {2}),
+                settlement(701, 250), mismatched_ticket),
             "different deal tickets must not be bound");
 
     auto mismatched_account = broker(701);
     mismatched_account.account.login = 43;
     require(!mt5bridge::derive_managed_broker_volume_mapping(
-                settlement(701, 250), mismatched_account, {2}),
+                settlement(701, 250), mismatched_account),
             "different accounts must not be bound");
 }
 

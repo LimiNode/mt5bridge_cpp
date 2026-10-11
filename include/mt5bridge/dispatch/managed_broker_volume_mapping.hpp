@@ -14,34 +14,12 @@
 
 namespace mt5bridge {
 
-/// \struct ManagedLogicalVolumeNormalization
-/// \brief Decimal scale of managed logical units at a conversion boundary.
-///
-/// A managed quantity is interpreted as `units / 10^scale`. The scale is
-/// conversion evidence, not an allocation policy and not a broker-volume
-/// claim. A future owner-loop integration must source it from the durable
-/// operation/symbol contract rather than inventing it for a candidate mapping.
-struct ManagedLogicalVolumeNormalization {
-    std::uint32_t scale = 0; ///< Decimal denominator exponent, at most nine.
-
-    /// \brief Tests whether the logical quantity has a bounded decimal scale.
-    /// \return True when the scale can be represented exactly.
-    bool valid() const { return scale <= 9; }
-
-    /// \brief Compares two logical-unit scale proofs.
-    /// \param other Scale proof to compare.
-    /// \return True when both use the same decimal denominator.
-    bool operator==(const ManagedLogicalVolumeNormalization &other) const {
-        return scale == other.scale;
-    }
-};
-
 namespace detail {
 
-/// \brief Returns 10 raised to a bounded decimal exponent.
+/// \brief Returns 10 raised to a bounded broker-volume exponent.
 /// \param exponent Decimal exponent no greater than nine.
 /// \return Exact power, or empty for an unsupported exponent.
-inline std::optional<std::uint64_t> managed_volume_power10(std::uint32_t exponent) {
+inline std::optional<std::uint64_t> broker_volume_power10(std::uint32_t exponent) {
     if (exponent > 9)
         return std::nullopt;
     std::uint64_t result = 1;
@@ -54,34 +32,22 @@ inline std::optional<std::uint64_t> managed_volume_power10(std::uint32_t exponen
 
 /// \brief Converts managed logical units into exact broker step units.
 /// \param managed_logical_units Positive managed quantity numerator.
-/// \param logical_scale Decimal scale of the managed quantity.
 /// \param broker_normalization Decimal scale and step proof for the broker.
-/// \return Exact broker volume, or empty when conversion is not integral or
+/// \return Exact broker volume, or empty when conversion overflows or is not
 ///         step-aligned.
 inline std::optional<BrokerVolume> map_managed_logical_units_to_broker_volume(
     std::uint64_t managed_logical_units,
-    const ManagedLogicalVolumeNormalization &logical_scale,
     const BrokerVolumeNormalization &broker_normalization) {
-    if (managed_logical_units == 0 || !logical_scale.valid() ||
-        !broker_normalization.valid())
+    if (managed_logical_units == 0 || !broker_normalization.valid())
         return std::nullopt;
 
-    std::uint64_t broker_units = managed_logical_units;
-    if (broker_normalization.scale >= logical_scale.scale) {
-        const auto multiplier = detail::managed_volume_power10(
-            broker_normalization.scale - logical_scale.scale);
-        if (!multiplier || managed_logical_units >
-                               (std::numeric_limits<std::uint64_t>::max)() /
-                                   *multiplier)
-            return std::nullopt;
-        broker_units = managed_logical_units * *multiplier;
-    } else {
-        const auto divisor = detail::managed_volume_power10(
-            logical_scale.scale - broker_normalization.scale);
-        if (!divisor || managed_logical_units % *divisor != 0)
-            return std::nullopt;
-        broker_units = managed_logical_units / *divisor;
-    }
+    const auto multiplier =
+        detail::broker_volume_power10(broker_normalization.scale);
+    if (!multiplier || managed_logical_units >
+                           (std::numeric_limits<std::uint64_t>::max)() /
+                               *multiplier)
+        return std::nullopt;
+    const auto broker_units = managed_logical_units * *multiplier;
 
     BrokerVolume result{broker_units, broker_normalization.scale,
                         broker_normalization.step_units};
@@ -117,12 +83,6 @@ public:
         return broker_provenance_;
     }
 
-    /// \brief Returns the managed logical scale proof.
-    /// \return Decimal scale of the source quantity.
-    const ManagedLogicalVolumeNormalization &logical_scale() const {
-        return logical_scale_;
-    }
-
     /// \brief Returns the source managed quantity numerator.
     /// \return Positive logical units.
     std::uint64_t managed_logical_units() const { return managed_logical_units_; }
@@ -138,14 +98,14 @@ public:
             managed_key_.account != broker_key_.account ||
             managed_key_.deal_ticket != broker_key_.deal_ticket ||
             !managed_provenance_.valid() || !broker_provenance_.valid() ||
-            !logical_scale_.valid() || managed_logical_units_ == 0 ||
+            managed_logical_units_ == 0 ||
             !broker_volume_.valid())
             return false;
 
         const BrokerVolumeNormalization broker_normalization{
             broker_volume_.scale, broker_volume_.step_units};
         const auto expected = map_managed_logical_units_to_broker_volume(
-            managed_logical_units_, logical_scale_, broker_normalization);
+            managed_logical_units_, broker_normalization);
         return expected && *expected == broker_volume_;
     }
 
@@ -156,7 +116,6 @@ public:
         return managed_key_ == other.managed_key_ && broker_key_ == other.broker_key_ &&
                managed_provenance_ == other.managed_provenance_ &&
                broker_provenance_ == other.broker_provenance_ &&
-               logical_scale_ == other.logical_scale_ &&
                managed_logical_units_ == other.managed_logical_units_ &&
                broker_volume_ == other.broker_volume_;
     }
@@ -166,27 +125,24 @@ private:
                                BrokerReversalKey broker_key,
                                ManagedSettlementProvenance managed_provenance,
                                BrokerReversalProvenance broker_provenance,
-                               ManagedLogicalVolumeNormalization logical_scale,
                                std::uint64_t managed_logical_units,
                                BrokerVolume broker_volume)
         : managed_key_(std::move(managed_key)), broker_key_(std::move(broker_key)),
           managed_provenance_(std::move(managed_provenance)),
           broker_provenance_(std::move(broker_provenance)),
-          logical_scale_(logical_scale), managed_logical_units_(managed_logical_units),
+          managed_logical_units_(managed_logical_units),
           broker_volume_(broker_volume) {}
 
     ManagedDealSettlementKey managed_key_;
     BrokerReversalKey broker_key_;
     ManagedSettlementProvenance managed_provenance_;
     BrokerReversalProvenance broker_provenance_;
-    ManagedLogicalVolumeNormalization logical_scale_;
     std::uint64_t managed_logical_units_ = 0;
     BrokerVolume broker_volume_;
 
     friend std::optional<ManagedBrokerVolumeMapping>
     derive_managed_broker_volume_mapping(
-        const ManagedDealSettlement &, const BrokerReversalRecord &,
-        const ManagedLogicalVolumeNormalization &);
+        const ManagedDealSettlement &, const BrokerReversalRecord &);
 };
 
 /// \brief Derives a conversion fact from two existing durable proofs.
@@ -194,14 +150,13 @@ private:
 /// \param broker Durable broker reversal proof for the same deal. Until a
 ///             generic durable deal proof exists, non-reversal deals are not
 ///             accepted as mapping evidence.
-/// \param logical_scale Authoritative managed decimal-scale evidence.
 /// \return An exact conversion fact, or empty when identity or arithmetic is
-///         not provable. The broker scale and step are taken from the durable
-///         broker deal proof, never from an independent caller argument.
+///         not provable. Managed logical units are the integer domain defined
+///         by ADR-0024; the broker scale and step are taken from the durable
+///         broker deal proof.
 inline std::optional<ManagedBrokerVolumeMapping> derive_managed_broker_volume_mapping(
-    const ManagedDealSettlement &settlement, const BrokerReversalRecord &broker,
-    const ManagedLogicalVolumeNormalization &logical_scale) {
-    if (!settlement.valid() || !broker.valid() || !logical_scale.valid() ||
+    const ManagedDealSettlement &settlement, const BrokerReversalRecord &broker) {
+    if (!settlement.valid() || !broker.valid() ||
         settlement.key.account != broker.account ||
         settlement.key.deal_ticket != broker.deal_ticket)
         return std::nullopt;
@@ -209,13 +164,13 @@ inline std::optional<ManagedBrokerVolumeMapping> derive_managed_broker_volume_ma
     const BrokerVolumeNormalization broker_normalization{
         broker.deal_volume.scale, broker.deal_volume.step_units};
     const auto broker_volume = map_managed_logical_units_to_broker_volume(
-        settlement.managed_logical_units, logical_scale, broker_normalization);
+        settlement.managed_logical_units, broker_normalization);
     if (!broker_volume)
         return std::nullopt;
 
     ManagedBrokerVolumeMapping result(
         settlement.key, broker.key(), settlement.provenance, broker.provenance,
-        logical_scale, settlement.managed_logical_units, *broker_volume);
+        settlement.managed_logical_units, *broker_volume);
     return result.valid() ? std::optional<ManagedBrokerVolumeMapping>(result)
                           : std::nullopt;
 }

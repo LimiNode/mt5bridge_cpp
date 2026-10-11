@@ -2,14 +2,19 @@
 /// \brief Exercises durable source-coherence admission for broker mappings.
 
 #include <mt5bridge/dispatch/managed_broker_volume_admission.hpp>
+#include <mt5bridge/dispatch/file_managed_deal_settlement_store.hpp>
 
+#include "managed_deal_settlement_producer.hpp"
 #include "support/memory_journal_store.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace {
@@ -29,21 +34,35 @@ mt5bridge::BrokerReversalProvenance broker_provenance() {
     return {11, 8, 12, 8, 12, 10, 202};
 }
 
+mt5bridge::OperationRecord operation_for_baseline(
+    const mt5bridge::ReconciliationBaseline &baseline,
+    std::uint64_t revision,
+    std::uint64_t settled_volume);
+
 mt5bridge::OperationRecord operation() {
     const mt5bridge::OperationKey key{account(), 71, 4};
     const auto baseline = mt5bridge::ReconciliationBaseline::restore(
         key.account, 4, 7, 1, 2, 3, 7);
     require(baseline.has_value(), "operation baseline is invalid");
 
+    return operation_for_baseline(*baseline, 8, 2);
+}
+
+mt5bridge::OperationRecord operation_for_baseline(
+    const mt5bridge::ReconciliationBaseline &baseline,
+    std::uint64_t revision,
+    std::uint64_t settled_volume) {
+    const mt5bridge::OperationKey key{account(), 71, 4};
+
     mt5bridge::ReconciliationDescriptor descriptor{
         key.account,
-        *baseline,
+        baseline,
         {mt5bridge::require_history_deal(
             701, mt5bridge::ObservationWindow{1000, 2000})},
         mt5bridge::OperationState::filled};
     descriptor.trade_id = key.trade_id;
     descriptor.operation_id = key.operation_id;
-    descriptor.requested_volume = 2;
+    descriptor.requested_volume = settled_volume;
 
     mt5bridge::OperationRecord result;
     result.key = key;
@@ -52,11 +71,28 @@ mt5bridge::OperationRecord operation() {
     result.result_payload = {0x02};
     result.operation_state = mt5bridge::OperationState::filled;
     result.journal_state = mt5bridge::JournalState::reconciling;
-    result.revision = 8;
+    result.revision = revision;
     result.fencing_token = 3;
     result.reconciliation_descriptor = std::move(descriptor);
-    result.settled_volume = 2;
+    result.settled_volume = settled_volume;
     require(result.valid(), "operation fixture is invalid");
+    return result;
+}
+
+Mt5DealSnapshot deal(std::uint64_t ticket, double volume) {
+    Mt5DealSnapshot result{};
+    result.ticket = ticket;
+    result.order_ticket = 702;
+    result.position_id = 800;
+    result.entry = 1;
+    result.volume = volume;
+    result.time_msc = 1500;
+    result.known_fields = MT5BRIDGE_DEAL_KNOWN_TICKET |
+                          MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
+                          MT5BRIDGE_DEAL_KNOWN_POSITION_ID |
+                          MT5BRIDGE_DEAL_KNOWN_ENTRY |
+                          MT5BRIDGE_DEAL_KNOWN_VOLUME |
+                          MT5BRIDGE_DEAL_KNOWN_TIME;
     return result;
 }
 
@@ -136,6 +172,8 @@ public:
 
     mt5bridge::ManagedDealSettlementLoadResult load(
         const mt5bridge::ManagedDealSettlementKey &key) const override {
+        if (!committed)
+            return {mt5bridge::ManagedDealSettlementLoadStatus::not_found, std::nullopt};
         if (load_status != mt5bridge::ManagedDealSettlementLoadStatus::found)
             return {load_status, std::nullopt};
         const auto found = records.find(key);
@@ -148,6 +186,7 @@ public:
 
     mt5bridge::ManagedDealSettlementLoadStatus load_status =
         mt5bridge::ManagedDealSettlementLoadStatus::found;
+    bool committed = true;
     std::map<mt5bridge::ManagedDealSettlementKey, mt5bridge::ManagedDealSettlement> records;
 };
 
@@ -292,6 +331,16 @@ void test_candidate_cannot_bypass_durable_fact() {
             "caller mapping bypassed the durable settlement fact");
 }
 
+void test_pending_fact_is_not_admitted() {
+    Fixture fixture;
+    fixture.settlements.committed = false;
+    const auto result = mt5bridge::admit_managed_broker_volume_mapping(
+        fixture.mapping, fixture.journal, fixture.settlements, fixture.brokers,
+        fixture.bases, fixture.envelopes);
+    require(result.status == mt5bridge::ManagedBrokerVolumeAdmissionStatus::missing_settlement_fact,
+            "pending settlement fact was admitted");
+}
+
 void test_missing_basis_fails_closed() {
     Fixture fixture;
     fixture.bases.records.clear();
@@ -351,17 +400,92 @@ void test_older_fact_revision_is_valid_for_later_basis() {
             "an immutable earlier fact was rejected by a later basis revision");
 }
 
+void test_real_pending_publication_is_not_admitted_until_recovered() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("mt5bridge_managed_volume_admission_" +
+                       std::to_string(std::chrono::steady_clock::now()
+                                          .time_since_epoch()
+                                          .count()));
+    std::filesystem::remove_all(root);
+
+    mt5bridge_test_support::MemoryJournalStore journal;
+    mt5bridge::ObservationGraph graph(account());
+    mt5bridge::ObservationBatch baseline_batch;
+    baseline_batch.account = account();
+    baseline_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+    baseline_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+    require(graph.apply(baseline_batch).accepted(), "admission baseline failed");
+    const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
+    const auto source_operation = operation_for_baseline(baseline, 8, 2);
+    journal.records[source_operation.key] = source_operation;
+
+    mt5bridge::ObservationBatch deal_batch;
+    deal_batch.account = account();
+    deal_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+    deal_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+    deal_batch.history_deals = {deal(701, 2.0)};
+    require(graph.apply(deal_batch).accepted(), "admission deal observation failed");
+    const auto proof = mt5bridge::dispatch::ManagedDealSettlementProducer::create(
+        source_operation, baseline, graph, 701, 2);
+    require(proof.has_value(), "admission settlement proof was not derived");
+
+    const auto broker_record = broker();
+    const auto mapping = mt5bridge::derive_managed_broker_volume_mapping(
+        proof->fact(), broker_record);
+    require(mapping.has_value(), "admission mapping fixture was not derived");
+
+    Fixture sources;
+    {
+        mt5bridge::WindowsFileManagedDealSettlementStore store(root);
+        require(store.ready(), "admission settlement store did not open");
+        require(store.commit(*proof, journal) ==
+                    mt5bridge::ManagedDealSettlementCommitStatus::committed,
+                "admission settlement publication failed");
+    }
+
+    for (const auto &entry : std::filesystem::directory_iterator(root)) {
+        const auto filename = entry.path().filename().wstring();
+        if (entry.path().extension() == L".bin" && filename.rfind(L"frontier-", 0) == 0) {
+            std::filesystem::remove(entry.path());
+            break;
+        }
+    }
+
+    mt5bridge_test_support::MemoryJournalStore restarted_journal;
+    restarted_journal.records[source_operation.key] = source_operation;
+    mt5bridge::WindowsFileManagedDealSettlementStore restarted_store(root);
+    require(restarted_store.ready(), "restarted admission store did not open");
+    const auto pending_result = mt5bridge::admit_managed_broker_volume_mapping(
+        *mapping, restarted_journal, restarted_store, sources.brokers, sources.bases,
+        sources.envelopes);
+    require(pending_result.status ==
+                mt5bridge::ManagedBrokerVolumeAdmissionStatus::missing_settlement_fact,
+            "pending real settlement fact was admitted");
+
+    require(restarted_store.recover_pending(restarted_journal) ==
+                mt5bridge::ManagedDealSettlementCommitStatus::committed,
+            "pending real settlement publication was not recovered");
+    const auto committed_result = mt5bridge::admit_managed_broker_volume_mapping(
+        *mapping, restarted_journal, restarted_store, sources.brokers, sources.bases,
+        sources.envelopes);
+    require(committed_result.admitted(),
+            "recovered committed settlement fact was not admitted");
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
     try {
         test_admission_from_durable_sources();
         test_candidate_cannot_bypass_durable_fact();
+        test_pending_fact_is_not_admitted();
         test_missing_basis_fails_closed();
         test_consumed_envelope_fails_closed();
         test_envelope_legs_must_match_broker_proof();
         test_operation_revision_mismatch_fails_closed();
         test_older_fact_revision_is_valid_for_later_basis();
+        test_real_pending_publication_is_not_admitted_until_recovered();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

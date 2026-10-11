@@ -247,9 +247,10 @@ public:
         const ManagedDealSettlementCommit &proof,
         const DurableJournalStore &journal_store) = 0;
 
-    /// \brief Loads one immutable fact.
+    /// \brief Loads one committed immutable fact.
     /// \param key Composite operation/deal identity.
-    /// \return Status-bearing fact result.
+    /// \return Status-bearing fact result. A fact that is present only in a
+    ///         pending publication manifest is reported as `not_found`.
     virtual ManagedDealSettlementLoadResult load(
         const ManagedDealSettlementKey &key) const = 0;
 };

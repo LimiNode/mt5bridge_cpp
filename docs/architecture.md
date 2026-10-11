@@ -201,8 +201,10 @@ The source-coherence admission boundary is specified by
 `include/mt5bridge/dispatch/managed_broker_volume_admission.hpp`. It reloads
 the immutable settlement, broker reversal, ownership basis, operation, and
 broker-only envelope proofs and returns a canonical mapping only when they
-match. It remains read-only: no leg reservation, allocation policy, duplicate
-prevention, or managed exposure mutation is implied.
+match. Settlement lookup is committed-only; a fact in an unfinished
+publication manifest is not admission evidence until its frontier marker is
+durable. It remains read-only: no leg reservation, allocation policy,
+duplicate prevention, or managed exposure mutation is implied.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

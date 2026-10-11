@@ -163,8 +163,10 @@ if(BUILD_TESTING)
              COMMAND mt5bridge_managed_broker_volume_mapping_test)
     add_executable(mt5bridge_managed_broker_volume_admission_test
                    tests/managed_broker_volume_admission_test.cpp)
+    target_include_directories(mt5bridge_managed_broker_volume_admission_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
     target_link_libraries(mt5bridge_managed_broker_volume_admission_test PRIVATE
-                          mt5bridge::client)
+                          mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_managed_broker_volume_admission
              COMMAND mt5bridge_managed_broker_volume_admission_test)
     add_executable(mt5bridge_dispatch_admission_header_only_test

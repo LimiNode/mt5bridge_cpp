@@ -34,6 +34,9 @@ candidate only when all of the following checks pass:
 1. The candidate is locally valid.
 2. The exact `ManagedDealSettlementKey` loads a valid immutable fact whose
    operation/deal identity, managed units, and provenance equal the candidate.
+   The settlement store's lookup is committed-only: a fact present only in a
+   pending publication manifest is reported as absent until its frontier
+   commit marker is durable.
 3. The exact `BrokerReversalKey` loads a valid `BrokerReversalRecord` for the
    same account and provenance, and the record is explicitly
    `DEAL_ENTRY_INOUT` evidence.

@@ -72,8 +72,15 @@ broker close leg.
 
 ## Atomic commit boundary
 
-The allocation store owns one exclusive lock for its namespace. Its commit
-operation must perform all of the following while holding that lock:
+The allocation store owns one exclusive lock for its namespace. The caller
+must also hold the account-scoped single-writer lease (or an equivalent
+fencing token) that protects the journal and reconciliation sources. That
+ownership must remain continuous from source revalidation through allocation
+publication; the namespace lock alone does not serialize a concurrent journal
+revision.
+
+Its commit operation must perform all of the following while holding the
+allocation lock and the source-writer ownership boundary:
 
 1. Revalidate the candidate mapping against the durable source stores using
    the committed-only admission rules from ADR-0034. A mapping admitted by a
@@ -87,11 +94,12 @@ operation must perform all of the following while holding that lock:
    flush/replace/write-through pattern. The atomic file publication is the
    commit point for that entry.
 
-The source records used by the revalidation are revision-pinned immutable
-proofs for this operation. A changed or missing source fails closed; the
-store never silently refreshes an entry to a later operation revision or a
-different provenance. The lock serializes allocation writers; it is not a
-replacement for the source stores' own durability locks.
+The entry pins the exact operation revision and source provenances used by the
+revalidation. A changed or missing source fails closed; the store never
+silently refreshes an entry to a later operation revision or a different
+provenance. The allocation lock serializes allocation writers, while the
+account writer lease/fencing boundary serializes them with source updates; it
+is not a replacement for the source stores' own durability locks.
 
 ## Durable recovery and replay
 
@@ -125,6 +133,9 @@ different payload is `conflict`.
   settlement facts, ownership bases, or `ManagedTradeState`.
 - Read-only admission remains safe to repeat, but only the allocation-store
   commit under its lock consumes derived remaining capacity.
+- Allocation commit requires the same account-scoped writer ownership (or
+  equivalent fencing proof) that protects the pinned operation sources; a
+  ledger lock without that source boundary is insufficient.
 - FIFO/LIFO/pro-rata policy, cross-operation ordering, and owner-loop wiring
   remain outside this slice.
 
@@ -157,4 +168,3 @@ The future implementation must cover at least:
 - reverse-open allocation rejected;
 - crash before and after the single-entry atomic publication point; and
 - no changes to managed exposure or existing broker-envelope bytes.
-

@@ -92,12 +92,13 @@ void test_non_exact_values_fail_closed() {
 }
 
 void test_proof_binding_does_not_allocate_legs() {
-    const auto managed = settlement(701, 250);
+    const auto managed = settlement(701, 2);
     const auto broker_record = broker(701);
     const auto mapped = mt5bridge::derive_managed_broker_volume_mapping(
         managed, broker_record);
     require(mapped && mapped->valid(), "matching durable proofs must map");
-    require(mapped->broker_volume().units == 25000 &&
+    require(mapped->broker_volume().units == 200 &&
+                mapped->broker_volume().units <= broker_record.deal_volume.units &&
                 !(mapped->broker_volume() == broker_record.broker_close_leg),
             "mapping must not silently consume the broker close leg");
 
@@ -105,6 +106,14 @@ void test_proof_binding_does_not_allocate_legs() {
     const auto broker_before = broker_record;
     require(managed == managed_before && broker_record == broker_before,
             "mapping must not mutate source proofs");
+}
+
+void test_mapping_cannot_exceed_deal_volume() {
+    const auto managed = settlement(701, 250);
+    const auto broker_record = broker(701);
+    require(!mt5bridge::derive_managed_broker_volume_mapping(
+                managed, broker_record),
+            "mapping larger than the proven deal must be rejected");
 }
 
 void test_identity_mismatch_fails_closed() {
@@ -127,6 +136,7 @@ int main() {
         test_exact_scale_conversion();
         test_non_exact_values_fail_closed();
         test_proof_binding_does_not_allocate_legs();
+        test_mapping_cannot_exceed_deal_volume();
         test_identity_mismatch_fails_closed();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

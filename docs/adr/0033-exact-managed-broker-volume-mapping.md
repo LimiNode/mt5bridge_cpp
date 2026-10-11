@@ -24,6 +24,15 @@ managed_logical_units / 10^0
 and the resulting broker quantity must be aligned to the observed symbol
 volume step.
 
+The integer representation is not, by itself, a physical unit contract. The
+current managed settlement path supplies that missing contract: ADR-0026 only
+accepts an attributed broker total when it is a positive whole-lot quantity
+(`floor(total) == total`), and the resulting managed settlement fact stores
+that authoritative integer quantity. This bounded slice therefore treats one
+managed unit as one whole broker-volume unit at scale zero. A future managed
+quantity with a different physical unit or fractional lot contract must add
+durable source evidence before it can use this mapping.
+
 ## Decision
 
 The conversion boundary uses one managed-domain contract and one explicit
@@ -45,8 +54,10 @@ the mapping is not representable and fails closed.
 `ManagedBrokerVolumeMapping` binds the conversion to an immutable managed
 per-deal fact and a durable broker deal identity/provenance. It records the
 converted broker quantity, but it deliberately does not compare that quantity
-with `broker_close_leg` or `broker_reverse_open_leg`. A converted quantity is
-not yet an ownership allocation and cannot consume either unallocated leg.
+with `broker_close_leg` or `broker_reverse_open_leg`. It does, however, require
+the converted quantity to be no greater than the proven `deal_volume` in the
+same exact scale/step domain. This is a consistency bound on one deal, not an
+allocation decision; the mapping cannot consume either unallocated leg.
 
 The current producer consumes `BrokerReversalRecord` because that is the only
 durable broker deal proof available at this boundary. A non-reversal deal is
@@ -68,6 +79,8 @@ mapped quantity can be allocated to a broker leg.
   durable integer-domain contract (`0`);
 - conversion uses no floating-point arithmetic;
 - converted units are positive and exactly step-normalized;
+- a derived mapping uses the same broker scale/step as `deal_volume` and does
+  not exceed that deal volume;
 - overflow, missing broker scale/step, and identity mismatch
   fail closed;
 - the mapping does not imply FIFO/LIFO/pro-rata ownership or consume a broker
@@ -85,7 +98,8 @@ mapped quantity can be allocated to a broker leg.
 
 ## Verification boundary
 
-Focused regressions cover the integer managed domain, finer broker scales,
+Focused regressions cover the integer whole-lot domain, finer broker scales,
 step-aligned and non-step-aligned values, invalid broker normalization,
-overflow, identity mismatch, and the fact that mapping does not alter source
-proofs or broker allocation legs.
+overflow, identity mismatch, rejection of a mapping larger than `DEAL_VOLUME`,
+and the fact that mapping does not alter source proofs or broker allocation
+legs.

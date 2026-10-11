@@ -35,6 +35,11 @@ inline std::optional<std::uint64_t> broker_volume_power10(std::uint32_t exponent
 /// \param broker_normalization Decimal scale and step proof for the broker.
 /// \return Exact broker volume, or empty when conversion overflows or is not
 ///         step-aligned.
+///
+/// The managed quantity is interpreted in the current whole-lot integer
+/// contract (scale zero). This helper has no deal context and therefore does
+/// not enforce the upper bound against a particular `DEAL_VOLUME`; the proof
+/// binding function below performs that check.
 inline std::optional<BrokerVolume> map_managed_logical_units_to_broker_volume(
     std::uint64_t managed_logical_units,
     const BrokerVolumeNormalization &broker_normalization) {
@@ -165,7 +170,9 @@ inline std::optional<ManagedBrokerVolumeMapping> derive_managed_broker_volume_ma
         broker.deal_volume.scale, broker.deal_volume.step_units};
     const auto broker_volume = map_managed_logical_units_to_broker_volume(
         settlement.managed_logical_units, broker_normalization);
-    if (!broker_volume)
+    if (!broker_volume || broker_volume->scale != broker.deal_volume.scale ||
+        broker_volume->step_units != broker.deal_volume.step_units ||
+        broker_volume->units > broker.deal_volume.units)
         return std::nullopt;
 
     ManagedBrokerVolumeMapping result(

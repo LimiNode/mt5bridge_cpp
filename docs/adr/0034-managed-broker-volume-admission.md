@@ -41,10 +41,11 @@ candidate only when all of the following checks pass:
    candidate exactly, including broker scale, step, and deal-volume bound.
 5. The composite `(BrokerReversalKey, OperationKey)` loads a valid
    `ManagedOwnershipBasis` whose broker provenance and pinned operation
-   revision match the settlement fact.
+   revision is at least the settlement fact's source revision.
 6. The pinned operation record is present, valid, still the same revision, is
-   a settled close, and authorizes no more managed units than its durable
-   `settled_volume`.
+   a settled close, and authorizes the fact's managed units through its durable
+   `settled_volume`. This permits an older immutable deal fact to be referenced
+   by a later cumulative frontier without rewriting that fact.
 7. The ownership-basis proof revalidates its broker-only allocation envelope.
    Both broker legs must still equal their original unallocated legs.
 
@@ -86,4 +87,6 @@ serializing the admission-to-allocation transition against concurrent writers.
 Focused regressions cover successful admission from all durable sources,
 candidate bypass of a changed durable settlement fact, missing ownership basis,
 consumed broker envelope, and operation-revision mismatch. Header
-self-containment also compiles the new public contract independently.
+self-containment also compiles the new public contract independently. An
+incremental regression confirms that a fact proven at an earlier source
+revision remains admissible under a later pinned operation revision.

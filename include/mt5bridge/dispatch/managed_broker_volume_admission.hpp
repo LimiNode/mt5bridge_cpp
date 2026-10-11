@@ -187,7 +187,7 @@ inline ManagedBrokerVolumeAdmissionResult admit_managed_broker_volume_mapping(
     if (basis.record->account != candidate.managed_key().account ||
         !(basis.record->key() == basis_key) ||
         !(basis.record->broker_provenance == candidate.broker_provenance()) ||
-        basis.record->operation_revision != settlement.record->source_operation_revision)
+        basis.record->operation_revision < settlement.record->source_operation_revision)
         return {ManagedBrokerVolumeAdmissionStatus::invalid_ownership_basis, std::nullopt};
 
     const auto envelope = allocation_store.load(candidate.broker_key());
@@ -223,7 +223,7 @@ inline ManagedBrokerVolumeAdmissionResult admit_managed_broker_volume_mapping(
         return {ManagedBrokerVolumeAdmissionStatus::invalid_operation_record,
                 std::nullopt};
     if (!(operation.record->key == candidate.managed_key().operation_key) ||
-        operation.record->revision != settlement.record->source_operation_revision ||
+        operation.record->revision != basis.record->operation_revision ||
         settlement.record->managed_logical_units > operation.record->settled_volume)
         return {ManagedBrokerVolumeAdmissionStatus::invalid_operation_record,
                 std::nullopt};

@@ -339,6 +339,18 @@ void test_operation_revision_mismatch_fails_closed() {
             "operation revision mismatch was admitted");
 }
 
+void test_older_fact_revision_is_valid_for_later_basis() {
+    Fixture fixture;
+    auto older_fact = fixture.settlements.records.begin()->second;
+    older_fact.source_operation_revision = 7;
+    fixture.settlements.records.begin()->second = older_fact;
+    const auto result = mt5bridge::admit_managed_broker_volume_mapping(
+        fixture.mapping, fixture.journal, fixture.settlements, fixture.brokers,
+        fixture.bases, fixture.envelopes);
+    require(result.admitted(),
+            "an immutable earlier fact was rejected by a later basis revision");
+}
+
 } // namespace
 
 int main() {
@@ -349,6 +361,7 @@ int main() {
         test_consumed_envelope_fails_closed();
         test_envelope_legs_must_match_broker_proof();
         test_operation_revision_mismatch_fails_closed();
+        test_older_fact_revision_is_valid_for_later_basis();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

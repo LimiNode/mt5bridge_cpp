@@ -237,6 +237,16 @@ record. It never assigns a managed `TradeId`, changes managed exposure, or
 selects FIFO/LIFO/pro-rata ownership policy. Ambiguous, stale, non-INOUT, and
 non-step-normalized evidence remains unresolved.
 
+The exact managed logical-unit conversion in
+`<mt5bridge/dispatch/managed_broker_volume_mapping.hpp>` remains a
+non-mutating proof. Before a future allocation ledger may use it,
+`<mt5bridge/dispatch/managed_broker_volume_admission.hpp>` reloads and
+cross-checks the durable managed settlement fact, broker reversal, ownership
+basis, operation record, and still-unallocated broker envelope. This
+source-coherence gate does not reserve broker volume, choose FIFO/LIFO/pro-rata,
+prevent duplicate concurrent claims, or mutate managed exposure; see
+[`docs/adr/0034-managed-broker-volume-admission.md`](docs/adr/0034-managed-broker-volume-admission.md).
+
 This Stage 2 slice adds `mt5bridge::OperationJournal` and
 `mt5bridge::DispatchAdmissionBarrier`. The journal durably records the opaque
 operation intent, AccountKey, managed IDs, and write-ahead states through a

@@ -181,16 +181,4 @@ inline BrokerAllocationProofStatus validate_broker_allocation_envelope(
     return BrokerAllocationProofStatus::valid;
 }
 
-/// \brief Commits an envelope only after its broker proof is durably present.
-/// \param allocation Candidate broker allocation envelope.
-/// \param broker_store Durable source of broker reversal proofs.
-/// \param allocation_store Durable envelope destination.
-/// \return Proof-gated commit status.
-inline BrokerAllocationCommitStatus commit_broker_allocation_envelope(
-    const BrokerAllocationEnvelope &allocation,
-    const DurableBrokerReversalStore &broker_store,
-    DurableBrokerAllocationStore &allocation_store) {
-    return allocation_store.commit(allocation, broker_store);
-}
-
 } // namespace mt5bridge

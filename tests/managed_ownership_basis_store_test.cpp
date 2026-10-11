@@ -3,6 +3,8 @@
 
 #include <mt5bridge.hpp>
 
+#include "support/memory_journal_store.hpp"
+
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -99,38 +101,7 @@ mt5bridge::ManagedOwnershipBasis basis(
     return value;
 }
 
-class MemoryJournalStore final : public mt5bridge::DurableJournalStore {
-public:
-    mt5bridge::StoreCommitStatus commit(
-        const mt5bridge::OperationRecord &record,
-        std::optional<std::uint64_t>) override {
-        records[record.key] = record;
-        return mt5bridge::StoreCommitStatus::committed;
-    }
-
-    mt5bridge::StoreLoadResult load(
-        const mt5bridge::OperationKey &key) const override {
-        if (load_status != mt5bridge::StoreLoadStatus::found)
-            return {load_status, std::nullopt};
-        const auto found = records.find(key);
-        return found == records.end()
-                   ? mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::not_found,
-                                                std::nullopt}
-                   : mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::found,
-                                                found->second};
-    }
-
-    mt5bridge::StoreScanResult scan() const override {
-        mt5bridge::StoreScanResult result;
-        result.status = mt5bridge::StoreScanStatus::complete;
-        for (const auto &entry : records)
-            result.records.push_back(entry.second);
-        return result;
-    }
-
-    mt5bridge::StoreLoadStatus load_status = mt5bridge::StoreLoadStatus::found;
-    std::map<mt5bridge::OperationKey, mt5bridge::OperationRecord> records;
-};
+using mt5bridge_test_support::MemoryJournalStore;
 
 class MemoryEnvelopeStore final : public mt5bridge::DurableBrokerAllocationStore {
 public:
@@ -232,19 +203,16 @@ void check_proof_gate() {
     journal.records.emplace(operation.key, operation);
     MemoryEnvelopeStore envelopes(allocation);
     MemoryBasisStore destination;
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, envelopes, destination) ==
+    require(destination.commit(expected, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::committed,
             "proof-gated ownership basis commit failed");
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, envelopes, destination) ==
+    require(destination.commit(expected, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::already_committed,
             "identical ownership basis replay was not idempotent");
 
     auto stale_revision = expected;
     stale_revision.operation_revision -= 1;
-    require(mt5bridge::commit_managed_ownership_basis(
-                stale_revision, journal, envelopes, destination) ==
+    require(destination.commit(stale_revision, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
             "stale operation revision authorized an ownership basis");
 
@@ -253,8 +221,7 @@ void check_proof_gate() {
         mt5bridge::require_history_deal(999, mt5bridge::ObservationWindow{1000, 2000})};
     require(wrong_deal_operation.valid(), "wrong-deal operation fixture is invalid");
     journal.records[operation.key] = wrong_deal_operation;
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, envelopes, destination) ==
+    require(destination.commit(expected, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
             "operation without the target deal authorized ownership");
 
@@ -264,8 +231,7 @@ void check_proof_gate() {
         mt5bridge::require_history_deal(999, mt5bridge::ObservationWindow{1000, 2000})};
     require(multiple_deal_operation.valid(), "multiple-deal operation fixture is invalid");
     journal.records[operation.key] = multiple_deal_operation;
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, envelopes, destination) ==
+    require(destination.commit(expected, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
             "operation with multiple deal predicates authorized ambiguous ownership");
 
@@ -273,21 +239,18 @@ void check_proof_gate() {
     open_operation.operation_kind = mt5bridge::OperationKind::open;
     require(open_operation.valid(), "open operation fixture is invalid");
     journal.records[operation.key] = open_operation;
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, envelopes, destination) ==
+    require(destination.commit(expected, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::invalid_operation_record,
             "open operation authorized reversal close ownership");
 
     journal.records.clear();
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, envelopes, destination) ==
+    require(destination.commit(expected, journal, envelopes) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::missing_operation_record,
             "basis committed without a durable operation");
 
     journal.records.emplace(operation.key, operation);
     MemoryEnvelopeStore missing_envelope;
-    require(mt5bridge::commit_managed_ownership_basis(
-                expected, journal, missing_envelope, destination) ==
+    require(destination.commit(expected, journal, missing_envelope) ==
                 mt5bridge::ManagedOwnershipBasisCommitStatus::missing_allocation_envelope,
             "basis committed without a durable broker envelope");
 }

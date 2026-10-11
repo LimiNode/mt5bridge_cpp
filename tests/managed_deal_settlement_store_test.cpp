@@ -5,11 +5,12 @@
 
 #include <mt5bridge.hpp>
 
+#include "support/memory_journal_store.hpp"
+
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
-#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -71,35 +72,7 @@ mt5bridge::OperationRecord operation(
     return record;
 }
 
-class MemoryJournalStore final : public mt5bridge::DurableJournalStore {
-public:
-    mt5bridge::StoreCommitStatus commit(
-        const mt5bridge::OperationRecord &record,
-        std::optional<std::uint64_t>) override {
-        records[record.key] = record;
-        return mt5bridge::StoreCommitStatus::committed;
-    }
-
-    mt5bridge::StoreLoadResult load(
-        const mt5bridge::OperationKey &key) const override {
-        const auto found = records.find(key);
-        return found == records.end()
-                   ? mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::not_found,
-                                                std::nullopt}
-                   : mt5bridge::StoreLoadResult{mt5bridge::StoreLoadStatus::found,
-                                                found->second};
-    }
-
-    mt5bridge::StoreScanResult scan() const override {
-        mt5bridge::StoreScanResult result;
-        result.status = mt5bridge::StoreScanStatus::complete;
-        for (const auto &entry : records)
-            result.records.push_back(entry.second);
-        return result;
-    }
-
-    std::map<mt5bridge::OperationKey, mt5bridge::OperationRecord> records;
-};
+using mt5bridge_test_support::MemoryJournalStore;
 
 void check_incremental_frontier() {
     const auto root = std::filesystem::temp_directory_path() /

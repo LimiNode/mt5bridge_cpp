@@ -5,6 +5,8 @@
 
 #include <mt5bridge.hpp>
 
+#include "support/fake_observation_provider.hpp"
+
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -63,22 +65,7 @@ private:
     std::map<mt5bridge::OperationKey, mt5bridge::OperationRecord> durable;
 };
 
-class FakeObservationProvider final : public mt5bridge::ObservationProvider {
-public:
-    explicit FakeObservationProvider(std::vector<mt5bridge::ObservationBatch> batches)
-        : batches_(std::move(batches)) {}
-
-    mt5bridge::ObservationBatch collect(
-        const mt5bridge::ObservationCollectionRequest &) override {
-        if (next_ == batches_.size())
-            throw std::runtime_error("observation provider exhausted");
-        return std::move(batches_[next_++]);
-    }
-
-private:
-    std::vector<mt5bridge::ObservationBatch> batches_;
-    std::size_t next_ = 0;
-};
+using mt5bridge_test_support::FakeObservationProvider;
 
 mt5bridge::ObservationBatch observation_batch(const mt5bridge::AccountKey &key) {
     mt5bridge::ObservationBatch batch;

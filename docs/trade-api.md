@@ -651,6 +651,12 @@ reversals and CloseBy, respectively.
   source-coherence admission across the durable settlement fact, broker
   reversal, ownership basis, operation record, and still-unallocated envelope;
   this gate does not reserve volume or prevent duplicate concurrent claims.
+  The next boundary in
+  [ADR-0035](adr/0035-durable-managed-allocation-ledger.md) will make that
+  consumption durable and serialized: an admitted mapping is revalidated under
+  the allocation-store lock, then published as one immutable close-leg entry.
+  Remaining broker capacity is derived from committed entries, while
+  reverse-open attribution and managed exposure mutation remain deferred.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

@@ -74,10 +74,12 @@ broker close leg.
 
 The allocation store owns one exclusive lock for its namespace. The caller
 must also hold the account-scoped single-writer lease (or an equivalent
-fencing token) that protects the journal and reconciliation sources. That
-ownership must remain continuous from source revalidation through allocation
-publication; the namespace lock alone does not serialize a concurrent journal
-revision.
+fencing capability) that protects the journal and reconciliation sources.
+This is an authoritative commit capability, not merely a snapshot of the
+current token: the lease/fencing implementation must make a stale writer
+unable to publish after ownership is lost. Ownership must remain continuous
+from source revalidation through allocation publication; the namespace lock
+alone does not serialize a concurrent journal revision.
 
 Its commit operation must perform all of the following while holding the
 allocation lock and the source-writer ownership boundary:
@@ -95,11 +97,48 @@ allocation lock and the source-writer ownership boundary:
    commit point for that entry.
 
 The entry pins the exact operation revision and source provenances used by the
-revalidation. A changed or missing source fails closed; the store never
-silently refreshes an entry to a later operation revision or a different
-provenance. The allocation lock serializes allocation writers, while the
-account writer lease/fencing boundary serializes them with source updates; it
-is not a replacement for the source stores' own durability locks.
+revalidation. A changed or missing source fails closed at commit time; the
+store never silently refreshes an entry to a later operation revision or a
+different provenance. The allocation lock serializes allocation writers,
+while the account writer lease/fencing boundary serializes them with source
+updates; it is not a replacement for the source stores' own durability locks.
+
+The concrete store seam must therefore accept or otherwise verify this
+authoritative fencing capability as part of `commit`. A bare call that reads a
+non-zero `SingleWriterLease::held_fencing_token(account)` and then continues
+without a durable fencing guarantee is insufficient. The implementation must
+have a check that remains authoritative through the single-entry publication
+point; a test double must model lease loss between admission and publication
+and require the stale writer to fail closed.
+
+## Commit-time admission versus historical replay
+
+The source-coherence admission in ADR-0034 is a commit-time requirement. It
+proves that the candidate was authorized when the allocation entry was
+published. Once published, the entry is an immutable historical fact and must
+not be reinterpreted through the current mutable journal revision.
+
+In particular, restart scan must not call the current
+`validate_managed_ownership_basis()` contract in a way that requires:
+
+```text
+current journal revision == entry.source_operation_revision
+```
+
+An operation may legitimately advance from revision 8 to revision 11 after an
+entry was committed at revision 8. That is not corruption, re-attribution, or
+a reason to remove the earlier capacity consumption. Historical scan instead
+validates the entry's own checksum, filename, immutable identity and
+provenance fields, duplicate rules, and capacity against the durable broker
+envelope. It may cross-check immutable settlement, broker-reversal, and raw
+ownership-basis records, but it must not reject a valid historical entry merely
+because the mutable journal now exposes a later revision.
+
+If a future design needs to independently re-prove the historical operation
+after its journal revision has advanced, it must persist sufficient immutable
+operation evidence (for example, a versioned operation snapshot or digest) in
+the allocation record. That is a separate extension; this slice treats the
+successful fenced commit itself as the durable fact that admission passed.
 
 ## Durable recovery and replay
 
@@ -110,10 +149,12 @@ restart scan. Temporary files are ignored or rejected according to the
 existing file-store policy and never count as committed allocation.
 
 Restart scan is all-or-nothing. It rejects malformed records, filename/key
-mismatches, duplicate keys, invalid provenance, source mismatches, duplicate
-allocation of the same managed settlement key, and sums that exceed the
-durable broker close leg. Exact replay is `already_committed`; a same-key
-different payload is `conflict`.
+mismatches, duplicate keys, invalid provenance, mismatches against immutable
+settlement/broker/basis/envelope records, duplicate allocation of the same
+managed settlement key, and sums that exceed the durable broker close leg. It
+does not treat a later mutable journal revision as a historical source
+mismatch. Exact replay is `already_committed`; a same-key different payload is
+`conflict`.
 
 ## Fail-closed invariants
 
@@ -134,8 +175,9 @@ different payload is `conflict`.
 - Read-only admission remains safe to repeat, but only the allocation-store
   commit under its lock consumes derived remaining capacity.
 - Allocation commit requires the same account-scoped writer ownership (or
-  equivalent fencing proof) that protects the pinned operation sources; a
-  ledger lock without that source boundary is insufficient.
+  equivalent authoritative fencing capability) that protects the pinned
+  operation sources; a ledger lock or a one-time token read without that
+  source boundary is insufficient.
 - FIFO/LIFO/pro-rata policy, cross-operation ordering, and owner-loop wiring
   remain outside this slice.
 
@@ -165,6 +207,12 @@ The future implementation must cover at least:
 - concurrent-style repeated commit proving one winner and idempotent replay;
 - stale, missing, pending-only, and mismatched source proofs rejected during
   commit;
+- historical replay after journal advancement: an entry committed at revision
+  8 remains valid and counts toward capacity when the current operation record
+  is at revision 11;
+- fencing handoff: a writer that loses ownership after admission but before
+  publication cannot publish a stale entry, while the new fenced writer can
+  commit or replay it;
 - reverse-open allocation rejected;
 - crash before and after the single-entry atomic publication point; and
 - no changes to managed exposure or existing broker-envelope bytes.

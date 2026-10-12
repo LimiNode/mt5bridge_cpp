@@ -646,16 +646,17 @@ reversals and CloseBy, respectively.
   integer-only logical-to-broker conversion proof without consuming either
   broker leg; see
   [ADR-0033](adr/0033-exact-managed-broker-volume-mapping.md) and
-  [ADR-0031](adr/0031-durable-managed-ownership-basis.md). Before a future
+  [ADR-0031](adr/0031-durable-managed-ownership-basis.md). Before the bounded
   allocation ledger may use that conversion, ADR-0034 requires a read-only
   source-coherence admission across the durable settlement fact, broker
   reversal, ownership basis, operation record, and still-unallocated envelope;
   this gate does not reserve volume or prevent duplicate concurrent claims.
-  The next boundary in
-  [ADR-0035](adr/0035-durable-managed-allocation-ledger.md) will make that
+  The bounded implementation in
+  [ADR-0035](adr/0035-durable-managed-allocation-ledger.md) makes that
   consumption durable and serialized: an admitted mapping is revalidated under
   the allocation-store lock, then published as one immutable close-leg entry.
-  Remaining broker capacity is derived from committed entries, while
+  Remaining broker capacity is derived from committed entries, exact replay is
+  idempotent, and historical entries remain valid after journal advancement;
   reverse-open attribution and managed exposure mutation remain deferred.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.

@@ -46,7 +46,8 @@ managed logical units
 exact mapped broker volume
 managed settlement provenance
 broker reversal provenance
-source operation revision
+settlement.source_operation_revision
+basis.operation_revision
 ```
 
 An entry means:
@@ -81,27 +82,39 @@ unable to publish after ownership is lost. Ownership must remain continuous
 from source revalidation through allocation publication; the namespace lock
 alone does not serialize a concurrent journal revision.
 
-Its commit operation must perform all of the following while holding the
-allocation lock and the source-writer ownership boundary:
+The ordering is therefore explicit: obtain the authoritative fencing
+capability, acquire the allocation lock, and keep both through the final
+publication decision.
 
-1. Revalidate the candidate mapping against the durable source stores using
-   the committed-only admission rules from ADR-0034. A mapping admitted by a
-   previous read is never accepted as a reservation token.
-2. Scan and validate every existing allocation entry for the broker key.
-3. Treat an exact existing entry as an idempotent replay.
-4. Reject a different entry with the same composite key as a conflict.
-5. Reject the candidate when the exact close-leg sum would exceed the broker
-   reversal proof.
-6. Publish one immutable entry through the existing temp-file,
+Its commit operation must perform the following while holding the allocation
+lock and the source-writer ownership boundary:
+
+1. Read and historically validate every existing allocation entry for the
+   broker key. This validation uses the entry's immutable identity,
+   provenance, immutable source records, duplicate rules, and capacity; it
+   does not require the current journal revision to equal an older entry's
+   pinned revision.
+2. Look up the exact candidate key. If it exists with the same immutable
+   payload, return `already_committed`. If it exists with a different payload,
+   return `conflict`. Neither path runs a fresh ADR-0034 admission.
+3. Only when the exact key is absent, revalidate the candidate mapping against
+   the durable source stores using the current committed-only admission rules
+   from ADR-0034. A mapping admitted by a previous read is never accepted as a
+   reservation token for a new entry.
+4. Reject the new candidate when the exact close-leg sum would exceed the
+   broker reversal proof.
+5. Publish one immutable entry through the existing temp-file,
    flush/replace/write-through pattern. The atomic file publication is the
    commit point for that entry.
 
-The entry pins the exact operation revision and source provenances used by the
-revalidation. A changed or missing source fails closed at commit time; the
-store never silently refreshes an entry to a later operation revision or a
-different provenance. The allocation lock serializes allocation writers,
-while the account writer lease/fencing boundary serializes them with source
-updates; it is not a replacement for the source stores' own durability locks.
+The entry pins two different operation revisions: the per-deal settlement's
+`source_operation_revision` and the ownership basis's `operation_revision`.
+The latter may be newer for an incremental settlement, but it must satisfy
+the durable relation `settlement.source_operation_revision <=
+basis.operation_revision` at commit time. Neither revision is silently
+rewritten on replay. The allocation lock serializes allocation writers, while
+the account writer lease/fencing boundary serializes them with source updates;
+it is not a replacement for the source stores' own durability locks.
 
 The concrete store seam must therefore accept or otherwise verify this
 authoritative fencing capability as part of `commit`. A bare call that reads a
@@ -122,7 +135,7 @@ In particular, restart scan must not call the current
 `validate_managed_ownership_basis()` contract in a way that requires:
 
 ```text
-current journal revision == entry.source_operation_revision
+current journal revision == entry.basis.operation_revision
 ```
 
 An operation may legitimately advance from revision 8 to revision 11 after an
@@ -162,6 +175,8 @@ mismatch. Exact replay is `already_committed`; a same-key different payload is
   create an entry.
 - The entry's account, broker key, managed key, mapped volume, and provenance
   must equal the re-derived durable mapping.
+- `settlement.source_operation_revision` is non-zero and no greater than the
+  separately stored `basis.operation_revision`.
 - Only `broker_close_leg` is allocatable in this slice. Any reverse-open claim
   is rejected as unsupported rather than inferred from an `INOUT` reversal.
 - The sum of all committed close entries for one broker deal never exceeds

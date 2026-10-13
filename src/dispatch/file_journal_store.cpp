@@ -763,6 +763,15 @@ std::optional<std::uint64_t> WindowsSingleWriterLease::held_fencing_token(
     return token_;
 }
 
+bool WindowsSingleWriterLease::with_fencing_capability(
+    const AccountKey &account, std::uint64_t token,
+    const std::function<void()> &publication) const {
+    if (!ready_ || token_ == 0 || token != token_ || account != account_ || !publication)
+        return false;
+    publication();
+    return true;
+}
+
 StoreCommitStatus WindowsFileJournalStore::commit(
     const OperationRecord &record, std::optional<std::uint64_t> expected_revision) {
 #if defined(_WIN32)

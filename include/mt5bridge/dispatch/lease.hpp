@@ -6,6 +6,7 @@
 #include <mt5bridge/reconciliation/graph.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 namespace mt5bridge {
@@ -24,6 +25,22 @@ public:
     /// returned token authoritative for the following durable commit.
     virtual std::optional<std::uint64_t> held_fencing_token(
         const AccountKey &account) const = 0;
+
+    /// \brief Runs one publication while the fencing capability remains authoritative.
+    /// \param account Account identity being published.
+    /// \param token Fencing token previously acquired for the account.
+    /// \param publication Atomic durable publication callback.
+    /// \return False when the capability cannot be held for the callback.
+    /// \note Allocation stores must use this seam for their final publication;
+    /// a token read followed by an unrelated write is not an authoritative fence.
+    virtual bool with_fencing_capability(
+        const AccountKey &account, std::uint64_t token,
+        const std::function<void()> &publication) const {
+        (void)account;
+        (void)token;
+        (void)publication;
+        return false;
+    }
 };
 
 } // namespace mt5bridge

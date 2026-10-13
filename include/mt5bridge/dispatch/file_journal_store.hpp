@@ -94,6 +94,15 @@ public:
     std::optional<std::uint64_t> held_fencing_token(
         const AccountKey &account) const override;
 
+    /// \brief Publishes one callback while the account lease lock is held.
+    /// \param account Account identity being published.
+    /// \param token Fencing token previously acquired for the account.
+    /// \param publication Atomic durable publication callback.
+    /// \return False when this lease does not authorize the callback.
+    bool with_fencing_capability(
+        const AccountKey &account, std::uint64_t token,
+        const std::function<void()> &publication) const override;
+
     /// \brief Tests whether lock acquisition and epoch persistence succeeded.
     /// \return True while this object owns the account lease.
     bool ready() const { return ready_; }

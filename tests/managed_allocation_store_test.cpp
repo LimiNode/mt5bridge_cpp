@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -236,9 +238,23 @@ public:
         return token;
     }
 
+    bool with_fencing_capability(
+        const mt5bridge::AccountKey &account, std::uint64_t expected_token,
+        const std::function<void()> &publication) const override {
+        ++capability_calls;
+        if (lose_before_capability || account != account_ ||
+            expected_token != token || !publication)
+            return false;
+        publication();
+        return true;
+    }
+
     mutable std::size_t calls = 0;
+    mutable std::size_t capability_calls = 0;
     std::size_t lose_on_call = 0;
+    bool lose_before_capability = false;
     std::uint64_t token = 7;
+    mt5bridge::AccountKey account_ = account();
 };
 
 struct Fixture {
@@ -335,6 +351,11 @@ void run_regressions() {
     require(commit(store, entry_a, mapping_a, fixture, lease) ==
                 mt5bridge::ManagedAllocationCommitStatus::committed,
             "first allocation commit failed");
+    {
+        std::ofstream interrupted(root / "alloc-interrupted.bin.tmp",
+                                  std::ios::binary);
+        interrupted << "unpublished temporary bytes";
+    }
 
     fixture.journal.records[entry_a.allocation_key.managed_key.operation_key] =
         operation(entry_a.allocation_key.managed_key.operation_key, 12, 701);
@@ -354,17 +375,23 @@ void run_regressions() {
             "same allocation key with different payload was accepted");
 
     lease.calls = 0;
-    lease.lose_on_call = 3;
+    lease.capability_calls = 0;
+    lease.lose_on_call = 0;
+    lease.lose_before_capability = true;
     const auto entry_d = entry_for(mapping_d);
     require(commit(store, entry_d, mapping_d, fixture, lease) ==
                 mt5bridge::ManagedAllocationCommitStatus::lease_not_held,
             "stale writer published after fencing handoff");
+    require(lease.capability_calls == 1,
+            "allocation publication did not acquire fencing capability");
     require(store.load(entry_d.allocation_key).status ==
                 mt5bridge::ManagedAllocationLoadStatus::not_found,
             "fenced writer left an allocation file behind");
 
     lease.calls = 0;
+    lease.capability_calls = 0;
     lease.lose_on_call = 0;
+    lease.lose_before_capability = false;
     lease.token = 9;
     require(commit(store, entry_d, mapping_d, fixture, lease) ==
                 mt5bridge::ManagedAllocationCommitStatus::committed,
@@ -378,12 +405,42 @@ void run_regressions() {
                 mt5bridge::ManagedAllocationCommitStatus::capacity_exhausted,
             "close-leg capacity overflow was accepted");
 
+    const auto pending_mapping = fixture.add_source(75, 8);
+    const auto pending_key = pending_mapping.managed_key();
+    fixture.settlement.records.erase(pending_key);
+    const auto pending_entry = entry_for(pending_mapping);
+    require(commit(store, pending_entry, pending_mapping, fixture, lease) ==
+                mt5bridge::ManagedAllocationCommitStatus::missing_source,
+            "pending-only settlement fact was admitted");
+
+    auto reverse_open = entry_a;
+    reverse_open.allocation_key.leg =
+        static_cast<mt5bridge::ManagedAllocationLeg>(1);
+    require(!reverse_open.valid(), "unsupported reverse-open leg was valid");
+    require(commit(store, reverse_open, mapping_a, fixture, lease) ==
+                mt5bridge::ManagedAllocationCommitStatus::invalid_record,
+            "unsupported reverse-open allocation was admitted");
+
     mt5bridge::WindowsFileManagedAllocationStore restarted(root);
     require(restarted.ready(), "restarted allocation store did not open");
     const auto scan = restarted.scan(fixture.settlement, fixture.broker_store,
                                      fixture.basis, fixture.envelope_store);
     require(scan.complete() && scan.records.size() == 3,
             "historical allocation scan did not recover committed entries");
+
+    auto inconsistent_envelope = fixture.envelope_store.records.at(
+        fixture.broker_record.key());
+    inconsistent_envelope.broker_close_leg.units += 100;
+    inconsistent_envelope.unallocated_close_leg =
+        inconsistent_envelope.broker_close_leg;
+    require(inconsistent_envelope.valid(),
+            "inconsistent envelope fixture is not structurally valid");
+    fixture.envelope_store.records[fixture.broker_record.key()] =
+        inconsistent_envelope;
+    require(restarted.scan(fixture.settlement, fixture.broker_store,
+                           fixture.basis, fixture.envelope_store)
+                .status == mt5bridge::ManagedAllocationScanStatus::invalid_record,
+            "historical scan accepted envelope capacity detached from broker proof");
     std::filesystem::remove_all(root);
 }
 

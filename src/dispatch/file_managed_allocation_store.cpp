@@ -346,8 +346,14 @@ SourceValidation validate_sources(
         if (envelope.record->account != entry.account ||
             !(envelope.record->key() == entry.allocation_key.broker_key) ||
             !(envelope.record->broker_provenance == entry.broker_provenance) ||
+            !(envelope.record->broker_close_leg == broker.record->broker_close_leg) ||
+            !(envelope.record->broker_reverse_open_leg ==
+              broker.record->broker_reverse_open_leg) ||
             !(envelope.record->broker_close_leg.scale == entry.broker_volume.scale) ||
             !(envelope.record->broker_close_leg.step_units == entry.broker_volume.step_units) ||
+            !(envelope.record->unallocated_close_leg == broker.record->broker_close_leg) ||
+            !(envelope.record->unallocated_reverse_open_leg ==
+              broker.record->broker_reverse_open_leg) ||
             !(envelope.record->unallocated_close_leg == envelope.record->broker_close_leg) ||
             !(envelope.record->unallocated_reverse_open_leg ==
               envelope.record->broker_reverse_open_leg)) {
@@ -571,18 +577,26 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit(
         set_error(last_error_, "managed allocation entry exceeds storage limits");
         return ManagedAllocationCommitStatus::invalid_record;
     }
-    const auto target = record_path(directory_, entry.allocation_key);
-    const std::filesystem::path temporary(target.wstring() + L".tmp");
-    DeleteFileW(temporary.c_str());
-    if (!write_file(temporary, *bytes, last_error_))
-        return ManagedAllocationCommitStatus::io_error;
-    if (!MoveFileExW(temporary.c_str(), target.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        last_error_ = win32_error("MoveFileExW(managed allocation)");
-        DeleteFileW(temporary.c_str());
-        return ManagedAllocationCommitStatus::io_error;
-    }
-    return ManagedAllocationCommitStatus::committed;
+    bool published = false;
+    const bool capability_held = lease.with_fencing_capability(
+        entry.account, *final_token, [&]() {
+            const auto target = record_path(directory_, entry.allocation_key);
+            const std::filesystem::path temporary(target.wstring() + L".tmp");
+            DeleteFileW(temporary.c_str());
+            if (!write_file(temporary, *bytes, last_error_))
+                return;
+            if (!MoveFileExW(temporary.c_str(), target.c_str(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                last_error_ = win32_error("MoveFileExW(managed allocation)");
+                DeleteFileW(temporary.c_str());
+                return;
+            }
+            published = true;
+        });
+    if (!capability_held)
+        return ManagedAllocationCommitStatus::lease_not_held;
+    return published ? ManagedAllocationCommitStatus::committed
+                     : ManagedAllocationCommitStatus::io_error;
 #else
     (void)entry;
     (void)mapping;

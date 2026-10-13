@@ -646,11 +646,14 @@ reversals and CloseBy, respectively.
   integer-only logical-to-broker conversion proof without consuming either
   broker leg; see
   [ADR-0033](adr/0033-exact-managed-broker-volume-mapping.md) and
-  [ADR-0031](adr/0031-durable-managed-ownership-basis.md). Before the bounded
-  allocation ledger may use that conversion, ADR-0034 requires a read-only
-  source-coherence admission across the durable settlement fact, broker
-  reversal, ownership basis, operation record, and still-unallocated envelope;
-  this gate does not reserve volume or prevent duplicate concurrent claims.
+  [ADR-0031](adr/0031-durable-managed-ownership-basis.md). Before the ordinary
+  bounded allocation ledger may use that conversion, ADR-0034 requires a
+  read-only source-coherence admission across the durable settlement fact,
+  broker reversal, ownership basis, operation record, and still-unallocated
+  envelope; this gate does not reserve volume or prevent duplicate concurrent
+  claims. The allocation-gated owner path in ADR-0036 has a separate staged
+  admission for an exact prepared target and does not weaken the committed-only
+  ADR-0034 contract.
   The bounded implementation in
   [ADR-0035](adr/0035-durable-managed-allocation-ledger.md) makes that
   consumption durable and serialized: an admitted mapping is revalidated under
@@ -659,10 +662,15 @@ reversals and CloseBy, respectively.
   idempotent, and historical entries remain valid after journal advancement;
   reverse-open attribution and managed exposure mutation remain deferred.
   [ADR-0036](adr/0036-allocation-gated-managed-close-settlement.md) defines
-  the next owner boundary: the immutable settlement proof and allocation claim
-  must precede the durable journal frontier and managed exposure update, while
-  restart recovery compares committed allocations with the journal so an exact
-  replay cannot apply one broker deal twice.
+  the next owner boundary: an exact settlement is first durably prepared, then
+  passes a separate staged admission and allocation claim before the durable
+  journal frontier and managed exposure update. Prepared evidence is not
+  committed-only admission; finalization publishes it after the journal CAS.
+  Restart recovery accepts either the exact prepared receipt for an interrupted
+  publication or a committed settlement, and compares the complete frontier
+  with the allocation claims so an exact replay cannot apply one broker deal
+  twice. Legacy close recovery is distinct from explicitly allocation-gated
+  close recovery, and the latter must fail closed without its allocation proof.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

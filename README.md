@@ -239,14 +239,17 @@ non-step-normalized evidence remains unresolved.
 
 The exact managed logical-unit conversion in
 `<mt5bridge/dispatch/managed_broker_volume_mapping.hpp>` remains a
-non-mutating proof. Before a future allocation ledger may use it,
+non-mutating proof. The bounded allocation ledger uses it only after
 `<mt5bridge/dispatch/managed_broker_volume_admission.hpp>` reloads and
 cross-checks a committed durable managed settlement fact, broker reversal,
 ownership basis, operation record, and still-unallocated broker envelope;
 pending settlement facts are not admission evidence until their frontier is
 published. This
 source-coherence gate does not reserve broker volume, choose FIFO/LIFO/pro-rata,
-prevent duplicate concurrent claims, or mutate managed exposure; see
+prevent duplicate concurrent claims, or mutate managed exposure; the
+close-leg-only ledger performs the later lock-serialized immutable commit with
+capacity derived from committed entries. Reverse-open attribution, owner-loop
+wiring, and managed exposure mutation remain deferred; see
 [`docs/adr/0034-managed-broker-volume-admission.md`](docs/adr/0034-managed-broker-volume-admission.md).
 
 This Stage 2 slice adds `mt5bridge::OperationJournal` and

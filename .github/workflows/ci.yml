@@ -29,16 +29,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Download pinned TLC
+      - name: Build TLC from pinned upstream source
         shell: bash
-        run: |
-          curl --fail --silent --show-error --location --retry 3 \
-            -H 'Accept: application/octet-stream' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            --output tla2tools.jar \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo '7BEEC0F04818732A62FA193731711A99AA4F11279499B2360A7D156C519EA78D  tla2tools.jar' \
-            | sha256sum --check
+        run: bash ./.github/scripts/build_tlc.sh
       - name: Check dispatch recovery model
         run: |
           pushd formal/dispatch
@@ -55,16 +48,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Download pinned TLC
+      - name: Build TLC from pinned upstream source
         shell: bash
-        run: |
-          curl --fail --silent --show-error --location --retry 3 \
-            -H 'Accept: application/octet-stream' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            --output tla2tools.jar \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo '7BEEC0F04818732A62FA193731711A99AA4F11279499B2360A7D156C519EA78D  tla2tools.jar' \
-            | sha256sum --check
+        run: bash ./.github/scripts/build_tlc.sh
       - name: Check reconciliation evidence model
         run: |
           pushd formal/reconciliation
@@ -84,16 +70,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Download pinned TLC
+      - name: Build TLC from pinned upstream source
         shell: bash
-        run: |
-          curl --fail --silent --show-error --location --retry 3 \
-            -H 'Accept: application/octet-stream' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            --output tla2tools.jar \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo '7BEEC0F04818732A62FA193731711A99AA4F11279499B2360A7D156C519EA78D  tla2tools.jar' \
-            | sha256sum --check
+        run: bash ./.github/scripts/build_tlc.sh
       - name: Check managed trade lifecycle model
         run: |
           pushd formal/managed_trade

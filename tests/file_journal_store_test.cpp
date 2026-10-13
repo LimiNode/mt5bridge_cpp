@@ -339,6 +339,13 @@ int main() {
             const auto held = lease.held_fencing_token(lease_account);
             require(held && *held != 0, "writer lease did not expose a token");
             first_fencing_token = *held;
+            bool capability_invoked = false;
+            require(lease.with_fencing_capability(
+                        lease_account, *held,
+                        [&capability_invoked]() { capability_invoked = true; }),
+                    "writer lease did not expose an authoritative capability");
+            require(capability_invoked,
+                    "writer lease capability did not run its publication callback");
             require(!lease.held_fencing_token(mt5bridge::AccountKey{"Other-Trade", 43}),
                     "writer lease exposed its token to another account");
 

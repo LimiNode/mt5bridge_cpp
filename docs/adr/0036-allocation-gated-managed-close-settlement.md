@@ -64,13 +64,23 @@ seam. A prepared manifest contains the exact fact, complete frontier, base
 revision, and target frontier revision. It is durable recovery evidence, but it
 is not visible through the ordinary committed-only `load()` API.
 
+The manifest also contains a sealed staged ownership association. This is not
+the ordinary `ManagedOwnershipBasis`: that record intentionally requires an
+already-settled journal operation. The staged association instead binds the
+account, `OperationKey`, `BrokerReversalKey`, broker provenance, base revision,
+target revision, and the authoritative close-intent/deal-binding digest. It
+contains no volume cap and cannot authorize exposure by itself. After the
+journal CAS, the staged association is finalized into the ordinary immutable
+ownership basis and is then eligible for historical validation.
+
 For one fresh cycle, the owner must perform the following steps in order. No
 managed state mutation is allowed before the final step succeeds.
 
 1. Validate the cycle, operation identity, result-derived deal identity, and
    observation provenance using the applicable close proof. The existing
    ADR-0029 aggregator remains the path for `OUT` and `OUT_BY`; it is not
-   silently broadened to accept `INOUT`.
+   silently broadened to accept `INOUT`. For an `INOUT` close, the owner must
+   first obtain the separate `ManagedInoutCloseDeltaProof` described below.
 2. Build a target operation at `R + 1` and produce the exact per-deal fact and
    complete cumulative frontier for `(OperationKey, DEAL_TICKET)`. The fact's
    source revision may be `<=` the target frontier revision. Cumulative
@@ -82,9 +92,11 @@ managed state mutation is allowed before the final step succeeds.
    continue to report it as unavailable.
 4. Under the same account fencing capability and allocation-store lock, run a
    staged admission for the prepared target. It reloads and compares the
-   prepared fact/frontier, broker reversal, ownership basis, operation base,
-   and broker-only envelope, and checks capacity. This is a separate owner
-   protocol; the ordinary committed-only ADR-0034 admission is unchanged.
+   prepared fact/frontier, staged ownership association, broker reversal,
+   operation base, authoritative managed-delta proof, and broker-only
+   envelope, and checks capacity. This is a separate owner protocol; the
+   ordinary committed-only ADR-0034 admission and
+   `validate_managed_ownership_basis()` contract are unchanged.
 5. Commit the `ManagedAllocationEntry`. Only `committed` and exact-payload
    `already_committed` are admissible outcomes. Missing evidence, source drift,
    capacity exhaustion, conflicting replay, and lease loss leave managed state
@@ -155,27 +167,60 @@ allocation format therefore has a new version for this reference. Older
 allocation records remain capacity-consuming historical claims, but they are
 not silently upgraded to the new frontier-backed recovery proof.
 
+The frontier digest is calculated from a canonical encoding containing the
+domain/version tag, account and operation identity, target frontier revision,
+cumulative settled volume, frontier provenance, and the entry count followed by
+entries sorted by `(deal_ticket, source_operation_revision,
+managed_logical_units)`. The digest covers the complete frontier, not only the
+new deal's observation. A digest mismatch, duplicate entry, missing entry, or
+different canonical composition is a durable conflict.
+
 ### INOUT close-leg proof
 
 The allocation-gated path uses a separate bounded proof for
 `DEAL_ENTRY_INOUT`. It must bind the operation's single history-deal identity
 to the durable `BrokerReversalRecord`, the durable ownership basis, and the
 managed close intent. The proof derives managed logical units from an
-authoritative managed reconciliation source; it never copies broker volume into
-managed units. The broker mapping may consume only `broker_close_leg`.
+authoritative managed reconciliation source named
+`ManagedInoutCloseDeltaProof`. This is a private, sealed producer result, not a
+caller-supplied scalar and not the broker volume. It contains the operation and
+deal identities, the managed trade/close-intent binding, the exact positive
+managed logical delta, the validated pre/post managed exposure frontier, fresh
+account-scoped observation provenance, and a digest covering those facts.
+
+The proof is authoritative only when a fresh graph has complete history
+coverage, the operation has exactly one binding to the same broker deal, the
+managed close intent identifies the same trade, the pre/post managed exposure
+states prove one unambiguous delta, and the durable broker reversal binds the
+same account/deal and position context. The delta must be positive, fit the
+remaining managed exposure and target operation volume, and be the only new
+managed contribution in the covered observation. Broker `broker_close_leg` is
+used only for the later integer-domain mapping; broker volume is never copied
+into managed logical units.
 
 `broker_reverse_open_leg` remains unallocated, and ambiguous position/order
 binding, stale observation, incomplete deal fields, or missing managed-delta
-evidence fail closed. The existing `history_deal_volume(..., exit)` path is not
-reused for this proof because it deliberately rejects `INOUT`.
+evidence fail closed. Until a producer can create this proof, an `INOUT` close
+remains unsupported and produces no prepared settlement, allocation, journal
+advance, or exposure mutation. The existing
+`history_deal_volume(..., exit)` path is not reused for this proof because it
+deliberately rejects `INOUT`.
 
 ### Restart recovery
 
 Recovery acquires the account-scoped lease before reading or repairing the
 owner/allocation pair. It first classifies each close operation as `legacy` or
-`allocation_gated` using an explicit durable operation marker. A new gated close
-must never fall back to the legacy journal-only path when its allocation proof
-is absent.
+`allocation_gated` using an explicit durable operation marker in the operation
+record. New gated records must persist that marker before dispatch/reconciliation
+and must never fall back to the legacy journal-only path when their allocation
+proof is absent.
+
+The journal compatibility contract is explicit: records written by the old
+format and lacking the marker are classified as `legacy`; they are never
+reinterpreted as gated. A new-format gated record must carry the marker and
+must carry the prepared/committed evidence required below. A format migration
+may preserve old records as legacy, but it must not manufacture a gated marker
+or a frontier digest for them.
 
 For gated operations, recovery performs an all-or-nothing historical allocation
 scan, accepting either a committed settlement or the exact prepared manifest
@@ -186,6 +231,8 @@ For every allocation-backed close operation, recovery verifies:
 
 - every entry passes ADR-0035 historical source validation;
 - every entry has a matching committed or exact prepared settlement frontier;
+- every prepared frontier has a matching staged ownership association and
+  authoritative managed-delta proof;
 - every frontier entry has exactly one matching allocation claim for the gated
   close being advanced;
 - each managed settlement key occurs at most once;
@@ -198,7 +245,8 @@ For every allocation-backed close operation, recovery verifies:
 When the journal is exactly behind a prepared or committed frontier and the
 matching allocation claim exists, recovery performs the same durable CAS
 transition that step 6 would have performed, finalizes a prepared settlement if
-needed, and then reconstructs `ManagedTradeState` from the resulting journal.
+needed, finalizes the staged ownership association into the ordinary basis, and
+then reconstructs `ManagedTradeState` from the resulting journal.
 It does not call the broker, refresh history, or run current-revision admission
 for an already committed historical entry. If any comparison is ambiguous,
 recovery returns a failure without mutating exposure.
@@ -215,7 +263,7 @@ defined.
 | Durable state after restart | Recovery result |
 | --- | --- |
 | prepared settlement only | pending proof; no allocation and no exposure |
-| prepared settlement + allocation, journal before its frontier | CAS journal from the exact prepared frontier, finalize, then reconstruct |
+| prepared settlement + staged ownership + allocation, journal before its frontier | CAS journal from the exact prepared frontier, finalize ownership/settlement, then reconstruct |
 | allocation + committed settlement and matching journal frontier | idempotent replay; no exposure delta |
 | allocation + prepared settlement and matching journal frontier | finalize, then idempotent replay; no exposure delta |
 | journal frontier without matching allocation entry | invalid durable state; fail closed |
@@ -263,6 +311,8 @@ The implementation slice must add focused regressions for:
   journal frontier agree before exposure mutation;
 - INOUT close-leg proof accepts only an authoritative managed delta and rejects
   reverse-open or ambiguous ownership;
+- staged ownership cannot be admitted through the ordinary settled-basis
+  validator and is finalized only after the target journal CAS;
 - legacy close recovery remains separate from explicitly allocation-gated close
   recovery; and
 - version-1 allocation records continue to consume broker capacity but cannot

@@ -662,10 +662,14 @@ reversals and CloseBy, respectively.
   idempotent, and historical entries remain valid after journal advancement;
   reverse-open attribution and managed exposure mutation remain deferred.
   [ADR-0036](adr/0036-allocation-gated-managed-close-settlement.md) defines
-  the next owner boundary: an exact settlement is first durably prepared, then
-  passes a separate staged admission and allocation claim before the durable
-  journal frontier and managed exposure update. Prepared evidence is not
-  committed-only admission; finalization publishes it after the journal CAS.
+  the next owner boundary: an exact settlement and staged ownership
+  association are first durably prepared, then pass a separate staged
+  admission and allocation claim before the durable journal frontier and
+  managed exposure update. Prepared evidence is not committed-only admission;
+  finalization publishes settlement and the ordinary ownership basis after the
+  journal CAS. `INOUT` close allocation remains fail-closed until a sealed
+  authoritative managed-delta proof binds the managed intent to the broker
+  close leg.
   Restart recovery accepts either the exact prepared receipt for an interrupted
   publication or a committed settlement, and compares the complete frontier
   with the allocation claims so an exact replay cannot apply one broker deal

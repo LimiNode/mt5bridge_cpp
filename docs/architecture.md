@@ -218,14 +218,16 @@ remain held through publication. Reverse-open attribution, allocation policy,
 owner-loop wiring, and managed exposure mutation remain deferred.
 The next owner/reconciliation boundary is specified by
 [ADR-0036](adr/0036-allocation-gated-managed-close-settlement.md): a close
-deal first persists an exact prepared settlement receipt, then passes a
-settlement-specific staged admission and durable allocation claim before the
-exposure-effective journal frontier and managed exposure may advance. The
-prepared receipt is durable recovery evidence but is not committed-only
-settlement admission; finalization publishes it after the journal CAS. Exact
-allocation replay is compared with the durable journal during restart, so an
-interrupted publication can be completed without applying one broker deal
-twice.
+deal first persists an exact prepared settlement receipt and staged ownership
+association, then passes a settlement-specific admission and durable allocation
+claim before the exposure-effective journal frontier and managed exposure may
+advance. The prepared receipt is durable recovery evidence but is not
+committed-only settlement admission; finalization publishes settlement and the
+ordinary ownership basis after the journal CAS. An `INOUT` close remains
+fail-closed until a sealed authoritative managed-delta proof binds the managed
+intent to the broker close leg. Exact allocation replay is compared with the
+durable journal during restart, so an interrupted publication can be completed
+without applying one broker deal twice.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

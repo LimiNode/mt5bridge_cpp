@@ -37,7 +37,7 @@ jobs:
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             --output tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo '7BEEC0F04818732A62FA193731711A99AA4F11279499B2360A7D156C519EA78D  tla2tools.jar' \
+          echo 'BAF125A62E192F8D9DF38035B8283B9D05F08DBF01860B2DF40AF489B894563D  tla2tools.jar' \
             | sha256sum --check
       - name: Check dispatch recovery model
         run: |
@@ -63,7 +63,7 @@ jobs:
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             --output tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo '7BEEC0F04818732A62FA193731711A99AA4F11279499B2360A7D156C519EA78D  tla2tools.jar' \
+          echo 'BAF125A62E192F8D9DF38035B8283B9D05F08DBF01860B2DF40AF489B894563D  tla2tools.jar' \
             | sha256sum --check
       - name: Check reconciliation evidence model
         run: |
@@ -92,7 +92,7 @@ jobs:
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             --output tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo '7BEEC0F04818732A62FA193731711A99AA4F11279499B2360A7D156C519EA78D  tla2tools.jar' \
+          echo 'BAF125A62E192F8D9DF38035B8283B9D05F08DBF01860B2DF40AF489B894563D  tla2tools.jar' \
             | sha256sum --check
       - name: Check managed trade lifecycle model
         run: |

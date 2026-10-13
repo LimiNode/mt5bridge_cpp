@@ -23,7 +23,7 @@ ant -f customBuild.xml \
   -Dgit.shortRevision="${tla_tools_commit:0:7}" \
   -Dgit.commitsCount=1 \
   -DBuild-Rev="${tla_tools_commit}" \
-  compile dist
+  compile compile-test dist
 popd >/dev/null
 
 cp "${tla_tools_directory}/tlatools/org.lamport.tlatools/dist/tla2tools.jar" \

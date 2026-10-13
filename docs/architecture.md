@@ -214,6 +214,12 @@ against the immutable broker envelope. Historical replay bypasses current
 journal admission after source validation, while a fencing capability must
 remain held through publication. Reverse-open attribution, allocation policy,
 owner-loop wiring, and managed exposure mutation remain deferred.
+The next owner/reconciliation boundary is specified by
+[ADR-0036](adr/0036-allocation-gated-managed-close-settlement.md): a close
+deal must publish its immutable settlement proof and allocation claim before
+the journal frontier and managed exposure may advance. Exact allocation replay
+is compared with the durable journal during restart, so an interrupted
+publication can be completed without applying one broker deal twice.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

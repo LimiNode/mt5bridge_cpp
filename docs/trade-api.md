@@ -658,6 +658,11 @@ reversals and CloseBy, respectively.
   Remaining broker capacity is derived from committed entries, exact replay is
   idempotent, and historical entries remain valid after journal advancement;
   reverse-open attribution and managed exposure mutation remain deferred.
+  [ADR-0036](adr/0036-allocation-gated-managed-close-settlement.md) defines
+  the next owner boundary: the immutable settlement proof and allocation claim
+  must precede the durable journal frontier and managed exposure update, while
+  restart recovery compares committed allocations with the journal so an exact
+  replay cannot apply one broker deal twice.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

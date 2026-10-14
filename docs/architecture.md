@@ -201,10 +201,12 @@ The source-coherence admission boundary is specified by
 `include/mt5bridge/dispatch/managed_broker_volume_admission.hpp`. It reloads
 the immutable settlement, broker reversal, ownership basis, operation, and
 broker-only envelope proofs and returns a canonical mapping only when they
-match. Settlement lookup is committed-only; a fact in an unfinished
-publication manifest is not admission evidence until its frontier marker is
-durable. It remains read-only: no leg reservation, allocation policy,
-duplicate prevention, or managed exposure mutation is implied.
+match. Ordinary settlement lookup is committed-only; a fact in an unfinished
+publication manifest is not evidence for this general admission until its
+frontier marker is durable. ADR-0036 defines a separate owner-only staged
+admission for an exact prepared target. This remains read-only: no leg
+reservation, allocation policy, duplicate prevention, or managed exposure
+mutation is implied.
 The bounded allocation implementation specified by
 [ADR-0035](adr/0035-durable-managed-allocation-ledger.md) now consumes an
 admitted mapping only through a lock-serialized durable entry commit; the
@@ -214,6 +216,18 @@ against the immutable broker envelope. Historical replay bypasses current
 journal admission after source validation, while a fencing capability must
 remain held through publication. Reverse-open attribution, allocation policy,
 owner-loop wiring, and managed exposure mutation remain deferred.
+The next owner/reconciliation boundary is specified by
+[ADR-0036](adr/0036-allocation-gated-managed-close-settlement.md): a close
+deal first persists an exact prepared settlement receipt and staged ownership
+association, then passes a settlement-specific admission and durable allocation
+claim before the exposure-effective journal frontier and managed exposure may
+advance. The prepared receipt is durable recovery evidence but is not
+committed-only settlement admission; finalization publishes settlement and the
+ordinary ownership basis after the journal CAS. An `INOUT` close remains
+fail-closed until a sealed authoritative managed-delta proof binds the managed
+intent to the broker close leg. Exact allocation replay is compared with the
+durable journal during restart, so an interrupted publication can be completed
+without applying one broker deal twice.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

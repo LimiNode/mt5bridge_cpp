@@ -35,6 +35,7 @@ add_library(mt5bridge_journal STATIC
             src/dispatch/file_broker_allocation_store.cpp
             src/dispatch/file_managed_ownership_basis_store.cpp
             src/dispatch/file_managed_deal_settlement_store.cpp
+            src/dispatch/file_managed_settlement_preparation_store.cpp
             src/dispatch/file_managed_allocation_store.cpp)
 target_include_directories(mt5bridge_journal PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -156,6 +157,14 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_managed_deal_settlement_store
              COMMAND mt5bridge_managed_deal_settlement_store_test)
+    add_executable(mt5bridge_managed_settlement_preparation_store_test
+                   tests/managed_settlement_preparation_store_test.cpp)
+    target_include_directories(mt5bridge_managed_settlement_preparation_store_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
+    target_link_libraries(mt5bridge_managed_settlement_preparation_store_test PRIVATE
+                          mt5bridge::client mt5bridge::journal)
+    add_test(NAME mt5bridge_managed_settlement_preparation_store
+             COMMAND mt5bridge_managed_settlement_preparation_store_test)
     add_executable(mt5bridge_managed_broker_volume_mapping_test
                    tests/managed_broker_volume_mapping_test.cpp)
     target_link_libraries(mt5bridge_managed_broker_volume_mapping_test PRIVATE
@@ -218,11 +227,14 @@ if(BUILD_TESTING)
                    tests/header_self_containment_dispatch_lease.cpp
                    tests/header_self_containment_dispatch_admission.cpp
                    tests/header_self_containment_dispatch_managed_allocation.cpp
+                   tests/header_self_containment_dispatch_managed_settlement_preparation.cpp
+                   tests/header_self_containment_dispatch_managed_staged_allocation_admission.cpp
                    tests/header_self_containment_file_managed_allocation_store.cpp
                    tests/header_self_containment_environment_consistency.cpp
                    tests/header_self_containment_dispatch_journal.cpp
                    tests/header_self_containment_file_journal_store.cpp
-                   tests/header_self_containment_file_managed_deal_settlement_store.cpp)
+                   tests/header_self_containment_file_managed_deal_settlement_store.cpp
+                   tests/header_self_containment_file_managed_settlement_preparation_store.cpp)
     target_link_libraries(mt5bridge_header_self_containment_test PRIVATE
                           mt5bridge::client)
     add_test(NAME mt5bridge_header_self_containment

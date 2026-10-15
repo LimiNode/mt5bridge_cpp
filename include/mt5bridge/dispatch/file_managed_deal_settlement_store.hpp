@@ -63,6 +63,13 @@ public:
     ManagedDealSettlementLoadResult load(
         const ManagedDealSettlementKey &key) const override;
 
+    /// \brief Loads one complete committed frontier by operation and revision.
+    /// \param operation_key Operation identity.
+    /// \param operation_revision Exact frontier revision.
+    /// \return Status-bearing frontier result.
+    ManagedSettlementFrontierLoadResult load_frontier(
+        const OperationKey &operation_key, std::uint64_t operation_revision) const override;
+
     /// \brief Scans all fact and frontier files for restart recovery.
     /// \return Complete records, or a failure with no usable partial set.
     ManagedDealSettlementScanResult scan() const;

@@ -184,6 +184,11 @@ public:
                          mt5bridge::ManagedDealSettlementLoadStatus::found, found->second};
     }
 
+    mt5bridge::ManagedSettlementFrontierLoadResult load_frontier(
+        const mt5bridge::OperationKey &, std::uint64_t) const override {
+        return {mt5bridge::ManagedSettlementFrontierLoadStatus::not_found, std::nullopt};
+    }
+
     mt5bridge::ManagedDealSettlementLoadStatus load_status =
         mt5bridge::ManagedDealSettlementLoadStatus::found;
     bool committed = true;

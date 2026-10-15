@@ -27,11 +27,14 @@ extern "C" int mt5bridge_probe_dispatch_managed_broker_volume_admission_header()
 extern "C" int mt5bridge_probe_dispatch_lease_header();
 extern "C" int mt5bridge_probe_dispatch_admission_header();
 extern "C" int mt5bridge_probe_dispatch_managed_allocation_header();
+extern "C" int mt5bridge_probe_dispatch_managed_settlement_preparation_header();
+extern "C" int mt5bridge_probe_dispatch_managed_staged_allocation_admission_header();
 extern "C" int mt5bridge_probe_environment_consistency_header();
 extern "C" int mt5bridge_probe_dispatch_journal_header();
 extern "C" int mt5bridge_probe_file_journal_store_header();
 extern "C" int mt5bridge_probe_file_managed_deal_settlement_store_header();
 extern "C" int mt5bridge_probe_file_managed_allocation_store_header();
+extern "C" int mt5bridge_probe_file_managed_settlement_preparation_store_header();
 
 int main() {
     return mt5bridge_probe_market_common_header() |
@@ -60,9 +63,12 @@ int main() {
            mt5bridge_probe_dispatch_lease_header() |
            mt5bridge_probe_dispatch_admission_header() |
            mt5bridge_probe_dispatch_managed_allocation_header() |
+           mt5bridge_probe_dispatch_managed_settlement_preparation_header() |
+           mt5bridge_probe_dispatch_managed_staged_allocation_admission_header() |
            mt5bridge_probe_environment_consistency_header() |
            mt5bridge_probe_dispatch_journal_header() |
            mt5bridge_probe_file_journal_store_header() |
            mt5bridge_probe_file_managed_deal_settlement_store_header() |
-           mt5bridge_probe_file_managed_allocation_store_header();
+           mt5bridge_probe_file_managed_allocation_store_header() |
+           mt5bridge_probe_file_managed_settlement_preparation_store_header();
 }

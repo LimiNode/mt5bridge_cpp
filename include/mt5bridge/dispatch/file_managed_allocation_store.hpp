@@ -35,6 +35,18 @@ public:
         const DurableBrokerAllocationStore &envelope_store,
         const SingleWriterLease &lease) override;
 
+    /// \brief Commits an allocation for an exact staged settlement recipe.
+    ManagedAllocationCommitStatus commit_staged(
+        const ManagedAllocationEntry &entry,
+        const ManagedBrokerVolumeMapping &mapping,
+        const ManagedSettlementPreparation &preparation,
+        const DurableJournalStore &journal_store,
+        const DurableManagedDealSettlementStore &settlement_store,
+        const DurableBrokerReversalStore &broker_store,
+        const DurableManagedOwnershipBasisStore &basis_store,
+        const DurableBrokerAllocationStore &envelope_store,
+        const SingleWriterLease &lease) override;
+
     /// \brief Loads one entry by exact composite identity.
     ManagedAllocationLoadResult load(const ManagedAllocationKey &key) const override;
 

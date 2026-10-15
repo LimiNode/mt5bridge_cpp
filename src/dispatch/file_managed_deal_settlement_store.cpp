@@ -292,17 +292,24 @@ std::filesystem::path fact_path(const std::filesystem::path &directory,
 }
 
 std::filesystem::path frontier_path(const std::filesystem::path &directory,
-                                    const ManagedSettlementFrontier &frontier) {
+                                    const AccountKey &account,
+                                    const OperationKey &operation_key,
+                                    std::uint64_t operation_revision) {
     const std::string suffix =
-        "frontier-" + hex_u64(fnv1a(frontier.account.server)) + "-" +
-        hex_u64(frontier.account.login) + "-" + hex_u64(frontier.operation_key.trade_id) +
-        "-" + hex_u64(frontier.operation_key.operation_id) + "-" +
-        hex_u64(frontier.operation_revision) + ".bin";
+        "frontier-" + hex_u64(fnv1a(account.server)) + "-" +
+        hex_u64(account.login) + "-" + hex_u64(operation_key.trade_id) + "-" +
+        hex_u64(operation_key.operation_id) + "-" + hex_u64(operation_revision) + ".bin";
 #if defined(_WIN32)
     return directory / widen_ascii(suffix);
 #else
     return directory / suffix;
 #endif
+}
+
+std::filesystem::path frontier_path(const std::filesystem::path &directory,
+                                    const ManagedSettlementFrontier &frontier) {
+    return frontier_path(directory, frontier.account, frontier.operation_key,
+                         frontier.operation_revision);
 }
 
 std::filesystem::path pending_path(const std::filesystem::path &directory,
@@ -774,6 +781,70 @@ ManagedDealSettlementLoadResult WindowsFileManagedDealSettlementStore::load(
     (void)key;
     set_error(last_error_, "WindowsFileManagedDealSettlementStore requires Windows");
     return {ManagedDealSettlementLoadStatus::io_error, std::nullopt};
+#endif
+}
+
+ManagedSettlementFrontierLoadResult WindowsFileManagedDealSettlementStore::load_frontier(
+    const OperationKey &operation_key, std::uint64_t operation_revision) const {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "managed deal settlement store is unavailable");
+        return {ManagedSettlementFrontierLoadStatus::io_error, std::nullopt};
+    }
+    if (!operation_key.valid() || operation_revision == 0)
+        return {ManagedSettlementFrontierLoadStatus::invalid_record, std::nullopt};
+    FileLock lock(directory_ / L".managed-deal-settlement.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return {ManagedSettlementFrontierLoadStatus::io_error, std::nullopt};
+    }
+    std::optional<ManagedSettlementFrontier> frontier;
+    std::string error;
+    const auto identity_path =
+        frontier_path(directory_, operation_key.account, operation_key, operation_revision);
+    const auto status =
+        read_decoded_file(identity_path, frontier, error, deserialize_frontier);
+    if (status == ReadStatus::absent)
+        return {ManagedSettlementFrontierLoadStatus::not_found, std::nullopt};
+    if (status == ReadStatus::io_error) {
+        set_error(last_error_, error);
+        return {ManagedSettlementFrontierLoadStatus::io_error, std::nullopt};
+    }
+    if (status != ReadStatus::valid || !frontier ||
+        frontier->operation_key != operation_key ||
+        frontier->operation_revision != operation_revision ||
+        frontier_path(directory_, *frontier).filename() !=
+            identity_path.filename()) {
+        set_error(last_error_, error.empty() ? "malformed managed settlement frontier" : error);
+        return {ManagedSettlementFrontierLoadStatus::invalid_record, std::nullopt};
+    }
+    for (const auto &entry : frontier->entries) {
+        const ManagedDealSettlementKey key{frontier->account, frontier->operation_key,
+                                           entry.deal_ticket};
+        std::optional<ManagedDealSettlement> fact;
+        error.clear();
+        const auto fact_status = read_decoded_file(fact_path(directory_, key), fact, error,
+                                                   deserialize_fact);
+        if (fact_status == ReadStatus::io_error) {
+            set_error(last_error_, error);
+            return {ManagedSettlementFrontierLoadStatus::io_error, std::nullopt};
+        }
+        if (fact_status != ReadStatus::valid || !fact || !(fact->key == key) ||
+            fact->source_operation_revision != entry.source_operation_revision ||
+            fact->managed_logical_units != entry.managed_logical_units) {
+            set_error(last_error_, error.empty()
+                                     ? "settlement frontier references a missing or mismatched fact"
+                                     : error);
+            return {ManagedSettlementFrontierLoadStatus::invalid_record, std::nullopt};
+        }
+    }
+    return {ManagedSettlementFrontierLoadStatus::found, std::move(frontier)};
+#else
+    (void)operation_key;
+    (void)operation_revision;
+    set_error(last_error_, "WindowsFileManagedDealSettlementStore requires Windows");
+    return {ManagedSettlementFrontierLoadStatus::io_error, std::nullopt};
 #endif
 }
 

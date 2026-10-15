@@ -13,6 +13,8 @@
 
 namespace mt5bridge {
 
+struct ManagedSettlementPreparation;
+
 /// \enum ManagedAllocationLeg
 /// \brief Identifies the broker leg consumed by an allocation entry.
 enum class ManagedAllocationLeg : std::uint32_t {
@@ -64,6 +66,8 @@ struct ManagedAllocationEntry {
     ManagedSettlementProvenance settlement_provenance; ///< Per-deal evidence.
     BrokerReversalProvenance broker_provenance; ///< Broker reversal evidence.
     std::uint64_t settlement_source_operation_revision = 0; ///< Settlement source revision.
+    std::uint64_t settlement_frontier_revision = 0; ///< Exact consumed frontier revision.
+    std::optional<std::uint64_t> settlement_frontier_digest; ///< Canonical frontier digest.
     std::uint64_t basis_operation_revision = 0; ///< Ownership-basis revision.
     std::uint64_t managed_logical_units = 0; ///< Exact managed quantity consumed.
     BrokerVolume broker_volume; ///< Exact step-normalized close quantity consumed.
@@ -78,6 +82,9 @@ struct ManagedAllocationEntry {
                settlement_source_operation_revision != 0 &&
                basis_operation_revision != 0 &&
                settlement_source_operation_revision <= basis_operation_revision &&
+               ((!settlement_frontier_digest && settlement_frontier_revision == 0) ||
+                (settlement_frontier_digest && *settlement_frontier_digest != 0 &&
+                 settlement_frontier_revision != 0)) &&
                managed_logical_units != 0 && broker_volume.valid();
     }
 
@@ -90,6 +97,8 @@ struct ManagedAllocationEntry {
                broker_provenance == other.broker_provenance &&
                settlement_source_operation_revision ==
                    other.settlement_source_operation_revision &&
+               settlement_frontier_revision == other.settlement_frontier_revision &&
+               settlement_frontier_digest == other.settlement_frontier_digest &&
                basis_operation_revision == other.basis_operation_revision &&
                managed_logical_units == other.managed_logical_units &&
                broker_volume == other.broker_volume;
@@ -161,6 +170,28 @@ public:
     virtual ManagedAllocationCommitStatus commit(
         const ManagedAllocationEntry &entry,
         const ManagedBrokerVolumeMapping &mapping,
+        const DurableJournalStore &journal_store,
+        const DurableManagedDealSettlementStore &settlement_store,
+        const DurableBrokerReversalStore &broker_store,
+        const DurableManagedOwnershipBasisStore &basis_store,
+        const DurableBrokerAllocationStore &envelope_store,
+        const SingleWriterLease &lease) = 0;
+
+    /// \brief Commits an allocation against a prepared, not-yet-committed settlement.
+    /// \param entry Candidate immutable allocation entry with a frontier reference.
+    /// \param mapping Canonical broker-volume mapping derived from the prepared fact.
+    /// \param preparation Exact staged settlement recipe.
+    /// \param journal_store Durable operation source used for base validation.
+    /// \param settlement_store Durable historical settlement source for old entries.
+    /// \param broker_store Durable broker reversal source.
+    /// \param basis_store Durable ordinary ownership source for old entries.
+    /// \param envelope_store Durable broker envelope source.
+    /// \param lease Authoritative account-scoped writer ownership.
+    /// \return Commit, replay, source, capacity, fencing, or I/O status.
+    virtual ManagedAllocationCommitStatus commit_staged(
+        const ManagedAllocationEntry &entry,
+        const ManagedBrokerVolumeMapping &mapping,
+        const ManagedSettlementPreparation &preparation,
         const DurableJournalStore &journal_store,
         const DurableManagedDealSettlementStore &settlement_store,
         const DurableBrokerReversalStore &broker_store,

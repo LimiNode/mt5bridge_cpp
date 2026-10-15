@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <mt5bridge/dispatch/file_managed_allocation_store.hpp>
+#include <mt5bridge/dispatch/managed_settlement_preparation.hpp>
 
 #include "file_store_support.hpp"
 
@@ -23,7 +24,8 @@ namespace mt5bridge {
 namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'A', 'L', 'G', '0', '1'}};
-constexpr std::uint32_t kFormatVersion = 1;
+constexpr std::uint32_t kLegacyFormatVersion = 1;
+constexpr std::uint32_t kFormatVersion = 2;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
 constexpr std::size_t kMaxBodyBytes = 1024U;
@@ -108,6 +110,8 @@ std::optional<std::vector<std::uint8_t>> serialize_body(
     append_managed_provenance(body, record.settlement_provenance);
     append_broker_provenance(body, record.broker_provenance);
     append_u64(body, record.settlement_source_operation_revision);
+    append_u64(body, record.settlement_frontier_revision);
+    append_u64(body, record.settlement_frontier_digest.value_or(0));
     append_u64(body, record.basis_operation_revision);
     append_u64(body, record.managed_logical_units);
     append_volume(body, record.broker_volume);
@@ -141,7 +145,8 @@ std::optional<ManagedAllocationEntry> deserialize_record(
     std::uint64_t body_size = 0;
     std::uint64_t expected_checksum = 0;
     if (!read_u32(bytes, offset, version) || !read_u64(bytes, offset, body_size) ||
-        !read_u64(bytes, offset, expected_checksum) || version != kFormatVersion ||
+        !read_u64(bytes, offset, expected_checksum) ||
+        (version != kLegacyFormatVersion && version != kFormatVersion) ||
         body_size > kMaxBodyBytes || body_size != bytes.size() - offset)
         return std::nullopt;
     const std::vector<std::uint8_t> body(
@@ -152,6 +157,7 @@ std::optional<ManagedAllocationEntry> deserialize_record(
     ManagedAllocationEntry record;
     std::size_t body_offset = 0;
     std::uint32_t leg = 0;
+    std::uint64_t frontier_digest = 0;
     if (!read_string(body, body_offset, record.account.server) ||
         !read_string(body, body_offset, record.allocation_key.broker_key.account.server) ||
         !read_string(body, body_offset, record.allocation_key.managed_key.account.server) ||
@@ -172,12 +178,17 @@ std::optional<ManagedAllocationEntry> deserialize_record(
         !read_managed_provenance(body, body_offset, record.settlement_provenance) ||
         !read_broker_provenance(body, body_offset, record.broker_provenance) ||
         !read_u64(body, body_offset, record.settlement_source_operation_revision) ||
+        (version >= kFormatVersion &&
+         !read_u64(body, body_offset, record.settlement_frontier_revision)) ||
+        (version >= kFormatVersion && !read_u64(body, body_offset, frontier_digest)) ||
         !read_u64(body, body_offset, record.basis_operation_revision) ||
         !read_u64(body, body_offset, record.managed_logical_units) ||
         !read_volume(body, body_offset, record.broker_volume) ||
         body_offset != body.size())
         return std::nullopt;
     record.allocation_key.leg = static_cast<ManagedAllocationLeg>(leg);
+    if (frontier_digest != 0)
+        record.settlement_frontier_digest = frontier_digest;
     return record.valid() ? std::optional<ManagedAllocationEntry>(std::move(record))
                           : std::nullopt;
 }
@@ -295,6 +306,37 @@ SourceValidation validate_sources(
             settlement.record->managed_logical_units != entry.managed_logical_units) {
             error = "managed allocation settlement source mismatch";
             return SourceValidation::invalid;
+        }
+        if (entry.settlement_frontier_digest) {
+            const auto frontier = settlement_store.load_frontier(
+                entry.allocation_key.managed_key.operation_key,
+                entry.settlement_frontier_revision);
+            if (frontier.status == ManagedSettlementFrontierLoadStatus::not_found)
+                return SourceValidation::missing;
+            if (frontier.status == ManagedSettlementFrontierLoadStatus::io_error)
+                return SourceValidation::io_error;
+            if (frontier.status != ManagedSettlementFrontierLoadStatus::found ||
+                !frontier.record ||
+                managed_settlement_frontier_digest(*frontier.record) !=
+                    *entry.settlement_frontier_digest)
+                {
+                    error = "managed allocation settlement frontier mismatch";
+                    return SourceValidation::invalid;
+                }
+            const auto referenced = std::find_if(
+                frontier.record->entries.begin(), frontier.record->entries.end(),
+                [&entry](const auto &frontier_entry) {
+                    return frontier_entry.deal_ticket ==
+                               entry.allocation_key.managed_key.deal_ticket &&
+                           frontier_entry.source_operation_revision ==
+                               entry.settlement_source_operation_revision &&
+                           frontier_entry.managed_logical_units ==
+                               entry.managed_logical_units;
+                });
+            if (referenced == frontier.record->entries.end()) {
+                error = "managed allocation settlement frontier omits the fact";
+                return SourceValidation::invalid;
+            }
         }
 
         const auto broker = broker_store.load(entry.allocation_key.broker_key);
@@ -425,6 +467,30 @@ bool mapping_matches_entry(const ManagedAllocationEntry &entry,
            entry.broker_provenance == mapping.broker_provenance() &&
            entry.managed_logical_units == mapping.managed_logical_units() &&
            entry.broker_volume == mapping.broker_volume();
+}
+
+bool staged_capacity_allows(const std::vector<ManagedAllocationEntry> &records,
+                            const ManagedAllocationEntry &candidate,
+                            const BrokerVolume &capacity, std::string &error) {
+    std::uint64_t used = 0;
+    for (const auto &record : records) {
+        if (!(record.allocation_key.broker_key == candidate.allocation_key.broker_key))
+            continue;
+        if (record.broker_volume.scale != capacity.scale ||
+            record.broker_volume.step_units != capacity.step_units ||
+            used > (std::numeric_limits<std::uint64_t>::max)() - record.broker_volume.units) {
+            error = "managed staged allocation volume domain is invalid";
+            return false;
+        }
+        used += record.broker_volume.units;
+    }
+    if (used > capacity.units || candidate.broker_volume.scale != capacity.scale ||
+        candidate.broker_volume.step_units != capacity.step_units ||
+        candidate.broker_volume.units > capacity.units - used) {
+        error = "managed staged allocation close capacity is exhausted";
+        return false;
+    }
+    return true;
 }
 
 #endif
@@ -600,6 +666,158 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit(
 #else
     (void)entry;
     (void)mapping;
+    (void)journal_store;
+    (void)settlement_store;
+    (void)broker_store;
+    (void)basis_store;
+    (void)envelope_store;
+    (void)lease;
+    set_error(last_error_, "WindowsFileManagedAllocationStore requires Windows");
+    return ManagedAllocationCommitStatus::io_error;
+#endif
+}
+
+ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit_staged(
+    const ManagedAllocationEntry &entry, const ManagedBrokerVolumeMapping &mapping,
+    const ManagedSettlementPreparation &preparation,
+    const DurableJournalStore &journal_store,
+    const DurableManagedDealSettlementStore &settlement_store,
+    const DurableBrokerReversalStore &broker_store,
+    const DurableManagedOwnershipBasisStore &basis_store,
+    const DurableBrokerAllocationStore &envelope_store,
+    const SingleWriterLease &lease) {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "managed allocation store is unavailable");
+        return ManagedAllocationCommitStatus::io_error;
+    }
+    if (!preparation.valid() || !entry.valid() || !entry.settlement_frontier_digest ||
+        entry.settlement_frontier_revision != preparation.frontier.operation_revision ||
+        *entry.settlement_frontier_digest !=
+            managed_settlement_frontier_digest(preparation.frontier) ||
+        !mapping_matches_entry(entry, mapping) ||
+        !(entry.allocation_key.managed_key == preparation.fact.key) ||
+        !(entry.allocation_key.broker_key ==
+          preparation.staged_ownership.basis_key.broker_key) ||
+        entry.settlement_source_operation_revision !=
+            preparation.fact.source_operation_revision ||
+        entry.basis_operation_revision != preparation.target_operation.revision)
+        return ManagedAllocationCommitStatus::invalid_record;
+
+    const auto initial_token = lease.held_fencing_token(entry.account);
+    if (!initial_token || *initial_token == 0)
+        return ManagedAllocationCommitStatus::lease_not_held;
+    FileLock lock(directory_ / L".managed-allocation.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return ManagedAllocationCommitStatus::io_error;
+    }
+    const auto locked_token = lease.held_fencing_token(entry.account);
+    if (!locked_token || *locked_token != *initial_token)
+        return ManagedAllocationCommitStatus::lease_not_held;
+
+    std::vector<ManagedAllocationEntry> records;
+    std::string error;
+    const auto collected = collect_records_locked(directory_, records, error);
+    if (collected != ManagedAllocationScanStatus::complete) {
+        set_error(last_error_, error.empty() ? "managed allocation scan failed" : error);
+        return collected == ManagedAllocationScanStatus::io_error
+                   ? ManagedAllocationCommitStatus::io_error
+                   : ManagedAllocationCommitStatus::invalid_record;
+    }
+    const auto existing = std::find_if(
+        records.begin(), records.end(), [&entry](const auto &candidate) {
+            return candidate.allocation_key == entry.allocation_key;
+        });
+    if (existing != records.end()) {
+        const auto final_token = lease.held_fencing_token(entry.account);
+        if (!final_token || *final_token != *initial_token)
+            return ManagedAllocationCommitStatus::lease_not_held;
+        return *existing == entry ? ManagedAllocationCommitStatus::already_committed
+                                  : ManagedAllocationCommitStatus::conflict;
+    }
+    const auto historical = validate_sources(
+        records, settlement_store, broker_store, basis_store, envelope_store, error);
+    if (historical != SourceValidation::valid) {
+        set_error(last_error_, error.empty() ? "managed allocation source validation failed"
+                                              : error);
+        return source_status(historical);
+    }
+    const auto base = journal_store.load(preparation.target_operation.key);
+    if (base.status == StoreLoadStatus::not_found)
+        return ManagedAllocationCommitStatus::missing_source;
+    if (base.status == StoreLoadStatus::io_error)
+        return ManagedAllocationCommitStatus::io_error;
+    if (base.status != StoreLoadStatus::found || !base.record ||
+        !base.record->valid() || base.record->revision != preparation.base_operation_revision)
+        return ManagedAllocationCommitStatus::invalid_source;
+
+    const auto broker = broker_store.load(entry.allocation_key.broker_key);
+    if (broker.status == BrokerReversalLoadStatus::not_found)
+        return ManagedAllocationCommitStatus::missing_source;
+    if (broker.status == BrokerReversalLoadStatus::io_error)
+        return ManagedAllocationCommitStatus::io_error;
+    if (broker.status != BrokerReversalLoadStatus::found || !broker.record ||
+        !broker.record->valid() ||
+        !(preparation.staged_ownership.broker_provenance == broker.record->provenance))
+        return ManagedAllocationCommitStatus::invalid_source;
+    const auto envelope = envelope_store.load(entry.allocation_key.broker_key);
+    if (envelope.status == BrokerAllocationLoadStatus::not_found)
+        return ManagedAllocationCommitStatus::missing_source;
+    if (envelope.status == BrokerAllocationLoadStatus::io_error)
+        return ManagedAllocationCommitStatus::io_error;
+    if (envelope.status != BrokerAllocationLoadStatus::found || !envelope.record ||
+        !envelope.record->valid() ||
+        envelope.record->account != entry.account ||
+        !(envelope.record->key() == entry.allocation_key.broker_key) ||
+        !(envelope.record->broker_provenance == broker.record->provenance) ||
+        !(envelope.record->broker_close_leg == broker.record->broker_close_leg))
+        return ManagedAllocationCommitStatus::invalid_source;
+    const auto derived = derive_managed_broker_volume_mapping(
+        preparation.fact, *broker.record);
+    if (!derived || !(*derived == mapping) ||
+        !(envelope.record->broker_reverse_open_leg ==
+          broker.record->broker_reverse_open_leg) ||
+        !(envelope.record->unallocated_close_leg == broker.record->broker_close_leg) ||
+        !(envelope.record->unallocated_reverse_open_leg ==
+          broker.record->broker_reverse_open_leg))
+        return ManagedAllocationCommitStatus::invalid_source;
+    if (!staged_capacity_allows(records, entry, envelope.record->broker_close_leg, error)) {
+        set_error(last_error_, error);
+        return ManagedAllocationCommitStatus::capacity_exhausted;
+    }
+
+    const auto final_token = lease.held_fencing_token(entry.account);
+    if (!final_token || *final_token != *initial_token)
+        return ManagedAllocationCommitStatus::lease_not_held;
+    const auto bytes = serialize_record(entry);
+    if (!bytes)
+        return ManagedAllocationCommitStatus::invalid_record;
+    bool published = false;
+    const bool capability_held = lease.with_fencing_capability(
+        entry.account, *final_token, [&]() {
+            const auto target = record_path(directory_, entry.allocation_key);
+            const std::filesystem::path temporary(target.wstring() + L".tmp");
+            DeleteFileW(temporary.c_str());
+            if (!write_file(temporary, *bytes, last_error_))
+                return;
+            if (!MoveFileExW(temporary.c_str(), target.c_str(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                last_error_ = win32_error("MoveFileExW(staged managed allocation)");
+                DeleteFileW(temporary.c_str());
+                return;
+            }
+            published = true;
+        });
+    if (!capability_held)
+        return ManagedAllocationCommitStatus::lease_not_held;
+    return published ? ManagedAllocationCommitStatus::committed
+                     : ManagedAllocationCommitStatus::io_error;
+#else
+    (void)entry;
+    (void)mapping;
+    (void)preparation;
     (void)journal_store;
     (void)settlement_store;
     (void)broker_store;

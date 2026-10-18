@@ -59,6 +59,7 @@ struct ManagedStagedAllocationAdmissionResult {
 inline ManagedStagedAllocationAdmissionResult admit_staged_managed_allocation(
     const ManagedAllocationEntry &entry, const ManagedBrokerVolumeMapping &candidate,
     const ManagedSettlementPreparation &preparation,
+    const DurableManagedSettlementPreparationStore &preparation_store,
     const DurableJournalStore &journal_store,
     const DurableManagedDealSettlementStore &settlement_store,
     const DurableBrokerReversalStore &broker_store,
@@ -66,6 +67,13 @@ inline ManagedStagedAllocationAdmissionResult admit_staged_managed_allocation(
     const DurableBrokerAllocationStore &envelope_store,
     const DurableManagedAllocationStore &allocation_store) {
     if (!preparation.valid())
+        return {ManagedStagedAllocationAdmissionStatus::invalid_preparation, std::nullopt};
+    const auto durable_preparation = preparation_store.load(
+        preparation.target_operation.key, preparation.target_operation.revision,
+        preparation.fact.key.deal_ticket);
+    if (durable_preparation.status == ManagedSettlementPreparationLoadStatus::io_error)
+        return {ManagedStagedAllocationAdmissionStatus::io_error, std::nullopt};
+    if (!durable_preparation.found() || !(*durable_preparation.record == preparation))
         return {ManagedStagedAllocationAdmissionStatus::invalid_preparation, std::nullopt};
     if (!entry.valid() || !entry.settlement_frontier_digest ||
         entry.settlement_frontier_revision != preparation.frontier.operation_revision ||
@@ -100,6 +108,8 @@ inline ManagedStagedAllocationAdmissionResult admit_staged_managed_allocation(
     if (broker.status != BrokerReversalLoadStatus::found || !broker.record ||
         !broker.record->valid() ||
         !(preparation.staged_ownership.broker_provenance == broker.record->provenance))
+        return {ManagedStagedAllocationAdmissionStatus::invalid_broker, std::nullopt};
+    if (broker.record->deal_entry == BrokerDealEntry::inout)
         return {ManagedStagedAllocationAdmissionStatus::invalid_broker, std::nullopt};
 
     const auto envelope = envelope_store.load(entry.allocation_key.broker_key);
@@ -143,8 +153,8 @@ inline ManagedStagedAllocationAdmissionResult admit_staged_managed_allocation(
                          ManagedStagedAllocationAdmissionStatus::conflict, std::nullopt};
     }
 
-    const auto historical = allocation_store.scan(
-        settlement_store, broker_store, basis_store, envelope_store);
+    const auto historical = allocation_store.scan_recovery(
+        settlement_store, broker_store, basis_store, envelope_store, preparation_store);
     if (historical.status == ManagedAllocationScanStatus::io_error)
         return {ManagedStagedAllocationAdmissionStatus::io_error, std::nullopt};
     if (historical.status != ManagedAllocationScanStatus::complete)

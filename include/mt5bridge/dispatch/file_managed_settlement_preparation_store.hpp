@@ -36,7 +36,8 @@ struct ManagedSettlementPreparationScanResult {
 
 /// \class WindowsFileManagedSettlementPreparationStore
 /// \brief Persists exact staged settlement recipes until finalization.
-class WindowsFileManagedSettlementPreparationStore final {
+class WindowsFileManagedSettlementPreparationStore final
+    : public DurableManagedSettlementPreparationStore {
 public:
     /// \brief Opens or creates a preparation directory.
     /// \param directory Directory containing staged manifests and lock file.
@@ -61,6 +62,15 @@ public:
         const ManagedStagedOwnershipAssociation &staged_ownership,
         const DurableJournalStore &journal_store);
 
+    /// \brief Loads one exact durable preparation manifest.
+    /// \param operation_key Operation identity addressed by the manifest.
+    /// \param operation_revision Exact prepared target revision.
+    /// \param deal_ticket Deal identity addressed by the manifest.
+    /// \return Status-bearing durable preparation result.
+    ManagedSettlementPreparationLoadResult load(
+        const OperationKey &operation_key, std::uint64_t operation_revision,
+        std::uint64_t deal_ticket) const override;
+
     /// \brief Finalizes one prepared recipe and its staged ownership basis.
     /// \param preparation Exact recipe returned by the preparation step.
     /// \param journal_store Mutable journal used for the guarded target CAS.
@@ -69,8 +79,7 @@ public:
     /// \param envelope_store Durable broker-envelope source.
     /// \param broker_store Durable broker reversal source.
     /// \param allocation_store Durable allocation ledger used as the publication gate.
-    /// \warning The caller must hold the authoritative account-scoped lease for the
-    /// prepared operation; owner-loop acquisition remains outside this store seam.
+    /// \param lease Authoritative account-scoped writer ownership.
     /// \return Finalization, pending, conflict, validation, or I/O status.
     ManagedSettlementFinalizeStatus finalize(
         const ManagedSettlementPreparation &preparation,
@@ -79,7 +88,8 @@ public:
         DurableManagedOwnershipBasisStore &basis_store,
         const DurableBrokerAllocationStore &envelope_store,
         const DurableBrokerReversalStore &broker_store,
-        const DurableManagedAllocationStore &allocation_store);
+        const DurableManagedAllocationStore &allocation_store,
+        const SingleWriterLease &lease);
 
     /// \brief Recovers every pending manifest using only durable state.
     /// \param journal_store Mutable journal used for guarded target CAS.
@@ -88,8 +98,7 @@ public:
     /// \param envelope_store Durable broker-envelope source.
     /// \param broker_store Durable broker reversal source.
     /// \param allocation_store Durable allocation ledger publication gate.
-    /// \warning The caller must hold the authoritative account-scoped lease while
-    /// recovering the prepared operation set.
+    /// \param lease Authoritative account-scoped writer ownership.
     /// \return Finalization status for the recovered manifest set.
     ManagedSettlementFinalizeStatus recover_pending(
         DurableJournalStore &journal_store,
@@ -97,7 +106,8 @@ public:
         DurableManagedOwnershipBasisStore &basis_store,
         const DurableBrokerAllocationStore &envelope_store,
         const DurableBrokerReversalStore &broker_store,
-        const DurableManagedAllocationStore &allocation_store);
+        const DurableManagedAllocationStore &allocation_store,
+        const SingleWriterLease &lease);
 
     /// \brief Scans staged manifests without applying any mutation.
     /// \return Complete manifests, or an all-or-nothing failure.

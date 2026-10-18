@@ -368,27 +368,51 @@ void run_restart_regression() {
         restarted_sources.reversal);
 
     const auto staged_admission = mt5bridge::admit_staged_managed_allocation(
-        recovered_allocation, *recovered_mapping, recovered_preparation, restarted_journal,
-        restarted_settlement, restarted_sources.broker, restarted_basis,
+        recovered_allocation, *recovered_mapping, recovered_preparation, restarted_preparation,
+        restarted_journal, restarted_settlement, restarted_sources.broker, restarted_basis,
         restarted_sources.envelope, restarted_allocation);
-    require(staged_admission.admitted(),
-            "staged admission did not accept the exact prepared frontier");
+    require(staged_admission.status ==
+                mt5bridge::ManagedStagedAllocationAdmissionStatus::invalid_broker,
+            "unsupported INOUT source was admitted without an authoritative close proof");
     auto mismatched_frontier = recovered_allocation;
     mismatched_frontier.settlement_frontier_digest =
         *mismatched_frontier.settlement_frontier_digest + 1;
     require(mt5bridge::admit_staged_managed_allocation(
                 mismatched_frontier, *recovered_mapping, recovered_preparation,
-                restarted_journal, restarted_settlement, restarted_sources.broker,
+                restarted_preparation, restarted_journal, restarted_settlement,
+                restarted_sources.broker,
                 restarted_basis, restarted_sources.envelope, restarted_allocation)
                 .status == mt5bridge::ManagedStagedAllocationAdmissionStatus::invalid_mapping,
             "staged admission accepted a mismatched frontier digest");
 
+    TestLease no_lease;
+    no_lease.owned_account = {"Other-Account", 7};
     require(restarted_preparation.recover_pending(
                 restarted_journal, restarted_settlement, restarted_basis,
                 restarted_sources.envelope, restarted_sources.broker,
-                restarted_allocation) ==
-                mt5bridge::ManagedSettlementFinalizeStatus::pending_allocation,
-            "pending preparation was finalized without allocation gate");
+                restarted_allocation, no_lease) ==
+                mt5bridge::ManagedSettlementFinalizeStatus::lease_not_held,
+            "recovery mutated without an authoritative account lease");
+
+    TestLease lease;
+    mt5bridge::WindowsFileManagedSettlementPreparationStore missing_preparation(
+        root / "missing-preparation");
+    require(restarted_allocation.commit_staged(
+                recovered_allocation, *recovered_mapping, recovered_preparation,
+                missing_preparation, restarted_journal, restarted_settlement,
+                restarted_sources.broker, restarted_basis, restarted_sources.envelope, lease) ==
+                mt5bridge::ManagedAllocationCommitStatus::invalid_source,
+            "staged allocation published without a durable preparation manifest");
+    require(restarted_allocation.load(recovered_allocation.allocation_key).status ==
+                mt5bridge::ManagedAllocationLoadStatus::not_found,
+            "manifest-less staged allocation consumed capacity");
+
+    require(restarted_preparation.recover_pending(
+                restarted_journal, restarted_settlement, restarted_basis,
+                restarted_sources.envelope, restarted_sources.broker,
+                restarted_allocation, lease) ==
+                mt5bridge::ManagedSettlementFinalizeStatus::invalid_source,
+            "unsupported INOUT preparation passed finalization without an authoritative proof");
     require(restarted_journal.records.at(durable_base_operation.key).revision == 8,
             "pending allocation recovery advanced the journal early");
     require(mt5bridge::validate_managed_ownership_basis(
@@ -397,19 +421,20 @@ void run_restart_regression() {
                 mt5bridge::ManagedOwnershipBasisProofStatus::invalid_operation_record,
             "staged ownership passed ordinary validation before journal CAS");
 
-    TestLease lease;
     require(restarted_allocation.commit_staged(
                 recovered_allocation, *recovered_mapping, recovered_preparation,
+                restarted_preparation,
                 restarted_journal, restarted_settlement, restarted_sources.broker,
                 restarted_basis, restarted_sources.envelope, lease) ==
-                mt5bridge::ManagedAllocationCommitStatus::committed,
-            "staged allocation commit failed");
+                mt5bridge::ManagedAllocationCommitStatus::invalid_source,
+            "unsupported INOUT allocation was committed without an authoritative proof");
     require(restarted_allocation.commit_staged(
                 recovered_allocation, *recovered_mapping, recovered_preparation,
+                restarted_preparation,
                 restarted_journal, restarted_settlement, restarted_sources.broker,
                 restarted_basis, restarted_sources.envelope, lease) ==
-                mt5bridge::ManagedAllocationCommitStatus::already_committed,
-            "staged allocation replay was not idempotent before settlement finalization");
+                mt5bridge::ManagedAllocationCommitStatus::invalid_source,
+            "unsupported INOUT allocation replay changed its fail-closed result");
     require(restarted_settlement.load(recovered_preparation.fact.key).status ==
                 mt5bridge::ManagedDealSettlementLoadStatus::not_found,
             "allocation publication leaked an unfinalized settlement fact");
@@ -417,21 +442,11 @@ void run_restart_regression() {
     require(restarted_preparation.recover_pending(
                 restarted_journal, restarted_settlement, restarted_basis,
                 restarted_sources.envelope, restarted_sources.broker,
-                restarted_allocation) ==
-                mt5bridge::ManagedSettlementFinalizeStatus::finalized,
-            "restart recovery did not finalize the allocation-gated recipe");
-    require(restarted_journal.records.at(durable_base_operation.key).revision == 9,
-            "finalization did not CAS the target operation");
-    require(restarted_settlement.load(recovered_preparation.fact.key).found(),
-            "finalization did not publish the managed settlement fact");
-    require(restarted_basis.load(recovered_preparation.staged_ownership.settled_basis().key()).found(),
-            "finalization did not publish staged ownership basis");
-    require(restarted_preparation.recover_pending(
-                restarted_journal, restarted_settlement, restarted_basis,
-                restarted_sources.envelope, restarted_sources.broker,
-                restarted_allocation) ==
-                mt5bridge::ManagedSettlementFinalizeStatus::already_finalized,
-            "finalized preparation replay was not idempotent");
+                restarted_allocation, lease) ==
+                mt5bridge::ManagedSettlementFinalizeStatus::invalid_source,
+            "recovery advanced an unsupported INOUT preparation without an allocation proof");
+    require(restarted_journal.records.at(durable_base_operation.key).revision == 8,
+            "fail-closed recovery advanced the journal");
 
     std::filesystem::remove_all(root);
 }

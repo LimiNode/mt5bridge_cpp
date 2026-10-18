@@ -279,7 +279,8 @@ SourceValidation validate_sources(
     const DurableBrokerReversalStore &broker_store,
     const DurableManagedOwnershipBasisStore &basis_store,
     const DurableBrokerAllocationStore &envelope_store,
-    std::string &error) {
+    std::string &error,
+    const DurableManagedSettlementPreparationStore *preparation_store = nullptr) {
     std::set<ManagedDealSettlementKey> managed_keys;
     std::map<BrokerReversalKey, BrokerVolume> totals;
     std::map<BrokerReversalKey, BrokerVolume> capacities;
@@ -289,53 +290,99 @@ SourceValidation validate_sources(
             return SourceValidation::invalid;
         }
 
-        const auto settlement = settlement_store.load(entry.allocation_key.managed_key);
-        if (settlement.status == ManagedDealSettlementLoadStatus::not_found)
-            return SourceValidation::missing;
-        if (settlement.status == ManagedDealSettlementLoadStatus::io_error)
-            return SourceValidation::io_error;
-        if (settlement.status != ManagedDealSettlementLoadStatus::found ||
-            !settlement.record || !settlement.record->valid()) {
-            error = "managed allocation settlement source is invalid";
-            return SourceValidation::invalid;
+        std::optional<ManagedSettlementPreparation> prepared;
+        if (preparation_store && entry.settlement_frontier_digest) {
+            const auto loaded = preparation_store->load(
+                entry.allocation_key.managed_key.operation_key,
+                entry.settlement_frontier_revision,
+                entry.allocation_key.managed_key.deal_ticket);
+            if (loaded.status == ManagedSettlementPreparationLoadStatus::io_error)
+                return SourceValidation::io_error;
+            if (loaded.status == ManagedSettlementPreparationLoadStatus::invalid_record)
+                return SourceValidation::invalid;
+            if (loaded.found()) {
+                const auto &candidate = *loaded.record;
+                const auto digest = managed_settlement_frontier_digest(candidate.frontier);
+                const auto fact_entry = std::find_if(
+                    candidate.frontier.entries.begin(), candidate.frontier.entries.end(),
+                    [&entry](const auto &frontier_entry) {
+                        return frontier_entry.deal_ticket ==
+                                   entry.allocation_key.managed_key.deal_ticket &&
+                               frontier_entry.source_operation_revision ==
+                                   entry.settlement_source_operation_revision &&
+                               frontier_entry.managed_logical_units ==
+                                   entry.managed_logical_units;
+                    });
+                if (digest != *entry.settlement_frontier_digest ||
+                    !(candidate.fact.key == entry.allocation_key.managed_key) ||
+                    !(candidate.fact.provenance == entry.settlement_provenance) ||
+                    candidate.fact.source_operation_revision !=
+                        entry.settlement_source_operation_revision ||
+                    candidate.fact.managed_logical_units != entry.managed_logical_units ||
+                    !(candidate.staged_ownership.basis_key.broker_key ==
+                      entry.allocation_key.broker_key) ||
+                    fact_entry == candidate.frontier.entries.end()) {
+                    error = "managed allocation preparation mismatch";
+                    return SourceValidation::invalid;
+                }
+                prepared = candidate;
+            }
         }
-        if (!(settlement.record->key == entry.allocation_key.managed_key) ||
-            !(settlement.record->provenance == entry.settlement_provenance) ||
-            settlement.record->source_operation_revision !=
-                entry.settlement_source_operation_revision ||
-            settlement.record->managed_logical_units != entry.managed_logical_units) {
-            error = "managed allocation settlement source mismatch";
-            return SourceValidation::invalid;
+
+        std::optional<ManagedDealSettlement> prepared_fact;
+        if (!prepared) {
+            const auto settlement = settlement_store.load(entry.allocation_key.managed_key);
+            if (settlement.status == ManagedDealSettlementLoadStatus::not_found)
+                return SourceValidation::missing;
+            if (settlement.status == ManagedDealSettlementLoadStatus::io_error)
+                return SourceValidation::io_error;
+            if (settlement.status != ManagedDealSettlementLoadStatus::found ||
+                !settlement.record || !settlement.record->valid()) {
+                error = "managed allocation settlement source is invalid";
+                return SourceValidation::invalid;
+            }
+            if (!(settlement.record->key == entry.allocation_key.managed_key) ||
+                !(settlement.record->provenance == entry.settlement_provenance) ||
+                settlement.record->source_operation_revision !=
+                    entry.settlement_source_operation_revision ||
+                settlement.record->managed_logical_units != entry.managed_logical_units) {
+                error = "managed allocation settlement source mismatch";
+                return SourceValidation::invalid;
+            }
+            prepared_fact = *settlement.record;
+        } else {
+            prepared_fact = prepared->fact;
         }
         if (entry.settlement_frontier_digest) {
-            const auto frontier = settlement_store.load_frontier(
-                entry.allocation_key.managed_key.operation_key,
-                entry.settlement_frontier_revision);
-            if (frontier.status == ManagedSettlementFrontierLoadStatus::not_found)
-                return SourceValidation::missing;
-            if (frontier.status == ManagedSettlementFrontierLoadStatus::io_error)
-                return SourceValidation::io_error;
-            if (frontier.status != ManagedSettlementFrontierLoadStatus::found ||
-                !frontier.record ||
-                managed_settlement_frontier_digest(*frontier.record) !=
-                    *entry.settlement_frontier_digest)
-                {
+            if (!prepared) {
+                const auto frontier = settlement_store.load_frontier(
+                    entry.allocation_key.managed_key.operation_key,
+                    entry.settlement_frontier_revision);
+                if (frontier.status == ManagedSettlementFrontierLoadStatus::not_found)
+                    return SourceValidation::missing;
+                if (frontier.status == ManagedSettlementFrontierLoadStatus::io_error)
+                    return SourceValidation::io_error;
+                if (frontier.status != ManagedSettlementFrontierLoadStatus::found ||
+                    !frontier.record ||
+                    managed_settlement_frontier_digest(*frontier.record) !=
+                        *entry.settlement_frontier_digest) {
                     error = "managed allocation settlement frontier mismatch";
                     return SourceValidation::invalid;
                 }
-            const auto referenced = std::find_if(
-                frontier.record->entries.begin(), frontier.record->entries.end(),
-                [&entry](const auto &frontier_entry) {
-                    return frontier_entry.deal_ticket ==
-                               entry.allocation_key.managed_key.deal_ticket &&
-                           frontier_entry.source_operation_revision ==
-                               entry.settlement_source_operation_revision &&
-                           frontier_entry.managed_logical_units ==
-                               entry.managed_logical_units;
-                });
-            if (referenced == frontier.record->entries.end()) {
-                error = "managed allocation settlement frontier omits the fact";
-                return SourceValidation::invalid;
+                const auto referenced = std::find_if(
+                    frontier.record->entries.begin(), frontier.record->entries.end(),
+                    [&entry](const auto &frontier_entry) {
+                        return frontier_entry.deal_ticket ==
+                                   entry.allocation_key.managed_key.deal_ticket &&
+                               frontier_entry.source_operation_revision ==
+                                   entry.settlement_source_operation_revision &&
+                               frontier_entry.managed_logical_units ==
+                                   entry.managed_logical_units;
+                    });
+                if (referenced == frontier.record->entries.end()) {
+                    error = "managed allocation settlement frontier omits the fact";
+                    return SourceValidation::invalid;
+                }
             }
         }
 
@@ -354,25 +401,32 @@ SourceValidation validate_sources(
             error = "managed allocation broker source mismatch";
             return SourceValidation::invalid;
         }
-
-        const auto basis_key = ManagedOwnershipBasisKey{
-            entry.allocation_key.broker_key, entry.allocation_key.managed_key.operation_key};
-        const auto basis = basis_store.load(basis_key);
-        if (basis.status == ManagedOwnershipBasisLoadStatus::not_found)
-            return SourceValidation::missing;
-        if (basis.status == ManagedOwnershipBasisLoadStatus::io_error)
-            return SourceValidation::io_error;
-        if (basis.status != ManagedOwnershipBasisLoadStatus::found || !basis.record ||
-            !basis.record->valid()) {
-            error = "managed allocation ownership basis is invalid";
+        if (entry.settlement_frontier_digest &&
+            broker.record->deal_entry == BrokerDealEntry::inout) {
+            error = "managed staged allocation requires an authoritative INOUT proof";
             return SourceValidation::invalid;
         }
-        if (basis.record->account != entry.account || !(basis.record->key() == basis_key) ||
-            !(basis.record->broker_provenance == entry.broker_provenance) ||
-            basis.record->operation_revision != entry.basis_operation_revision ||
-            entry.settlement_source_operation_revision > basis.record->operation_revision) {
-            error = "managed allocation ownership basis mismatch";
-            return SourceValidation::invalid;
+
+        if (!prepared) {
+            const auto basis_key = ManagedOwnershipBasisKey{
+                entry.allocation_key.broker_key, entry.allocation_key.managed_key.operation_key};
+            const auto basis = basis_store.load(basis_key);
+            if (basis.status == ManagedOwnershipBasisLoadStatus::not_found)
+                return SourceValidation::missing;
+            if (basis.status == ManagedOwnershipBasisLoadStatus::io_error)
+                return SourceValidation::io_error;
+            if (basis.status != ManagedOwnershipBasisLoadStatus::found || !basis.record ||
+                !basis.record->valid()) {
+                error = "managed allocation ownership basis is invalid";
+                return SourceValidation::invalid;
+            }
+            if (basis.record->account != entry.account || !(basis.record->key() == basis_key) ||
+                !(basis.record->broker_provenance == entry.broker_provenance) ||
+                basis.record->operation_revision != entry.basis_operation_revision ||
+                entry.settlement_source_operation_revision > basis.record->operation_revision) {
+                error = "managed allocation ownership basis mismatch";
+                return SourceValidation::invalid;
+            }
         }
 
         const auto envelope = envelope_store.load(entry.allocation_key.broker_key);
@@ -404,7 +458,7 @@ SourceValidation validate_sources(
         }
 
         const auto derived = derive_managed_broker_volume_mapping(
-            *settlement.record, *broker.record);
+            *prepared_fact, *broker.record);
         if (!derived || !(derived->managed_key() == entry.allocation_key.managed_key) ||
             !(derived->broker_key() == entry.allocation_key.broker_key) ||
             derived->managed_logical_units() != entry.managed_logical_units ||
@@ -680,6 +734,7 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit(
 ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit_staged(
     const ManagedAllocationEntry &entry, const ManagedBrokerVolumeMapping &mapping,
     const ManagedSettlementPreparation &preparation,
+    const DurableManagedSettlementPreparationStore &preparation_store,
     const DurableJournalStore &journal_store,
     const DurableManagedDealSettlementStore &settlement_store,
     const DurableBrokerReversalStore &broker_store,
@@ -713,6 +768,13 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit_staged(
         last_error_ = lock.error();
         return ManagedAllocationCommitStatus::io_error;
     }
+    const auto durable_preparation = preparation_store.load(
+        preparation.target_operation.key, preparation.target_operation.revision,
+        preparation.fact.key.deal_ticket);
+    if (durable_preparation.status == ManagedSettlementPreparationLoadStatus::io_error)
+        return ManagedAllocationCommitStatus::io_error;
+    if (!durable_preparation.found() || !(*durable_preparation.record == preparation))
+        return ManagedAllocationCommitStatus::invalid_source;
     const auto locked_token = lease.held_fencing_token(entry.account);
     if (!locked_token || *locked_token != *initial_token)
         return ManagedAllocationCommitStatus::lease_not_held;
@@ -738,7 +800,8 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit_staged(
                                   : ManagedAllocationCommitStatus::conflict;
     }
     const auto historical = validate_sources(
-        records, settlement_store, broker_store, basis_store, envelope_store, error);
+        records, settlement_store, broker_store, basis_store, envelope_store, error,
+        &preparation_store);
     if (historical != SourceValidation::valid) {
         set_error(last_error_, error.empty() ? "managed allocation source validation failed"
                                               : error);
@@ -761,6 +824,8 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit_staged(
     if (broker.status != BrokerReversalLoadStatus::found || !broker.record ||
         !broker.record->valid() ||
         !(preparation.staged_ownership.broker_provenance == broker.record->provenance))
+        return ManagedAllocationCommitStatus::invalid_source;
+    if (broker.record->deal_entry == BrokerDealEntry::inout)
         return ManagedAllocationCommitStatus::invalid_source;
     const auto envelope = envelope_store.load(entry.allocation_key.broker_key);
     if (envelope.status == BrokerAllocationLoadStatus::not_found)
@@ -818,6 +883,7 @@ ManagedAllocationCommitStatus WindowsFileManagedAllocationStore::commit_staged(
     (void)entry;
     (void)mapping;
     (void)preparation;
+    (void)preparation_store;
     (void)journal_store;
     (void)settlement_store;
     (void)broker_store;
@@ -908,6 +974,53 @@ ManagedAllocationScanResult WindowsFileManagedAllocationStore::scan(
     (void)broker_store;
     (void)basis_store;
     (void)envelope_store;
+    set_error(last_error_, "WindowsFileManagedAllocationStore requires Windows");
+    return {ManagedAllocationScanStatus::io_error, {}};
+#endif
+}
+
+ManagedAllocationScanResult WindowsFileManagedAllocationStore::scan_recovery(
+    const DurableManagedDealSettlementStore &settlement_store,
+    const DurableBrokerReversalStore &broker_store,
+    const DurableManagedOwnershipBasisStore &basis_store,
+    const DurableBrokerAllocationStore &envelope_store,
+    const DurableManagedSettlementPreparationStore &preparation_store) const {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_) {
+        set_error(last_error_, "managed allocation store is unavailable");
+        return {ManagedAllocationScanStatus::io_error, {}};
+    }
+    FileLock lock(directory_ / L".managed-allocation.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return {ManagedAllocationScanStatus::io_error, {}};
+    }
+    std::vector<ManagedAllocationEntry> records;
+    std::string error;
+    const auto collected = collect_records_locked(directory_, records, error);
+    if (collected != ManagedAllocationScanStatus::complete) {
+        set_error(last_error_, error.empty() ? "managed allocation scan failed" : error);
+        return {collected, {}};
+    }
+    const auto status = validate_sources(
+        records, settlement_store, broker_store, basis_store, envelope_store, error,
+        &preparation_store);
+    if (status != SourceValidation::valid) {
+        set_error(last_error_, error.empty() ? "managed allocation recovery scan failed"
+                                              : error);
+        return {status == SourceValidation::io_error
+                    ? ManagedAllocationScanStatus::io_error
+                    : ManagedAllocationScanStatus::invalid_record,
+                {}};
+    }
+    return {ManagedAllocationScanStatus::complete, std::move(records)};
+#else
+    (void)settlement_store;
+    (void)broker_store;
+    (void)basis_store;
+    (void)envelope_store;
+    (void)preparation_store;
     set_error(last_error_, "WindowsFileManagedAllocationStore requires Windows");
     return {ManagedAllocationScanStatus::io_error, {}};
 #endif

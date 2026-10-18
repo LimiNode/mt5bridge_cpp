@@ -480,6 +480,22 @@ std::filesystem::path preparation_path(const std::filesystem::path &directory,
 #endif
 }
 
+std::filesystem::path preparation_path(const std::filesystem::path &directory,
+                                        const OperationKey &operation_key,
+                                        std::uint64_t operation_revision,
+                                        std::uint64_t deal_ticket) {
+    const auto name = "prepared-" + hex_u64(fnv1a(operation_key.account.server)) + "-" +
+                      hex_u64(operation_key.account.login) + "-" +
+                      hex_u64(operation_key.trade_id) + "-" +
+                      hex_u64(operation_key.operation_id) + "-" +
+                      hex_u64(operation_revision) + "-" + hex_u64(deal_ticket) + ".bin";
+#if defined(_WIN32)
+    return directory / widen_ascii(name);
+#else
+    return directory / name;
+#endif
+}
+
 void set_error(std::string &target, std::string value) { target = std::move(value); }
 
 ManagedSettlementFinalizeStatus map_settlement_status(
@@ -500,6 +516,36 @@ ManagedSettlementFinalizeStatus map_settlement_status(
     default:
         return ManagedSettlementFinalizeStatus::invalid_record;
     }
+}
+
+bool frontier_has_allocation_claims(
+    const ManagedSettlementFrontier &frontier,
+    const std::vector<ManagedAllocationEntry> &allocations,
+    std::string &error) {
+    for (const auto &frontier_entry : frontier.entries) {
+        std::size_t matches = 0;
+        for (const auto &allocation : allocations) {
+            if (allocation.allocation_key.leg != ManagedAllocationLeg::close ||
+                allocation.allocation_key.managed_key.operation_key != frontier.operation_key ||
+                allocation.allocation_key.managed_key.deal_ticket !=
+                    frontier_entry.deal_ticket ||
+                allocation.settlement_source_operation_revision !=
+                    frontier_entry.source_operation_revision ||
+                allocation.managed_logical_units != frontier_entry.managed_logical_units)
+                continue;
+            if (!allocation.settlement_frontier_digest ||
+                allocation.settlement_frontier_revision > frontier.operation_revision) {
+                error = "managed settlement frontier has a legacy or future allocation claim";
+                return false;
+            }
+            ++matches;
+        }
+        if (matches != 1) {
+            error = "managed settlement frontier allocation claim is missing or duplicated";
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -595,6 +641,51 @@ WindowsFileManagedSettlementPreparationStore::prepare(
 #endif
 }
 
+ManagedSettlementPreparationLoadResult
+WindowsFileManagedSettlementPreparationStore::load(
+    const OperationKey &operation_key, std::uint64_t operation_revision,
+    std::uint64_t deal_ticket) const {
+#if defined(_WIN32)
+    last_error_.clear();
+    if (!ready_)
+        return {ManagedSettlementPreparationLoadStatus::io_error, std::nullopt};
+    if (!operation_key.valid() || operation_revision == 0 || deal_ticket == 0)
+        return {ManagedSettlementPreparationLoadStatus::invalid_record, std::nullopt};
+    FileLock lock(directory_ / L".managed-settlement-preparation.lock");
+    if (!lock.acquired()) {
+        last_error_ = lock.error();
+        return {ManagedSettlementPreparationLoadStatus::io_error, std::nullopt};
+    }
+    std::optional<ManagedSettlementPreparation> preparation;
+    std::string error;
+    const auto status = read_preparation_file(
+        preparation_path(directory_, operation_key, operation_revision, deal_ticket),
+        preparation, error);
+    if (status == ReadStatus::absent)
+        return {ManagedSettlementPreparationLoadStatus::not_found, std::nullopt};
+    if (status == ReadStatus::io_error) {
+        set_error(last_error_, error);
+        return {ManagedSettlementPreparationLoadStatus::io_error, std::nullopt};
+    }
+    if (status != ReadStatus::valid || !preparation ||
+        preparation->target_operation.key != operation_key ||
+        preparation->target_operation.revision != operation_revision ||
+        preparation->fact.key.deal_ticket != deal_ticket ||
+        preparation_path(directory_, *preparation).filename() !=
+            preparation_path(directory_, operation_key, operation_revision, deal_ticket).filename()) {
+        set_error(last_error_, error.empty() ? "malformed settlement preparation" : error);
+        return {ManagedSettlementPreparationLoadStatus::invalid_record, std::nullopt};
+    }
+    return {ManagedSettlementPreparationLoadStatus::found, std::move(preparation)};
+#else
+    (void)operation_key;
+    (void)operation_revision;
+    (void)deal_ticket;
+    set_error(last_error_, "WindowsFileManagedSettlementPreparationStore requires Windows");
+    return {ManagedSettlementPreparationLoadStatus::io_error, std::nullopt};
+#endif
+}
+
 ManagedSettlementFinalizeStatus
 WindowsFileManagedSettlementPreparationStore::finalize(
     const ManagedSettlementPreparation &preparation, DurableJournalStore &journal_store,
@@ -602,10 +693,14 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     DurableManagedOwnershipBasisStore &basis_store,
     const DurableBrokerAllocationStore &envelope_store,
     const DurableBrokerReversalStore &broker_store,
-    const DurableManagedAllocationStore &allocation_store) {
+    const DurableManagedAllocationStore &allocation_store,
+    const SingleWriterLease &lease) {
 #if defined(_WIN32)
     if (!preparation.valid())
         return ManagedSettlementFinalizeStatus::invalid_record;
+    const auto initial_token = lease.held_fencing_token(preparation.fact.key.account);
+    if (!initial_token || *initial_token == 0)
+        return ManagedSettlementFinalizeStatus::lease_not_held;
     const auto broker = broker_store.load(preparation.staged_ownership.basis_key.broker_key);
     if (broker.status == BrokerReversalLoadStatus::not_found)
         return ManagedSettlementFinalizeStatus::missing_source;
@@ -614,6 +709,8 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     if (broker.status != BrokerReversalLoadStatus::found || !broker.record ||
         !broker.record->valid() ||
         !(preparation.staged_ownership.broker_provenance == broker.record->provenance))
+        return ManagedSettlementFinalizeStatus::invalid_source;
+    if (broker.record->deal_entry == BrokerDealEntry::inout)
         return ManagedSettlementFinalizeStatus::invalid_source;
     const auto mapping = derive_managed_broker_volume_mapping(preparation.fact, *broker.record);
     if (!mapping)
@@ -644,6 +741,17 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     if (!(*allocation.record == expected))
         return ManagedSettlementFinalizeStatus::conflict;
 
+    const auto allocation_scan = allocation_store.scan_recovery(
+        settlement_store, broker_store, basis_store, envelope_store, *this);
+    if (allocation_scan.status == ManagedAllocationScanStatus::io_error)
+        return ManagedSettlementFinalizeStatus::io_error;
+    if (!allocation_scan.complete())
+        return ManagedSettlementFinalizeStatus::invalid_source;
+    std::string allocation_error;
+    if (!frontier_has_allocation_claims(
+            preparation.frontier, allocation_scan.records, allocation_error))
+        return ManagedSettlementFinalizeStatus::invalid_source;
+
     const auto current = journal_store.load(preparation.target_operation.key);
     if (current.status == StoreLoadStatus::not_found)
         return ManagedSettlementFinalizeStatus::missing_operation_record;
@@ -652,8 +760,14 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     if (current.status != StoreLoadStatus::found || !current.record)
         return ManagedSettlementFinalizeStatus::invalid_operation_record;
     if (current.record->revision == preparation.base_operation_revision) {
-        const auto commit_status = journal_store.commit(
-            preparation.target_operation, preparation.base_operation_revision);
+        StoreCommitStatus commit_status = StoreCommitStatus::io_error;
+        const bool capability_held = lease.with_fencing_capability(
+            preparation.fact.key.account, *initial_token, [&]() {
+                commit_status = journal_store.commit(
+                    preparation.target_operation, preparation.base_operation_revision);
+            });
+        if (!capability_held)
+            return ManagedSettlementFinalizeStatus::lease_not_held;
         if (commit_status == StoreCommitStatus::io_error)
             return ManagedSettlementFinalizeStatus::io_error;
         if (commit_status != StoreCommitStatus::committed)
@@ -664,23 +778,36 @@ WindowsFileManagedSettlementPreparationStore::finalize(
         return ManagedSettlementFinalizeStatus::conflict;
     }
 
-    ManagedDealSettlementCommit proof(preparation.fact, preparation.frontier);
-    const auto settlement_status = settlement_store.commit(proof, journal_store);
-    const auto mapped = map_settlement_status(settlement_status);
-    if (mapped != ManagedSettlementFinalizeStatus::finalized &&
-        mapped != ManagedSettlementFinalizeStatus::already_finalized)
-        return mapped;
-    const auto basis_status = basis_store.commit(
-        preparation.staged_ownership.settled_basis(), journal_store, envelope_store);
-    if (basis_status == ManagedOwnershipBasisCommitStatus::committed)
-        return ManagedSettlementFinalizeStatus::finalized;
-    if (basis_status == ManagedOwnershipBasisCommitStatus::already_committed)
-        return mapped == ManagedSettlementFinalizeStatus::already_finalized
-                   ? ManagedSettlementFinalizeStatus::already_finalized
-                   : ManagedSettlementFinalizeStatus::finalized;
-    if (basis_status == ManagedOwnershipBasisCommitStatus::io_error)
-        return ManagedSettlementFinalizeStatus::io_error;
-    return ManagedSettlementFinalizeStatus::invalid_source;
+    const auto current_token = lease.held_fencing_token(preparation.fact.key.account);
+    if (!current_token || *current_token != *initial_token)
+        return ManagedSettlementFinalizeStatus::lease_not_held;
+    ManagedSettlementFinalizeStatus publication_status =
+        ManagedSettlementFinalizeStatus::io_error;
+    const bool capability_held = lease.with_fencing_capability(
+        preparation.fact.key.account, *initial_token, [&]() {
+            ManagedDealSettlementCommit proof(preparation.fact, preparation.frontier);
+            const auto settlement_status = settlement_store.commit(proof, journal_store);
+            const auto mapped = map_settlement_status(settlement_status);
+            if (mapped != ManagedSettlementFinalizeStatus::finalized &&
+                mapped != ManagedSettlementFinalizeStatus::already_finalized) {
+                publication_status = mapped;
+                return;
+            }
+            const auto basis_status = basis_store.commit(
+                preparation.staged_ownership.settled_basis(), journal_store, envelope_store);
+            if (basis_status == ManagedOwnershipBasisCommitStatus::committed)
+                publication_status = ManagedSettlementFinalizeStatus::finalized;
+            else if (basis_status == ManagedOwnershipBasisCommitStatus::already_committed)
+                publication_status = mapped == ManagedSettlementFinalizeStatus::already_finalized
+                                          ? ManagedSettlementFinalizeStatus::already_finalized
+                                          : ManagedSettlementFinalizeStatus::finalized;
+            else if (basis_status == ManagedOwnershipBasisCommitStatus::io_error)
+                publication_status = ManagedSettlementFinalizeStatus::io_error;
+            else
+                publication_status = ManagedSettlementFinalizeStatus::invalid_source;
+        });
+    return capability_held ? publication_status
+                           : ManagedSettlementFinalizeStatus::lease_not_held;
 #else
     (void)preparation;
     (void)journal_store;
@@ -689,6 +816,7 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     (void)envelope_store;
     (void)broker_store;
     (void)allocation_store;
+    (void)lease;
     set_error(last_error_, "WindowsFileManagedSettlementPreparationStore requires Windows");
     return ManagedSettlementFinalizeStatus::io_error;
 #endif
@@ -700,7 +828,8 @@ WindowsFileManagedSettlementPreparationStore::recover_pending(
     DurableManagedOwnershipBasisStore &basis_store,
     const DurableBrokerAllocationStore &envelope_store,
     const DurableBrokerReversalStore &broker_store,
-    const DurableManagedAllocationStore &allocation_store) {
+    const DurableManagedAllocationStore &allocation_store,
+    const SingleWriterLease &lease) {
     const auto scanned = scan();
     if (!scanned.complete())
         return scanned.status == ManagedSettlementPreparationScanStatus::io_error
@@ -712,7 +841,7 @@ WindowsFileManagedSettlementPreparationStore::recover_pending(
     bool pending = false;
     for (const auto &preparation : scanned.records) {
         const auto status = finalize(preparation, journal_store, settlement_store, basis_store,
-                                     envelope_store, broker_store, allocation_store);
+                                     envelope_store, broker_store, allocation_store, lease);
         if (status == ManagedSettlementFinalizeStatus::pending_allocation) {
             pending = true;
             continue;

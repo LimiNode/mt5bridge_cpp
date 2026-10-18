@@ -177,6 +177,7 @@ enum class ManagedSettlementFinalizeStatus {
     finalized,
     already_finalized,
     pending_allocation,
+    lease_not_held,
     conflict,
     invalid_record,
     missing_operation_record,
@@ -184,6 +185,45 @@ enum class ManagedSettlementFinalizeStatus {
     missing_source,
     invalid_source,
     io_error,
+};
+
+/// \enum ManagedSettlementPreparationLoadStatus
+/// \brief Reports lookup state for one durable preparation manifest.
+enum class ManagedSettlementPreparationLoadStatus {
+    found,
+    not_found,
+    invalid_record,
+    io_error,
+};
+
+/// \struct ManagedSettlementPreparationLoadResult
+/// \brief Carries one exact durable preparation lookup.
+struct ManagedSettlementPreparationLoadResult {
+    ManagedSettlementPreparationLoadStatus status =
+        ManagedSettlementPreparationLoadStatus::io_error;
+    std::optional<ManagedSettlementPreparation> record;
+
+    /// \brief Tests whether an exact preparation was loaded.
+    /// \return True only when status is `found` with a recipe.
+    bool found() const {
+        return status == ManagedSettlementPreparationLoadStatus::found && record.has_value();
+    }
+};
+
+/// \class DurableManagedSettlementPreparationStore
+/// \brief Lookup seam for exact durable staged settlement manifests.
+class DurableManagedSettlementPreparationStore {
+public:
+    virtual ~DurableManagedSettlementPreparationStore() = default;
+
+    /// \brief Loads the exact manifest for one operation frontier and deal.
+    /// \param operation_key Operation identity addressed by the manifest.
+    /// \param operation_revision Exact prepared target revision.
+    /// \param deal_ticket Deal identity addressed by the manifest.
+    /// \return Status-bearing durable preparation result.
+    virtual ManagedSettlementPreparationLoadResult load(
+        const OperationKey &operation_key, std::uint64_t operation_revision,
+        std::uint64_t deal_ticket) const = 0;
 };
 
 } // namespace mt5bridge

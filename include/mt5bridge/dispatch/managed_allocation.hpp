@@ -14,6 +14,7 @@
 namespace mt5bridge {
 
 struct ManagedSettlementPreparation;
+class DurableManagedSettlementPreparationStore;
 
 /// \enum ManagedAllocationLeg
 /// \brief Identifies the broker leg consumed by an allocation entry.
@@ -192,6 +193,7 @@ public:
         const ManagedAllocationEntry &entry,
         const ManagedBrokerVolumeMapping &mapping,
         const ManagedSettlementPreparation &preparation,
+        const DurableManagedSettlementPreparationStore &preparation_store,
         const DurableJournalStore &journal_store,
         const DurableManagedDealSettlementStore &settlement_store,
         const DurableBrokerReversalStore &broker_store,
@@ -215,6 +217,20 @@ public:
         const DurableBrokerReversalStore &broker_store,
         const DurableManagedOwnershipBasisStore &basis_store,
         const DurableBrokerAllocationStore &envelope_store) const = 0;
+
+    /// \brief Scans entries while admitting exact pending preparation manifests.
+    /// \param settlement_store Durable committed settlement source.
+    /// \param broker_store Durable broker reversal source.
+    /// \param basis_store Durable ownership-basis source.
+    /// \param envelope_store Durable broker envelope source.
+    /// \param preparation_store Durable exact staged preparation source.
+    /// \return Complete historical and prepared-backed entries, or failure.
+    virtual ManagedAllocationScanResult scan_recovery(
+        const DurableManagedDealSettlementStore &settlement_store,
+        const DurableBrokerReversalStore &broker_store,
+        const DurableManagedOwnershipBasisStore &basis_store,
+        const DurableBrokerAllocationStore &envelope_store,
+        const DurableManagedSettlementPreparationStore &preparation_store) const = 0;
 };
 
 } // namespace mt5bridge

@@ -557,6 +557,7 @@ bool frontier_has_allocation_claims(
     const ManagedSettlementFrontier &frontier,
     const std::vector<ManagedAllocationEntry> &allocations,
     std::string &error) {
+    const auto digest = managed_settlement_frontier_digest(frontier);
     for (const auto &frontier_entry : frontier.entries) {
         std::size_t matches = 0;
         for (const auto &allocation : allocations) {
@@ -569,8 +570,10 @@ bool frontier_has_allocation_claims(
                 allocation.managed_logical_units != frontier_entry.managed_logical_units)
                 continue;
             if (!allocation.settlement_frontier_digest ||
-                allocation.settlement_frontier_revision > frontier.operation_revision) {
-                error = "managed settlement frontier has a legacy or future allocation claim";
+                *allocation.settlement_frontier_digest != digest ||
+                allocation.settlement_frontier_revision != frontier.operation_revision ||
+                allocation.basis_operation_revision != frontier.operation_revision) {
+                error = "managed settlement frontier has a mismatched allocation claim";
                 return false;
             }
             ++matches;
@@ -581,6 +584,57 @@ bool frontier_has_allocation_claims(
         }
     }
     return true;
+}
+
+/// rief Classifies durable evidence for a preparation whose journal is newer.
+enum class HistoricalPreparationEvidence { complete, missing, invalid, io_error };
+
+/// rief Validates that a retained preparation was already fully published.
+/// param preparation Retained staged recipe being replayed.
+/// param settlement_store Durable committed fact/frontier source.
+/// param basis_store Durable settled ownership-basis source.
+/// eturn Historical evidence classification; no store is mutated.
+HistoricalPreparationEvidence validate_historical_preparation_evidence(
+    const ManagedSettlementPreparation &preparation,
+    const DurableManagedDealSettlementStore &settlement_store,
+    const DurableManagedOwnershipBasisStore &basis_store) {
+    const auto fact = settlement_store.load(preparation.fact.key);
+    if (fact.status == ManagedDealSettlementLoadStatus::not_found)
+        return HistoricalPreparationEvidence::missing;
+    if (fact.status == ManagedDealSettlementLoadStatus::io_error)
+        return HistoricalPreparationEvidence::io_error;
+    if (fact.status != ManagedDealSettlementLoadStatus::found || !fact.record ||
+        !(*fact.record == preparation.fact))
+        return HistoricalPreparationEvidence::invalid;
+
+    const auto frontier = settlement_store.load_frontier(
+        preparation.frontier.operation_key, preparation.frontier.operation_revision);
+    if (frontier.status == ManagedSettlementFrontierLoadStatus::not_found)
+        return HistoricalPreparationEvidence::missing;
+    if (frontier.status == ManagedSettlementFrontierLoadStatus::io_error)
+        return HistoricalPreparationEvidence::io_error;
+    if (frontier.status != ManagedSettlementFrontierLoadStatus::found ||
+        !frontier.record || !(*frontier.record == preparation.frontier))
+        return HistoricalPreparationEvidence::invalid;
+
+    const auto &target = preparation.target_operation;
+    if (!target.reconciliation_descriptor ||
+        !journal_at_least_result_persisted(target.journal_state) ||
+        target.reconciliation_descriptor->requested_volume == 0 ||
+        target.settled_volume == 0 ||
+        target.settled_volume > target.reconciliation_descriptor->requested_volume ||
+        !detail::operation_binds_deal(target, preparation.fact.key.deal_ticket))
+        return HistoricalPreparationEvidence::invalid;
+
+    const auto basis = basis_store.load(preparation.staged_ownership.basis_key);
+    if (basis.status == ManagedOwnershipBasisLoadStatus::not_found)
+        return HistoricalPreparationEvidence::missing;
+    if (basis.status == ManagedOwnershipBasisLoadStatus::io_error)
+        return HistoricalPreparationEvidence::io_error;
+    if (basis.status != ManagedOwnershipBasisLoadStatus::found || !basis.record ||
+        !(*basis.record == preparation.staged_ownership.settled_basis()))
+        return HistoricalPreparationEvidence::invalid;
+    return HistoricalPreparationEvidence::complete;
 }
 
 } // namespace
@@ -760,8 +814,7 @@ WindowsFileManagedSettlementPreparationStore::finalize(
         !broker.record->valid() ||
         !(preparation.staged_ownership.broker_provenance == broker.record->provenance))
         return ManagedSettlementFinalizeStatus::invalid_source;
-    if (broker.record->deal_entry == BrokerDealEntry::inout)
-        return ManagedSettlementFinalizeStatus::invalid_source;
+    const bool broker_is_inout = broker.record->deal_entry == BrokerDealEntry::inout;
     const auto mapping = derive_managed_broker_volume_mapping(preparation.fact, *broker.record);
     if (!mapping)
         return ManagedSettlementFinalizeStatus::invalid_source;
@@ -781,6 +834,17 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     expected.broker_volume = mapping->broker_volume();
     if (!expected.valid())
         return ManagedSettlementFinalizeStatus::invalid_record;
+    if (broker_is_inout) {
+        const auto inout_current = journal_store.load(preparation.target_operation.key);
+        if (inout_current.status == StoreLoadStatus::not_found)
+            return ManagedSettlementFinalizeStatus::missing_operation_record;
+        if (inout_current.status == StoreLoadStatus::io_error)
+            return ManagedSettlementFinalizeStatus::io_error;
+        if (inout_current.status != StoreLoadStatus::found || !inout_current.record)
+            return ManagedSettlementFinalizeStatus::invalid_operation_record;
+        if (inout_current.record->revision <= preparation.target_operation.revision)
+            return ManagedSettlementFinalizeStatus::invalid_source;
+    }
     const auto allocation = allocation_store.load(expected.allocation_key);
     if (allocation.status == ManagedAllocationLoadStatus::not_found)
         return ManagedSettlementFinalizeStatus::pending_allocation;
@@ -810,6 +874,8 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     if (current.status != StoreLoadStatus::found || !current.record)
         return ManagedSettlementFinalizeStatus::invalid_operation_record;
     if (current.record->revision == preparation.base_operation_revision) {
+        if (broker_is_inout)
+            return ManagedSettlementFinalizeStatus::invalid_source;
         if (!valid_managed_settlement_transition(
                 *current.record, preparation.target_operation,
                 preparation.base_operation_revision))
@@ -826,11 +892,26 @@ WindowsFileManagedSettlementPreparationStore::finalize(
             return ManagedSettlementFinalizeStatus::io_error;
         if (commit_status != StoreCommitStatus::committed)
             return ManagedSettlementFinalizeStatus::conflict;
-    } else if (current.record->revision != preparation.target_operation.revision ||
-               !managed_settlement_preparation_detail::same_operation(
+    } else if (current.record->revision == preparation.target_operation.revision &&
+               managed_settlement_preparation_detail::same_operation(
                    *current.record, preparation.target_operation)) {
+        // The journal CAS already happened; continue idempotent publication.
+    } else if (current.record->revision > preparation.target_operation.revision) {
+        const auto historical = validate_historical_preparation_evidence(
+            preparation, settlement_store, basis_store);
+        if (historical == HistoricalPreparationEvidence::complete)
+            return ManagedSettlementFinalizeStatus::already_finalized;
+        if (historical == HistoricalPreparationEvidence::io_error)
+            return ManagedSettlementFinalizeStatus::io_error;
+        if (historical == HistoricalPreparationEvidence::invalid)
+            return ManagedSettlementFinalizeStatus::invalid_source;
+        return ManagedSettlementFinalizeStatus::conflict;
+    } else {
         return ManagedSettlementFinalizeStatus::conflict;
     }
+
+    if (broker_is_inout)
+        return ManagedSettlementFinalizeStatus::invalid_source;
 
     const auto current_token = lease.held_fencing_token(preparation.fact.key.account);
     if (!current_token || *current_token != *initial_token)

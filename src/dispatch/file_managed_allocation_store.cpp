@@ -403,8 +403,33 @@ SourceValidation validate_sources(
         }
         if (entry.settlement_frontier_digest &&
             broker.record->deal_entry == BrokerDealEntry::inout) {
-            error = "managed staged allocation requires an authoritative INOUT proof";
-            return SourceValidation::invalid;
+            if (!preparation_store || !prepared) {
+                error = "managed staged allocation requires an authoritative INOUT proof";
+                return SourceValidation::invalid;
+            }
+            const auto committed_fact = settlement_store.load(
+                entry.allocation_key.managed_key);
+            if (committed_fact.status == ManagedDealSettlementLoadStatus::not_found)
+                return SourceValidation::missing;
+            if (committed_fact.status == ManagedDealSettlementLoadStatus::io_error)
+                return SourceValidation::io_error;
+            if (committed_fact.status != ManagedDealSettlementLoadStatus::found ||
+                !committed_fact.record || !(*committed_fact.record == prepared->fact)) {
+                error = "managed staged allocation committed fact mismatch";
+                return SourceValidation::invalid;
+            }
+            const auto committed_frontier = settlement_store.load_frontier(
+                prepared->frontier.operation_key, prepared->frontier.operation_revision);
+            if (committed_frontier.status == ManagedSettlementFrontierLoadStatus::not_found)
+                return SourceValidation::missing;
+            if (committed_frontier.status == ManagedSettlementFrontierLoadStatus::io_error)
+                return SourceValidation::io_error;
+            if (committed_frontier.status != ManagedSettlementFrontierLoadStatus::found ||
+                !committed_frontier.record ||
+                !(*committed_frontier.record == prepared->frontier)) {
+                error = "managed staged allocation committed frontier mismatch";
+                return SourceValidation::invalid;
+            }
         }
 
         if (!prepared) {

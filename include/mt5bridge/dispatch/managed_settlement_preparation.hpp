@@ -126,6 +126,8 @@ struct ManagedSettlementPreparation {
             target_operation.operation_kind != OperationKind::close ||
             (target_operation.operation_state != OperationState::partially_filled &&
              target_operation.operation_state != OperationState::filled) ||
+            !target_operation.reconciliation_descriptor ||
+            target_operation.reconciliation_descriptor->requested_volume == 0 ||
             target_operation.settled_volume != frontier.settled_volume ||
             base_operation_revision == 0 ||
             target_operation.revision != base_operation_revision + 1 ||

@@ -302,6 +302,51 @@ void run_restart_regression() {
     const auto basis_root = root / "basis";
     const auto preparation_root = root / "preparation";
 
+    {
+        PreparedFixture late_partial_fixture;
+        auto late_partial_base = late_partial_fixture.data.base_operation;
+        late_partial_base.operation_state = mt5bridge::OperationState::partially_filled;
+        late_partial_base.settled_volume = 1;
+        require(late_partial_base.valid(), "late-partial base fixture is malformed");
+        late_partial_fixture.journal.records[late_partial_base.key] = late_partial_base;
+        mt5bridge::WindowsFileManagedSettlementPreparationStore late_partial_store(
+            root / "late-partial");
+        require(late_partial_store.prepare(
+                    late_partial_fixture.data.proof,
+                    late_partial_fixture.data.target_operation, 8,
+                    late_partial_fixture.staged, late_partial_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::prepared,
+                "valid incremental partial settlement was rejected");
+    }
+
+    {
+        PreparedFixture forged_fixture;
+        auto forged_target = forged_fixture.data.target_operation;
+        forged_target.request_payload.push_back(0x7f);
+        mt5bridge::WindowsFileManagedSettlementPreparationStore forged_store(
+            root / "forged-immutable-target");
+        require(forged_store.prepare(forged_fixture.data.proof, forged_target, 8,
+                                     forged_fixture.staged, forged_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::invalid_operation_record,
+                "preparation accepted a target with forged immutable payload");
+    }
+
+    {
+        PreparedFixture invalid_transition_fixture;
+        auto invalid_base = invalid_transition_fixture.data.base_operation;
+        invalid_base.operation_state = mt5bridge::OperationState::accepted;
+        require(invalid_base.valid(), "invalid-transition base fixture is malformed");
+        invalid_transition_fixture.journal.records[invalid_base.key] = invalid_base;
+        mt5bridge::WindowsFileManagedSettlementPreparationStore invalid_transition_store(
+            root / "invalid-transition");
+        require(invalid_transition_store.prepare(
+                    invalid_transition_fixture.data.proof,
+                    invalid_transition_fixture.data.target_operation, 8,
+                    invalid_transition_fixture.staged, invalid_transition_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::invalid_operation_record,
+                "preparation accepted an invalid lifecycle transition");
+    }
+
     mt5bridge::OperationRecord durable_base_operation;
     {
         PreparedFixture fixture;
@@ -395,6 +440,17 @@ void run_restart_regression() {
             "recovery mutated without an authoritative account lease");
 
     TestLease lease;
+    auto forged_preparation = recovered_preparation;
+    forged_preparation.target_operation.request_payload.push_back(0x7f);
+    require(forged_preparation.valid(), "forged preparation fixture is malformed");
+    require(restarted_preparation.finalize(
+                forged_preparation, restarted_journal, restarted_settlement, restarted_basis,
+                restarted_sources.envelope, restarted_sources.broker, restarted_allocation,
+                lease) == mt5bridge::ManagedSettlementFinalizeStatus::conflict,
+            "finalize accepted a preparation that differs from the durable manifest");
+    require(restarted_journal.records.at(durable_base_operation.key).revision == 8,
+            "manifest mismatch changed the journal before rejection");
+
     mt5bridge::WindowsFileManagedSettlementPreparationStore missing_preparation(
         root / "missing-preparation");
     require(restarted_allocation.commit_staged(

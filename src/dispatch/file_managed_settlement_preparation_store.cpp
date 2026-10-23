@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <mt5bridge/dispatch/file_managed_settlement_preparation_store.hpp>
+#include <mt5bridge/dispatch/journal.hpp>
 
 #include "file_store_support.hpp"
 
@@ -29,6 +30,40 @@ constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
 constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
 
 using namespace file_store_support;
+
+/// \brief Validates the journal state transition sealed by a preparation.
+/// \param base Current durable operation record.
+/// \param target Prepared next operation record.
+/// \param base_revision Revision expected by the compare-and-commit.
+/// \return True only when the target is the exact next legal settlement state.
+bool valid_managed_settlement_transition(const OperationRecord &base,
+                                         const OperationRecord &target,
+                                         std::uint64_t base_revision) {
+    if (!base.valid() || !target.valid() || !base.key.valid() ||
+        base.key != target.key || base.revision != base_revision || base_revision == 0 ||
+        base_revision == (std::numeric_limits<std::uint64_t>::max)() ||
+        target.revision != base_revision + 1 || base.operation_kind != target.operation_kind ||
+        base.request_payload != target.request_payload ||
+        base.result_payload != target.result_payload ||
+        base.journal_state != target.journal_state ||
+        base.fencing_token != target.fencing_token ||
+        !managed_settlement_preparation_detail::same_descriptor(
+            base.reconciliation_descriptor, target.reconciliation_descriptor) ||
+        base.reconciliation_bindings.size() != target.reconciliation_bindings.size() ||
+        !std::equal(base.reconciliation_bindings.begin(), base.reconciliation_bindings.end(),
+                    target.reconciliation_bindings.begin(),
+                    [](const auto &left, const auto &right) { return left == right; }) ||
+        target.settled_volume < base.settled_volume || target.settled_volume == 0)
+        return false;
+
+    const bool late_partial_settlement =
+        base.operation_state == OperationState::partially_filled &&
+        target.operation_state == OperationState::partially_filled &&
+        target.settled_volume > base.settled_volume;
+    return OperationJournal::can_transition_operation(base.operation_state,
+                                                      target.operation_state) ||
+           late_partial_settlement;
+}
 
 void append_managed_provenance(std::vector<std::uint8_t> &bytes,
                                const ManagedSettlementProvenance &value) {
@@ -593,6 +628,9 @@ WindowsFileManagedSettlementPreparationStore::prepare(
     if (base.status != StoreLoadStatus::found || !base.record ||
         !base.record->valid() || base.record->revision != base_operation_revision)
         return ManagedSettlementPreparationStatus::invalid_operation_record;
+    if (!valid_managed_settlement_transition(*base.record, target_operation,
+                                             base_operation_revision))
+        return ManagedSettlementPreparationStatus::invalid_operation_record;
     ManagedSettlementPreparation preparation{proof.fact(), proof.frontier(), target_operation,
                                              base_operation_revision, staged_ownership};
     if (!preparation.valid())
@@ -698,6 +736,18 @@ WindowsFileManagedSettlementPreparationStore::finalize(
 #if defined(_WIN32)
     if (!preparation.valid())
         return ManagedSettlementFinalizeStatus::invalid_record;
+    const auto durable_preparation = load(preparation.target_operation.key,
+                                          preparation.target_operation.revision,
+                                          preparation.fact.key.deal_ticket);
+    if (durable_preparation.status == ManagedSettlementPreparationLoadStatus::io_error)
+        return ManagedSettlementFinalizeStatus::io_error;
+    if (durable_preparation.status == ManagedSettlementPreparationLoadStatus::not_found)
+        return ManagedSettlementFinalizeStatus::invalid_record;
+    if (durable_preparation.status != ManagedSettlementPreparationLoadStatus::found ||
+        !durable_preparation.record || !(*durable_preparation.record == preparation))
+        return durable_preparation.status == ManagedSettlementPreparationLoadStatus::found
+                   ? ManagedSettlementFinalizeStatus::conflict
+                   : ManagedSettlementFinalizeStatus::invalid_record;
     const auto initial_token = lease.held_fencing_token(preparation.fact.key.account);
     if (!initial_token || *initial_token == 0)
         return ManagedSettlementFinalizeStatus::lease_not_held;
@@ -760,6 +810,10 @@ WindowsFileManagedSettlementPreparationStore::finalize(
     if (current.status != StoreLoadStatus::found || !current.record)
         return ManagedSettlementFinalizeStatus::invalid_operation_record;
     if (current.record->revision == preparation.base_operation_revision) {
+        if (!valid_managed_settlement_transition(
+                *current.record, preparation.target_operation,
+                preparation.base_operation_revision))
+            return ManagedSettlementFinalizeStatus::invalid_operation_record;
         StoreCommitStatus commit_status = StoreCommitStatus::io_error;
         const bool capability_held = lease.with_fencing_capability(
             preparation.fact.key.account, *initial_token, [&]() {

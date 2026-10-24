@@ -55,6 +55,7 @@ inline bool same_descriptor(const std::optional<ReconciliationDescriptor> &left,
 
 inline bool same_operation(const OperationRecord &left, const OperationRecord &right) {
     return left.key == right.key && left.operation_kind == right.operation_kind &&
+           left.settlement_mode == right.settlement_mode &&
            left.request_payload == right.request_payload &&
            left.result_payload == right.result_payload &&
            left.operation_state == right.operation_state &&

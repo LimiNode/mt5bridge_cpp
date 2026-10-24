@@ -228,6 +228,11 @@ fail-closed until a sealed authoritative managed-delta proof binds the managed
 intent to the broker close leg. Exact allocation replay is compared with the
 durable journal during restart, so an interrupted publication can be completed
 without applying one broker deal twice.
+The C1 implementation persists an immutable `ManagedSettlementMode` in new
+journal and preparation formats; old formats remain `legacy`, and an
+`allocation_gated` CLOSE without allocation-backed evidence fails closed rather
+than entering the legacy recovery path. Authoritative INOUT proof and owner
+exposure wiring remain later slices.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

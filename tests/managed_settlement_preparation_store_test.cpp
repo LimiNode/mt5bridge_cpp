@@ -19,6 +19,7 @@
 #include <functional>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -483,6 +484,140 @@ void write_v2_allocation_fixture(const std::filesystem::path &directory,
     require(output.good(), "allocation fixture could not be written");
 }
 
+std::uint32_t read_u32_fixture(const std::vector<std::uint8_t> &bytes,
+                               std::size_t offset) {
+    require(offset + sizeof(std::uint32_t) <= bytes.size(),
+            "preparation fixture u32 is truncated");
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
+
+void write_u32_fixture(std::vector<std::uint8_t> &bytes, std::size_t offset,
+                       std::uint32_t value) {
+    require(offset + sizeof(std::uint32_t) <= bytes.size(),
+            "preparation fixture u32 does not fit");
+    for (unsigned shift = 0; shift != 32; shift += 8)
+        bytes[offset + shift / 8] = static_cast<std::uint8_t>(value >> shift);
+}
+
+void write_u64_fixture(std::vector<std::uint8_t> &bytes, std::size_t offset,
+                       std::uint64_t value) {
+    require(offset + sizeof(std::uint64_t) <= bytes.size(),
+            "preparation fixture checksum does not fit");
+    for (unsigned shift = 0; shift != 64; shift += 8)
+        bytes[offset + shift / 8] = static_cast<std::uint8_t>(value >> shift);
+}
+
+void skip_string_fixture(const std::vector<std::uint8_t> &bytes,
+                         std::size_t &offset) {
+    const auto size = read_u32_fixture(bytes, offset);
+    offset += sizeof(std::uint32_t) + size;
+    require(offset <= bytes.size(), "preparation fixture string is truncated");
+}
+
+void skip_payload_fixture(const std::vector<std::uint8_t> &bytes,
+                          std::size_t &offset) {
+    skip_string_fixture(bytes, offset);
+}
+
+void skip_u64_fixture(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
+                      std::size_t count) {
+    require(count <= (std::numeric_limits<std::size_t>::max)() / sizeof(std::uint64_t) &&
+                offset + count * sizeof(std::uint64_t) <= bytes.size(),
+            "preparation fixture u64 fields are truncated");
+    offset += count * sizeof(std::uint64_t);
+}
+
+std::size_t target_mode_offset(const std::vector<std::uint8_t> &bytes) {
+    require(bytes.size() >= 28, "preparation fixture envelope is truncated");
+    std::size_t offset = 28;
+    skip_string_fixture(bytes, offset);
+    skip_string_fixture(bytes, offset);
+    skip_u64_fixture(bytes, offset, 11); // fact identities, volume, provenance
+    skip_string_fixture(bytes, offset);
+    skip_string_fixture(bytes, offset);
+    skip_u64_fixture(bytes, offset, 10); // frontier identities and provenance
+    const auto frontier_entries = read_u32_fixture(bytes, offset);
+    offset += sizeof(std::uint32_t);
+    skip_u64_fixture(bytes, offset, static_cast<std::size_t>(frontier_entries) * 3);
+    skip_u64_fixture(bytes, offset, 1); // base operation revision
+    skip_string_fixture(bytes, offset);
+    skip_u64_fixture(bytes, offset, 1); // staged account login
+    skip_string_fixture(bytes, offset);
+    skip_u64_fixture(bytes, offset, 2); // broker account login and deal ticket
+    skip_string_fixture(bytes, offset);
+    skip_u64_fixture(bytes, offset, 13); // staged operation, provenance, revisions
+    skip_string_fixture(bytes, offset);
+    skip_payload_fixture(bytes, offset);
+    skip_payload_fixture(bytes, offset);
+    skip_u64_fixture(bytes, offset, 3); // operation identity
+    require(offset + sizeof(std::uint32_t) * 2 <= bytes.size(),
+            "preparation operation mode is truncated");
+    offset += sizeof(std::uint32_t); // operation kind
+    return offset;
+}
+
+std::filesystem::path preparation_path_fixture(
+    const std::filesystem::path &directory,
+    const mt5bridge::ManagedSettlementPreparation &preparation) {
+    const auto &key = preparation.frontier.operation_key;
+    const auto name =
+        "prepared-" +
+        mt5bridge::file_store_support::hex_u64(
+            mt5bridge::file_store_support::fnv1a(key.account.server)) +
+        "-" + mt5bridge::file_store_support::hex_u64(key.account.login) +
+        "-" + mt5bridge::file_store_support::hex_u64(key.trade_id) + "-" +
+        mt5bridge::file_store_support::hex_u64(key.operation_id) + "-" +
+        mt5bridge::file_store_support::hex_u64(preparation.frontier.operation_revision) +
+        "-" + mt5bridge::file_store_support::hex_u64(preparation.fact.key.deal_ticket) +
+        ".bin";
+    return directory / name;
+}
+
+std::vector<std::uint8_t> read_fixture_bytes(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    require(input.good(), "preparation fixture could not be opened");
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void write_fixture_bytes(const std::filesystem::path &path,
+                         const std::vector<std::uint8_t> &bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    require(output.good(), "preparation fixture could not be written");
+    output.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(output.good(), "preparation fixture write failed");
+}
+
+void rewrite_preparation_header(std::vector<std::uint8_t> &bytes,
+                                std::uint32_t version) {
+    require(bytes.size() >= 28, "preparation fixture header is truncated");
+    const std::vector<std::uint8_t> body(bytes.begin() + 28, bytes.end());
+    write_u32_fixture(bytes, 8, version);
+    write_u64_fixture(bytes, 12, static_cast<std::uint64_t>(body.size()));
+    write_u64_fixture(bytes, 20, mt5bridge::file_store_support::checksum(body));
+}
+
+std::vector<std::uint8_t> legacy_preparation_fixture(
+    const std::vector<std::uint8_t> &v2_bytes) {
+    const auto mode = target_mode_offset(v2_bytes);
+    auto legacy = v2_bytes;
+    legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(mode),
+                 legacy.begin() + static_cast<std::ptrdiff_t>(mode + 4));
+    rewrite_preparation_header(legacy, 1);
+    return legacy;
+}
+
+std::vector<std::uint8_t> corrupt_preparation_mode(
+    const std::vector<std::uint8_t> &v2_bytes) {
+    auto corrupt = v2_bytes;
+    write_u32_fixture(corrupt, target_mode_offset(corrupt), 99);
+    rewrite_preparation_header(corrupt, 2);
+    return corrupt;
+}
+
 struct DurableSources {
     MemoryBrokerStore broker;
     MemoryEnvelopeStore envelope;
@@ -601,6 +736,101 @@ void run_restart_regression() {
                     late_partial_fixture.staged, late_partial_fixture.journal) ==
                     mt5bridge::ManagedSettlementPreparationStatus::prepared,
                 "valid incremental partial settlement was rejected");
+    }
+
+    {
+        PreparedFixture gated_fixture;
+        gated_fixture.data.base_operation.settlement_mode =
+            mt5bridge::ManagedSettlementMode::allocation_gated;
+        gated_fixture.data.target_operation.settlement_mode =
+            mt5bridge::ManagedSettlementMode::allocation_gated;
+        require(gated_fixture.data.base_operation.valid() &&
+                    gated_fixture.data.target_operation.valid(),
+                "allocation-gated preparation fixture is malformed");
+        gated_fixture.journal.records[gated_fixture.data.base_operation.key] =
+            gated_fixture.data.base_operation;
+        const auto gated_root = root / "gated-mode";
+        mt5bridge::WindowsFileManagedSettlementPreparationStore gated_store(gated_root);
+        require(gated_store.prepare(
+                    gated_fixture.data.proof, gated_fixture.data.target_operation, 8,
+                    gated_fixture.staged, gated_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::prepared,
+                "allocation-gated preparation was not published");
+        const auto gated_scan = gated_store.scan();
+        require(gated_scan.complete() && gated_scan.records.size() == 1 &&
+                    gated_scan.records.front().target_operation.settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::allocation_gated,
+                "allocation-gated preparation mode did not survive restart scan");
+    }
+
+    {
+        PreparedFixture compatibility_fixture;
+        const auto compatibility_root = root / "format-compatibility";
+        mt5bridge::WindowsFileManagedSettlementPreparationStore writer(
+            compatibility_root);
+        require(writer.prepare(compatibility_fixture.data.proof,
+                               compatibility_fixture.data.target_operation, 8,
+                               compatibility_fixture.staged,
+                               compatibility_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::prepared,
+                "compatibility preparation was not published");
+        const auto path = preparation_path_fixture(
+            compatibility_root,
+            mt5bridge::ManagedSettlementPreparation{
+                compatibility_fixture.data.proof.fact(),
+                compatibility_fixture.data.proof.frontier(),
+                compatibility_fixture.data.target_operation, 8,
+                compatibility_fixture.staged});
+        const auto v2_bytes = read_fixture_bytes(path);
+        write_fixture_bytes(path, legacy_preparation_fixture(v2_bytes));
+        mt5bridge::WindowsFileManagedSettlementPreparationStore legacy_reader(
+            compatibility_root);
+        const auto legacy_loaded = legacy_reader.load(
+            compatibility_fixture.data.target_operation.key,
+            compatibility_fixture.data.target_operation.revision,
+            compatibility_fixture.data.proof.fact().key.deal_ticket);
+        require(legacy_loaded.status ==
+                    mt5bridge::ManagedSettlementPreparationLoadStatus::found &&
+                    legacy_loaded.record &&
+                    legacy_loaded.record->target_operation.settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::legacy,
+                "real v1 preparation fixture was not decoded as legacy");
+        const auto legacy_scan = legacy_reader.scan();
+        require(legacy_scan.complete() && legacy_scan.records.size() == 1 &&
+                    legacy_scan.records.front().target_operation.settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::legacy,
+                "real v1 preparation fixture failed restart scan");
+
+        write_fixture_bytes(path, corrupt_preparation_mode(v2_bytes));
+        mt5bridge::WindowsFileManagedSettlementPreparationStore corrupt_reader(
+            compatibility_root);
+        require(corrupt_reader.load(
+                    compatibility_fixture.data.target_operation.key,
+                    compatibility_fixture.data.target_operation.revision,
+                    compatibility_fixture.data.proof.fact().key.deal_ticket)
+                        .status ==
+                    mt5bridge::ManagedSettlementPreparationLoadStatus::invalid_record &&
+                    corrupt_reader.scan().status ==
+                        mt5bridge::ManagedSettlementPreparationScanStatus::invalid_record,
+                "unknown preparation mode was not rejected fail-closed");
+    }
+
+    {
+        PreparedFixture mismatch_fixture;
+        auto mismatched_target = mismatch_fixture.data.target_operation;
+        mismatched_target.settlement_mode =
+            mt5bridge::ManagedSettlementMode::allocation_gated;
+        require(mismatched_target.valid(), "mode mismatch target fixture is malformed");
+        const auto mismatch_root = root / "mode-mismatch";
+        mt5bridge::WindowsFileManagedSettlementPreparationStore mismatch_store(
+            mismatch_root);
+        require(mismatch_store.prepare(
+                    mismatch_fixture.data.proof, mismatched_target, 8,
+                    mismatch_fixture.staged, mismatch_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::invalid_operation_record,
+                "preparation accepted a base/target mode mismatch");
+        require(mismatch_store.scan().complete() && mismatch_store.scan().records.empty(),
+                "mode mismatch wrote a preparation manifest");
     }
 
     {

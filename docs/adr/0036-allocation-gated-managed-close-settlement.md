@@ -51,6 +51,21 @@ The first owner integration supports only an explicitly allocation-gated
 `broker_reverse_open_leg`, `INOUT` opening ownership, FIFO/LIFO/pro-rata
 selection, and cross-operation policy remain outside this slice.
 
+### Implementation staging
+
+Stage B implements the durable preparation/finalization protocol and its
+restart validation. Stage C1 adds the immutable `ManagedSettlementMode`
+discriminator to the operation journal and `MT5PRP01` preparation receipt:
+`legacy` preserves the existing journal-only recovery contract, while
+`allocation_gated` is legal only for a CLOSE operation and requires the
+allocation-backed evidence described below. Existing journal versions 1--4
+and preparation version 1 decode as `legacy`; unknown or malformed mode values
+fail closed, and compare-and-commit cannot change the mode. The legacy owner
+recovery path never interprets a gated CLOSE as legacy. Stage C2 will add the
+authoritative INOUT close proof, and Stage C3 will connect gated publication to
+the owner/reconciliation loop and exposure mutation. Those later stages are
+not part of this implementation slice.
+
 ### Close settlement publication protocol
 
 For one fresh reconciliation cycle, the account writer first loads the durable

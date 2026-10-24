@@ -31,6 +31,13 @@ enum class OperationKind : std::uint32_t {
     cancel = 3,      ///< Cancellation of an outstanding broker-side remainder.
 };
 
+/// \enum ManagedSettlementMode
+/// \brief Selects the durable recovery contract for managed settlement.
+enum class ManagedSettlementMode : std::uint32_t {
+    legacy = 0,          ///< Existing journal-only settlement semantics.
+    allocation_gated = 1, ///< Settlement requires allocation-backed evidence.
+};
+
 /// \enum OperationState
 /// \brief Durable lifecycle state of one managed operation.
 enum class OperationState {
@@ -219,6 +226,24 @@ constexpr bool valid_operation_kind(OperationKind kind) {
            kind == OperationKind::close || kind == OperationKind::cancel;
 }
 
+/// \brief Tests whether a value is a defined managed settlement mode.
+/// \param mode Candidate mode, possibly recovered from storage.
+/// \return True only for known mode values.
+constexpr bool valid_managed_settlement_mode(ManagedSettlementMode mode) {
+    return mode == ManagedSettlementMode::legacy ||
+           mode == ManagedSettlementMode::allocation_gated;
+}
+
+/// \brief Tests whether a mode is legal for an operation kind.
+/// \param kind Durable operation kind.
+/// \param mode Durable settlement mode.
+/// \return True when the mode and operation semantics are compatible.
+constexpr bool valid_managed_settlement_mode_for_operation(
+    OperationKind kind, ManagedSettlementMode mode) {
+    return valid_managed_settlement_mode(mode) &&
+           (mode == ManagedSettlementMode::legacy || kind == OperationKind::close);
+}
+
 /// \brief Tests whether a value is a defined write-ahead journal state.
 /// \param state Candidate journal state, possibly recovered from storage.
 /// \return True only for a known enumerator.
@@ -313,6 +338,8 @@ struct OperationKey {
 struct OperationRecord {
     OperationKey key; ///< Immutable account and managed-operation identity.
     OperationKind operation_kind = OperationKind::unspecified; ///< Durable side-effect kind.
+    ManagedSettlementMode settlement_mode = ManagedSettlementMode::legacy;
+    ///< Immutable recovery discriminator; old records decode as `legacy`.
     std::vector<std::uint8_t> request_payload; ///< Exact opaque request bytes.
     std::vector<std::uint8_t> result_payload; ///< Opaque backend result, when persisted.
     OperationState operation_state = OperationState::queued; ///< Managed lifecycle state.
@@ -329,6 +356,7 @@ struct OperationRecord {
     /// \return True when identity, payload, state pair, revision, and fencing agree.
     bool valid() const {
         if (!key.valid() || !valid_operation_kind(operation_kind) ||
+            !valid_managed_settlement_mode_for_operation(operation_kind, settlement_mode) ||
             request_payload.empty() || revision == 0 ||
             !valid_operation_state(operation_state) || !valid_journal_state(journal_state))
             return false;

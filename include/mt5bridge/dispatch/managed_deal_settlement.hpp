@@ -5,10 +5,12 @@
 
 #include "journal_store.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -19,6 +21,7 @@ class ManagedDealSettlementProducer;
 }
 
 class WindowsFileManagedDealSettlementStore;
+class WindowsFileManagedSettlementPreparationStore;
 
 /// \struct ManagedSettlementProvenance
 /// \brief Identifies the observation proof that established one settlement fact.
@@ -179,6 +182,55 @@ struct ManagedSettlementFrontier {
     }
 };
 
+/// \brief Computes the canonical digest of a complete settlement frontier.
+/// \param frontier Complete frontier whose durable identity is hashed.
+/// \return Non-zero deterministic digest, or zero for an invalid frontier.
+inline std::uint64_t managed_settlement_frontier_digest(
+    const ManagedSettlementFrontier &frontier) {
+    if (!frontier.valid())
+        return 0;
+    std::vector<ManagedSettlementFrontierEntry> entries = frontier.entries;
+    std::sort(entries.begin(), entries.end(),
+              [](const auto &left, const auto &right) {
+                  if (left.deal_ticket != right.deal_ticket)
+                      return left.deal_ticket < right.deal_ticket;
+                  if (left.source_operation_revision != right.source_operation_revision)
+                      return left.source_operation_revision <
+                             right.source_operation_revision;
+                  return left.managed_logical_units < right.managed_logical_units;
+              });
+    std::uint64_t digest = 1469598103934665603ULL;
+    const auto mix = [&digest](std::uint64_t value) {
+        for (unsigned shift = 0; shift != 64; shift += 8) {
+            digest ^= static_cast<std::uint8_t>(value >> shift);
+            digest *= 1099511628211ULL;
+        }
+    };
+    const auto mix_string = [&mix](const std::string &value) {
+        mix(static_cast<std::uint64_t>(value.size()));
+        for (const unsigned char byte : value)
+            mix(byte);
+    };
+    mix_string("mt5bridge-managed-settlement-frontier-v1");
+    mix_string(frontier.account.server);
+    mix(frontier.account.login);
+    mix(frontier.operation_key.trade_id);
+    mix(frontier.operation_key.operation_id);
+    mix(frontier.operation_revision);
+    mix(frontier.settled_volume);
+    mix(frontier.provenance.graph_instance_id);
+    mix(frontier.provenance.graph_revision);
+    mix(frontier.provenance.history_deals_revision);
+    mix(frontier.provenance.evidence_digest);
+    mix(static_cast<std::uint64_t>(entries.size()));
+    for (const auto &entry : entries) {
+        mix(entry.deal_ticket);
+        mix(entry.source_operation_revision);
+        mix(entry.managed_logical_units);
+    }
+    return digest == 0 ? 1 : digest;
+}
+
 /// \class ManagedDealSettlementCommit
 /// \brief Sealed producer output accepted by the durable settlement store.
 class ManagedDealSettlementCommit {
@@ -200,6 +252,7 @@ private:
     ManagedSettlementFrontier frontier_;
     friend class dispatch::ManagedDealSettlementProducer;
     friend class WindowsFileManagedDealSettlementStore;
+    friend class WindowsFileManagedSettlementPreparationStore;
 };
 
 /// \enum ManagedDealSettlementCommitStatus
@@ -233,6 +286,24 @@ struct ManagedDealSettlementLoadResult {
     }
 };
 
+/// \enum ManagedSettlementFrontierLoadStatus
+/// \brief Reports lookup state for one complete settlement frontier.
+enum class ManagedSettlementFrontierLoadStatus { found, not_found, invalid_record, io_error };
+
+/// \struct ManagedSettlementFrontierLoadResult
+/// \brief Carries a status-bearing complete frontier lookup.
+struct ManagedSettlementFrontierLoadResult {
+    ManagedSettlementFrontierLoadStatus status =
+        ManagedSettlementFrontierLoadStatus::io_error;
+    std::optional<ManagedSettlementFrontier> record;
+
+    /// \brief Tests whether a valid frontier was loaded.
+    /// \return True only when status is `found` with a frontier.
+    bool found() const {
+        return status == ManagedSettlementFrontierLoadStatus::found && record.has_value();
+    }
+};
+
 /// \class DurableManagedDealSettlementStore
 /// \brief Durable seam for immutable per-deal facts and cumulative frontiers.
 class DurableManagedDealSettlementStore {
@@ -253,6 +324,13 @@ public:
     ///         pending publication manifest is reported as `not_found`.
     virtual ManagedDealSettlementLoadResult load(
         const ManagedDealSettlementKey &key) const = 0;
+
+    /// \brief Loads and validates one complete committed frontier.
+    /// \param operation_key Operation identity addressed by the frontier.
+    /// \param operation_revision Exact frontier revision.
+    /// \return Status-bearing frontier result.
+    virtual ManagedSettlementFrontierLoadResult load_frontier(
+        const OperationKey &operation_key, std::uint64_t operation_revision) const = 0;
 };
 
 } // namespace mt5bridge

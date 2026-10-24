@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -123,6 +125,11 @@ public:
                    : mt5bridge::ManagedDealSettlementLoadResult{
                          mt5bridge::ManagedDealSettlementLoadStatus::found,
                          found->second};
+    }
+
+    mt5bridge::ManagedSettlementFrontierLoadResult load_frontier(
+        const mt5bridge::OperationKey &, std::uint64_t) const override {
+        return {mt5bridge::ManagedSettlementFrontierLoadStatus::not_found, std::nullopt};
     }
 
     std::map<mt5bridge::ManagedDealSettlementKey,
@@ -328,6 +335,135 @@ mt5bridge::ManagedAllocationCommitStatus commit(
                         fixture.envelope_store, lease);
 }
 
+void legacy_append_u32(std::vector<std::uint8_t> &bytes, std::uint32_t value) {
+    for (unsigned shift = 0; shift != 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void legacy_append_u64(std::vector<std::uint8_t> &bytes, std::uint64_t value) {
+    for (unsigned shift = 0; shift != 64; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void legacy_append_string(std::vector<std::uint8_t> &bytes, const std::string &value) {
+    legacy_append_u32(bytes, static_cast<std::uint32_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+std::uint64_t legacy_hash(const std::string &value) {
+    std::uint64_t result = 1469598103934665603ULL;
+    for (const unsigned char byte : value) {
+        result ^= byte;
+        result *= 1099511628211ULL;
+    }
+    return result;
+}
+
+std::string legacy_hex(std::uint64_t value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result(16, '0');
+    for (std::size_t index = 0; index != result.size(); ++index)
+        result[result.size() - 1 - index] = digits[(value >> (index * 4)) & 0xf];
+    return result;
+}
+
+std::uint64_t legacy_checksum(const std::vector<std::uint8_t> &bytes) {
+    std::uint64_t result = 1469598103934665603ULL;
+    for (const std::uint8_t byte : bytes) {
+        result ^= byte;
+        result *= 1099511628211ULL;
+    }
+    return result;
+}
+
+std::vector<std::uint8_t> legacy_v1_record(const mt5bridge::ManagedAllocationEntry &record) {
+    std::vector<std::uint8_t> body;
+    legacy_append_string(body, record.account.server);
+    legacy_append_string(body, record.allocation_key.broker_key.account.server);
+    legacy_append_string(body, record.allocation_key.managed_key.account.server);
+    legacy_append_string(body,
+                         record.allocation_key.managed_key.operation_key.account.server);
+    legacy_append_u64(body, record.account.login);
+    legacy_append_u64(body, record.allocation_key.broker_key.account.login);
+    legacy_append_u64(body, record.allocation_key.broker_key.deal_ticket);
+    legacy_append_u64(body, record.allocation_key.managed_key.account.login);
+    legacy_append_u64(body, record.allocation_key.managed_key.operation_key.account.login);
+    legacy_append_u64(body, record.allocation_key.managed_key.operation_key.trade_id);
+    legacy_append_u64(body, record.allocation_key.managed_key.operation_key.operation_id);
+    legacy_append_u64(body, record.allocation_key.managed_key.deal_ticket);
+    legacy_append_u32(body, static_cast<std::uint32_t>(record.allocation_key.leg));
+    legacy_append_u64(body, record.settlement_provenance.graph_instance_id);
+    legacy_append_u64(body, record.settlement_provenance.graph_revision);
+    legacy_append_u64(body, record.settlement_provenance.history_deals_revision);
+    legacy_append_u64(body, record.settlement_provenance.evidence_digest);
+    legacy_append_u64(body, record.broker_provenance.graph_instance_id);
+    legacy_append_u64(body, record.broker_provenance.pre_graph_revision);
+    legacy_append_u64(body, record.broker_provenance.post_graph_revision);
+    legacy_append_u64(body, record.broker_provenance.pre_positions_revision);
+    legacy_append_u64(body, record.broker_provenance.post_positions_revision);
+    legacy_append_u64(body, record.broker_provenance.history_deals_revision);
+    legacy_append_u64(body, record.broker_provenance.evidence_digest);
+    legacy_append_u64(body, record.settlement_source_operation_revision);
+    legacy_append_u64(body, record.basis_operation_revision);
+    legacy_append_u64(body, record.managed_logical_units);
+    legacy_append_u64(body, record.broker_volume.units);
+    legacy_append_u32(body, record.broker_volume.scale);
+    legacy_append_u64(body, record.broker_volume.step_units);
+
+    const std::array<char, 8> magic{{'M', 'T', '5', 'A', 'L', 'G', '0', '1'}};
+    std::vector<std::uint8_t> result(magic.begin(), magic.end());
+    legacy_append_u32(result, 1);
+    legacy_append_u64(result, static_cast<std::uint64_t>(body.size()));
+    legacy_append_u64(result, legacy_checksum(body));
+    result.insert(result.end(), body.begin(), body.end());
+    return result;
+}
+
+std::filesystem::path legacy_record_path(
+    const std::filesystem::path &directory, const mt5bridge::ManagedAllocationKey &key) {
+    return directory /
+           ("alloc-" + legacy_hex(legacy_hash(key.broker_key.account.server)) + "-" +
+            legacy_hex(key.broker_key.account.login) + "-" +
+            legacy_hex(key.broker_key.deal_ticket) + "-" +
+            legacy_hex(key.managed_key.operation_key.trade_id) + "-" +
+            legacy_hex(key.managed_key.operation_key.operation_id) + "-" +
+            legacy_hex(key.managed_key.deal_ticket) + "-" +
+            legacy_hex(static_cast<std::uint32_t>(key.leg)) + ".bin");
+}
+
+void check_legacy_v1_compatibility() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("mt5bridge_managed_allocation_v1_" +
+                       std::to_string(std::chrono::steady_clock::now()
+                                          .time_since_epoch()
+                                          .count()));
+    std::filesystem::remove_all(root);
+    Fixture fixture;
+    fixture.finalize_sources();
+    const auto mapping = fixture.add_source(81, 9);
+    const auto entry = entry_for(mapping);
+    mt5bridge::WindowsFileManagedAllocationStore store(root);
+    require(store.ready(), "legacy allocation store did not open");
+    const auto bytes = legacy_v1_record(entry);
+    std::ofstream output(legacy_record_path(root, entry.allocation_key),
+                         std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(output.good(), "legacy allocation fixture could not be written");
+    output.close();
+
+    const auto loaded = store.load(entry.allocation_key);
+    require(loaded.found() && loaded.record && *loaded.record == entry &&
+                !loaded.record->settlement_frontier_digest &&
+                loaded.record->settlement_frontier_revision == 0,
+            "legacy v1 allocation was not conservatively decoded");
+    const auto scan = store.scan(fixture.settlement, fixture.broker_store,
+                                 fixture.basis, fixture.envelope_store);
+    require(scan.complete() && scan.records.size() == 1,
+            "legacy v1 allocation did not survive historical scan");
+    std::filesystem::remove_all(root);
+}
+
 void run_regressions() {
     const auto root = std::filesystem::temp_directory_path() /
                       ("mt5bridge_managed_allocation_" +
@@ -448,6 +584,7 @@ void run_regressions() {
 
 int main() {
     try {
+        check_legacy_v1_compatibility();
         run_regressions();
     } catch (const std::exception &error) {
         return (std::cerr << error.what() << '\n', 1);

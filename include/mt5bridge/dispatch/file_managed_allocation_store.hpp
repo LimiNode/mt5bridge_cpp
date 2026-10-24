@@ -35,6 +35,19 @@ public:
         const DurableBrokerAllocationStore &envelope_store,
         const SingleWriterLease &lease) override;
 
+    /// \brief Commits an allocation for an exact staged settlement recipe.
+    ManagedAllocationCommitStatus commit_staged(
+        const ManagedAllocationEntry &entry,
+        const ManagedBrokerVolumeMapping &mapping,
+        const ManagedSettlementPreparation &preparation,
+        const DurableManagedSettlementPreparationStore &preparation_store,
+        const DurableJournalStore &journal_store,
+        const DurableManagedDealSettlementStore &settlement_store,
+        const DurableBrokerReversalStore &broker_store,
+        const DurableManagedOwnershipBasisStore &basis_store,
+        const DurableBrokerAllocationStore &envelope_store,
+        const SingleWriterLease &lease) override;
+
     /// \brief Loads one entry by exact composite identity.
     ManagedAllocationLoadResult load(const ManagedAllocationKey &key) const override;
 
@@ -44,6 +57,20 @@ public:
         const DurableBrokerReversalStore &broker_store,
         const DurableManagedOwnershipBasisStore &basis_store,
         const DurableBrokerAllocationStore &envelope_store) const override;
+
+    /// \brief Scans committed and exact prepared-backed entries for recovery.
+    /// \param settlement_store Durable committed settlement source.
+    /// \param broker_store Durable broker reversal source.
+    /// \param basis_store Durable ownership-basis source.
+    /// \param envelope_store Durable broker envelope source.
+    /// \param preparation_store Durable exact staged preparation source.
+    /// \return Complete recovery scan, or an all-or-nothing failure.
+    ManagedAllocationScanResult scan_recovery(
+        const DurableManagedDealSettlementStore &settlement_store,
+        const DurableBrokerReversalStore &broker_store,
+        const DurableManagedOwnershipBasisStore &basis_store,
+        const DurableBrokerAllocationStore &envelope_store,
+        const DurableManagedSettlementPreparationStore &preparation_store) const override;
 
     /// \brief Tests whether the directory was opened successfully.
     /// \return True when the store can acquire its namespace lock.

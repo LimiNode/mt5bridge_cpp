@@ -1,7 +1,7 @@
-/// \file managed_inout_close_delta_proof_test.cpp
+/// \file managed_inout_close_delta_candidate_test.cpp
 /// \brief Exercises the private structural INOUT close candidate producer.
 
-#include "managed_inout_close_delta_proof.hpp"
+#include "managed_inout_close_delta_candidate.hpp"
 
 #include <mt5bridge/reconciliation/engine.hpp>
 
@@ -346,6 +346,42 @@ void rejects_staged_intent_mismatch() {
             "staged close-intent mismatch bypassed candidate boundary");
 }
 
+void rejects_close_intent_tampering() {
+    Fixture fixture;
+
+    auto changed_payload = fixture.operation_record;
+    changed_payload.request_payload.front() ^= 0xff;
+    require(changed_payload.valid(), "payload tamper fixture should remain valid");
+    require(!mt5bridge::dispatch::ManagedInoutCloseDeltaCandidateProducer::create(
+                  changed_payload, fixture.staged_ownership_record,
+                  fixture.reversal_record, *fixture.baseline, fixture.graph,
+                  fixture.pre_state, fixture.post_state)
+                  .has_value(),
+            "request payload tampering reused the old staged intent");
+
+    auto changed_descriptor = fixture.operation_record;
+    changed_descriptor.reconciliation_descriptor->predicates.front().history_window =
+        mt5bridge::ObservationWindow{1001, 2000};
+    require(changed_descriptor.valid(), "descriptor tamper fixture should remain valid");
+    require(!mt5bridge::dispatch::ManagedInoutCloseDeltaCandidateProducer::create(
+                  changed_descriptor, fixture.staged_ownership_record,
+                  fixture.reversal_record, *fixture.baseline, fixture.graph,
+                  fixture.pre_state, fixture.post_state)
+                  .has_value(),
+            "descriptor tampering reused the old staged intent");
+
+    auto changed_binding = fixture.operation_record;
+    changed_binding.reconciliation_descriptor->predicates.front().correlation_id = 9002;
+    changed_binding.reconciliation_bindings.front().correlation_id = 9002;
+    require(changed_binding.valid(), "binding tamper fixture should remain valid");
+    require(!mt5bridge::dispatch::ManagedInoutCloseDeltaCandidateProducer::create(
+                  changed_binding, fixture.staged_ownership_record,
+                  fixture.reversal_record, *fixture.baseline, fixture.graph,
+                  fixture.pre_state, fixture.post_state)
+                  .has_value(),
+            "binding tampering reused the old staged intent");
+}
+
 void rejects_non_inout_reversal() {
     Fixture fixture;
     auto non_inout = fixture.reversal_record;
@@ -368,6 +404,7 @@ int main() {
         rejects_stale_or_ambiguous_history();
         rejects_caller_selected_ticket_without_result_binding();
         rejects_staged_intent_mismatch();
+        rejects_close_intent_tampering();
         rejects_non_inout_reversal();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

@@ -218,6 +218,12 @@ history coverage, a zero-ticket predicate with exactly one non-zero correlation
 binding, a staged association with the exact close-intent digest, and durable
 broker reversal identity. Broker `broker_close_leg` remains reserved for later
 integer-domain mapping; broker volume is never copied into managed logical units.
+The close-intent digest uses a domain/version tag and canonical length-delimited
+encoding of the operation identity, request payload, complete immutable
+reconciliation descriptor (including baseline, predicates, optional windows and
+transitions), result-derived bindings, and bound deal ticket. A payload,
+descriptor, or binding change therefore conflicts with the retained staged
+association even when the operation key and requested volume are unchanged.
 
 `broker_reverse_open_leg` remains unallocated, and ambiguous position/order
 binding, stale observation, incomplete deal fields, competing same-position

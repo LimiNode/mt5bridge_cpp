@@ -179,15 +179,15 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::journal)
     add_test(NAME mt5bridge_managed_broker_volume_admission
              COMMAND mt5bridge_managed_broker_volume_admission_test)
-    add_executable(mt5bridge_managed_inout_close_delta_proof_test
-                   tests/managed_inout_close_delta_proof_test.cpp)
-    target_include_directories(mt5bridge_managed_inout_close_delta_proof_test PRIVATE
+    add_executable(mt5bridge_managed_inout_close_delta_candidate_test
+                   tests/managed_inout_close_delta_candidate_test.cpp)
+    target_include_directories(mt5bridge_managed_inout_close_delta_candidate_test PRIVATE
                                ${PROJECT_SOURCE_DIR}/src/dispatch
                                ${PROJECT_SOURCE_DIR}/src/trade)
-    target_link_libraries(mt5bridge_managed_inout_close_delta_proof_test PRIVATE
+    target_link_libraries(mt5bridge_managed_inout_close_delta_candidate_test PRIVATE
                           mt5bridge::client mt5bridge::managed_trade)
-    add_test(NAME mt5bridge_managed_inout_close_delta_proof
-             COMMAND mt5bridge_managed_inout_close_delta_proof_test)
+    add_test(NAME mt5bridge_managed_inout_close_delta_candidate
+             COMMAND mt5bridge_managed_inout_close_delta_candidate_test)
     add_executable(mt5bridge_managed_allocation_store_test
                    tests/managed_allocation_store_test.cpp)
     target_link_libraries(mt5bridge_managed_allocation_store_test PRIVATE

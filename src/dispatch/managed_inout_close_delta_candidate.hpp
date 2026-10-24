@@ -1,6 +1,6 @@
 #pragma once
 
-/// \file dispatch/managed_inout_close_delta_proof.hpp
+/// \file dispatch/managed_inout_close_delta_candidate.hpp
 /// \brief Defines the private structural candidate for one managed INOUT close.
 
 #include "managed_trade.hpp"
@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace mt5bridge::dispatch {
 
@@ -282,6 +283,74 @@ public:
         }
     }
 
+    /// \brief Adds a length-delimited byte vector to the canonical stream.
+    /// \param value Bytes to encode.
+    void add_bytes(const std::vector<std::uint8_t> &value) {
+        add_u64(static_cast<std::uint64_t>(value.size()));
+        for (const std::uint8_t byte : value) {
+            value_ ^= byte;
+            value_ *= 1099511628211ULL;
+        }
+    }
+
+    /// \brief Adds an account identity to the canonical stream.
+    /// \param account Account to encode.
+    void add_account(const AccountKey &account) {
+        add_text(account.server);
+        add_u64(account.login);
+    }
+
+    /// \brief Adds all durable baseline revisions to the canonical stream.
+    /// \param baseline Baseline to encode.
+    void add_baseline(const ReconciliationBaseline &baseline) {
+        add_account(baseline.account());
+        add_u64(baseline.graph_instance_id());
+        add_u64(baseline.graph_revision());
+        add_u64(baseline.active_orders_revision());
+        add_u64(baseline.positions_revision());
+        add_u64(baseline.history_orders_revision());
+        add_u64(baseline.history_deals_revision());
+    }
+
+    /// \brief Adds the complete immutable reconciliation descriptor.
+    /// \param descriptor Descriptor to encode, including optional fields.
+    void add_descriptor(const std::optional<ReconciliationDescriptor> &descriptor) {
+        add_u64(descriptor.has_value() ? 1 : 0);
+        if (!descriptor)
+            return;
+        add_account(descriptor->account);
+        add_baseline(descriptor->baseline);
+        add_u64(static_cast<std::uint64_t>(descriptor->predicates.size()));
+        for (const auto &predicate : descriptor->predicates) {
+            add_u64(static_cast<std::uint64_t>(predicate.kind));
+            add_u64(predicate.ticket);
+            add_u64(predicate.history_window.has_value() ? 1 : 0);
+            if (predicate.history_window) {
+                add_u64(predicate.history_window->from_msc);
+                add_u64(predicate.history_window->to_msc);
+            }
+            add_u64(predicate.baseline_present.has_value() ? 1 : 0);
+            if (predicate.baseline_present)
+                add_u64(*predicate.baseline_present ? 1 : 0);
+            add_u64(predicate.correlation_id);
+            add_u64(static_cast<std::uint64_t>(predicate.expected_transition));
+        }
+        add_u64(static_cast<std::uint64_t>(descriptor->settled_state));
+        add_u64(descriptor->trade_id);
+        add_u64(descriptor->operation_id);
+        add_u64(descriptor->requested_volume);
+    }
+
+    /// \brief Adds result-derived bindings in their durable order.
+    /// \param bindings Bindings to encode.
+    void add_bindings(const std::vector<ReconciliationBinding> &bindings) {
+        add_u64(static_cast<std::uint64_t>(bindings.size()));
+        for (const auto &binding : bindings) {
+            add_u64(binding.correlation_id);
+            add_u64(binding.broker_ticket);
+        }
+    }
+
     void add_frontier(const ManagedExposureFrontier &frontier) {
         add_text(frontier.account.server);
         add_u64(frontier.account.login);
@@ -320,14 +389,16 @@ inline std::uint64_t inout_candidate_close_intent_digest(
         operation.reconciliation_descriptor->requested_volume == 0 || deal_ticket == 0)
         return 0;
     InoutProofDigest digest;
-    digest.add_text("mt5bridge-managed-inout-close-intent-v1");
+    digest.add_text("mt5bridge-managed-inout-close-intent-v2");
     digest.add_text(operation.key.account.server);
     digest.add_u64(operation.key.account.login);
     digest.add_u64(operation.key.trade_id);
     digest.add_u64(operation.key.operation_id);
     digest.add_u64(static_cast<std::uint64_t>(operation.operation_kind));
     digest.add_u64(static_cast<std::uint64_t>(operation.settlement_mode));
-    digest.add_u64(operation.reconciliation_descriptor->requested_volume);
+    digest.add_bytes(operation.request_payload);
+    digest.add_descriptor(operation.reconciliation_descriptor);
+    digest.add_bindings(operation.reconciliation_bindings);
     digest.add_u64(deal_ticket);
     return digest.value();
 }

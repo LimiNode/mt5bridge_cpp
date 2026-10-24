@@ -406,6 +406,21 @@ int main() {
                     gated.record->settlement_mode ==
                         mt5bridge::ManagedSettlementMode::allocation_gated,
                 "allocation-gated journal mode did not survive round-trip");
+        mt5bridge::WindowsFileJournalStore mode_restarted(mode_directory);
+        const auto mode_scan = mode_restarted.scan();
+        require(mode_scan.complete() && mode_scan.records.size() == 1 &&
+                    mode_scan.records.front().settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::allocation_gated,
+                "allocation-gated journal mode did not survive a full restart scan");
+        require(!mode_journal
+                     .create(key(82, 83), {0x52}, mt5bridge::OperationKind::open,
+                             mt5bridge::ManagedSettlementMode::allocation_gated)
+                     .accepted() &&
+                    !mode_journal
+                         .create(key(84, 85), {0x53}, mt5bridge::OperationKind::cancel,
+                                 mt5bridge::ManagedSettlementMode::allocation_gated)
+                         .accepted(),
+                "allocation-gated mode was accepted for non-CLOSE operation");
         auto mode_mutation = *gated.record;
         mode_mutation.settlement_mode = mt5bridge::ManagedSettlementMode::legacy;
         ++mode_mutation.revision;

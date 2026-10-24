@@ -231,8 +231,10 @@ without applying one broker deal twice.
 The C1 implementation persists an immutable `ManagedSettlementMode` in new
 journal and preparation formats; old formats remain `legacy`, and an
 `allocation_gated` CLOSE without allocation-backed evidence fails closed rather
-than entering the legacy recovery path. Authoritative INOUT proof and owner
-exposure wiring remain later slices.
+than entering the legacy recovery path. Stage C2 now provides the private
+sealed `ManagedInoutCloseDeltaProofProducer`, which derives managed units only
+from validated owner pre/post exposure frontiers and fresh graph evidence;
+owner/reconciliation wiring and exposure mutation remain deferred to Stage C3.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

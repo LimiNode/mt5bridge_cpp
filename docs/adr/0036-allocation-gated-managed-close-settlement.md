@@ -61,10 +61,15 @@ discriminator to the operation journal and `MT5PRP01` preparation receipt:
 allocation-backed evidence described below. Existing journal versions 1--4
 and preparation version 1 decode as `legacy`; unknown or malformed mode values
 fail closed, and compare-and-commit cannot change the mode. The legacy owner
-recovery path never interprets a gated CLOSE as legacy. Stage C2 will add the
-authoritative INOUT close proof, and Stage C3 will connect gated publication to
-the owner/reconciliation loop and exposure mutation. Those later stages are
-not part of this implementation slice.
+recovery path never interprets a gated CLOSE as legacy. Stage C2 now provides a
+private sealed `ManagedInoutCloseDeltaProofProducer`: it derives the positive
+managed delta from owner-authoritative pre/post exposure frontiers and binds it
+to one fresh, complete INOUT history observation, the durable broker reversal,
+the durable ownership basis, and the exact close intent. It accepts neither a
+caller scalar nor broker volume, does not attribute the reverse-open leg, and
+does not publish settlement, allocation, journal state, or exposure. Stage C3
+will connect gated publication to the owner/reconciliation loop and exposure
+mutation.
 
 ### Close settlement publication protocol
 
@@ -325,7 +330,7 @@ The implementation slice must add focused regressions for:
 - successful close settlement proving that the committed allocation and the
   journal frontier agree before exposure mutation;
 - INOUT close-leg proof accepts only an authoritative managed delta and rejects
-  reverse-open or ambiguous ownership;
+  reverse-open attribution or ambiguous ownership;
 - staged ownership cannot be admitted through the ordinary settled-basis
   validator and is finalized only after the target journal CAS;
 - legacy close recovery remains separate from explicitly allocation-gated close

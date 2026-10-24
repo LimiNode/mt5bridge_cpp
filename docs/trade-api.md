@@ -677,8 +677,10 @@ reversals and CloseBy, respectively.
   close recovery, and the latter must fail closed without its allocation proof.
   New journal/preparation records carry an immutable `ManagedSettlementMode`;
   versions 1--4 of the journal and preparation version 1 decode as `legacy`,
-  while unknown modes are rejected. The C1 slice does not yet provide the
-  authoritative INOUT proof producer or owner exposure wiring.
+  while unknown modes are rejected. Stage C2 now provides a private sealed
+  authoritative INOUT close-delta producer; it derives the managed delta from
+  owner pre/post exposure frontiers and fresh graph evidence, without accepting
+  a caller scalar or broker volume. Owner exposure wiring remains Stage C3.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

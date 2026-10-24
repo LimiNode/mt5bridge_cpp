@@ -52,6 +52,7 @@ bool is_result_pending(const OperationRecord &record) {
 
 bool ManagedTradeOwner::valid_managed_intent(const ManagedTradeIntent &intent) const {
     return account_.valid() && !intent.request_payload.empty() &&
+           valid_managed_settlement_mode(intent.settlement_mode) &&
            intent.reconciliation_descriptor.valid() &&
            intent.reconciliation_descriptor.account == account_;
 }
@@ -61,6 +62,13 @@ bool ManagedTradeOwner::valid_settled_record_shape(const OperationRecord &record
         !record.reconciliation_descriptor ||
         record.reconciliation_descriptor->requested_volume == 0 ||
         record.settled_volume > record.reconciliation_descriptor->requested_volume)
+        return false;
+
+    // Allocation-gated CLOSE recovery is intentionally not admitted by the
+    // legacy owner path. Stage C2 will supply the authoritative proof and
+    // allocation-backed recovery boundary; there is no legacy fallback.
+    if (record.operation_kind == OperationKind::close &&
+        record.settlement_mode == ManagedSettlementMode::allocation_gated)
         return false;
 
     switch (record.operation_kind) {
@@ -428,13 +436,18 @@ OwnerStepResult ManagedTradeOwner::prepare_durable_operation(
          intent.reconciliation_descriptor.settled_state != OperationState::cancelled))
         return result_for(OwnerStepStatus::invalid_request);
 
+    // The authoritative INOUT proof producer is a later slice. Until it is
+    // present, production owner preparation must not create a gated record.
+    if (intent.settlement_mode == ManagedSettlementMode::allocation_gated)
+        return result_for(OwnerStepStatus::invalid_request);
+
     const OperationKey key{account_, candidate.trade_id.value,
                            candidate.slice.operation_id};
     if (journal_.find(key))
         return result_for(OwnerStepStatus::invalid_state, key, journal_.find(key));
 
     const auto created = journal_.create(
-        key, std::move(intent.request_payload), kind);
+        key, std::move(intent.request_payload), kind, intent.settlement_mode);
     if (!created.accepted())
         return result_for(OwnerStepStatus::durable_failure, key, created.record);
     const auto prechecking = journal_.transition_operation(

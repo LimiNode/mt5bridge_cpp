@@ -65,6 +65,31 @@ void append_u64(std::vector<std::uint8_t> &bytes, std::uint64_t value) {
         bytes.push_back(static_cast<std::uint8_t>(value >> shift));
 }
 
+std::uint32_t read_u32(const std::vector<std::uint8_t> &bytes, std::size_t offset) {
+    require(offset + sizeof(std::uint32_t) <= bytes.size(),
+            "journal fixture integer is truncated");
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
+
+void write_u32(std::vector<std::uint8_t> &bytes, std::size_t offset,
+               std::uint32_t value) {
+    require(offset + sizeof(std::uint32_t) <= bytes.size(),
+            "journal fixture integer does not fit");
+    for (unsigned shift = 0; shift != 32; shift += 8)
+        bytes[offset + shift / 8] = static_cast<std::uint8_t>(value >> shift);
+}
+
+void write_u64(std::vector<std::uint8_t> &bytes, std::size_t offset,
+               std::uint64_t value) {
+    require(offset + sizeof(std::uint64_t) <= bytes.size(),
+            "journal fixture checksum does not fit");
+    for (unsigned shift = 0; shift != 64; shift += 8)
+        bytes[offset + shift / 8] = static_cast<std::uint8_t>(value >> shift);
+}
+
 void append_string(std::vector<std::uint8_t> &bytes, const std::string &value) {
     require(value.size() <= (std::numeric_limits<std::uint32_t>::max)(),
             "legacy fixture string is too large");
@@ -251,6 +276,40 @@ void write_fixture(const std::filesystem::path &directory,
     require(output.good(), "legacy fixture could not be written");
 }
 
+void rewrite_v5_mode(const std::filesystem::path &path,
+                     std::uint32_t mode) {
+    std::ifstream input(path, std::ios::binary);
+    require(input.good(), "journal mode fixture could not be opened");
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+    require(bytes.size() >= 28, "journal mode fixture is truncated");
+    auto rewritten = bytes;
+    std::size_t body = 28;
+    const auto skip_string = [&body, &rewritten]() {
+        const auto size = read_u32(rewritten, body);
+        body += sizeof(std::uint32_t) + size;
+        require(body <= rewritten.size(), "journal mode fixture string is truncated");
+    };
+    const auto skip_payload = [&body, &rewritten]() {
+        const auto size = read_u32(rewritten, body);
+        body += sizeof(std::uint32_t) + size;
+        require(body <= rewritten.size(), "journal mode fixture payload is truncated");
+    };
+    skip_string();
+    skip_payload();
+    skip_payload();
+    body += 3U * sizeof(std::uint64_t) + 2U * sizeof(std::uint32_t) +
+            3U * sizeof(std::uint64_t) + sizeof(std::uint32_t);
+    require(body + sizeof(std::uint32_t) <= rewritten.size(),
+            "journal mode field is truncated");
+    write_u32(rewritten, body, mode);
+    const std::vector<std::uint8_t> checksum_body(rewritten.begin() + 28, rewritten.end());
+    write_u64(rewritten, 20, fixture_checksum(checksum_body));
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char *>(rewritten.data()),
+                 static_cast<std::streamsize>(rewritten.size()));
+    require(output.good(), "journal mode fixture could not be written");
+}
+
 } // namespace
 
 /// \brief Runs file-store durability and corruption checks.
@@ -260,10 +319,13 @@ int main() {
                            "mt5bridge_file_journal_store_test";
     const auto legacy_directory = std::filesystem::temp_directory_path() /
                                   "mt5bridge_file_journal_store_legacy_test";
+    const auto mode_directory = std::filesystem::temp_directory_path() /
+                                "mt5bridge_file_journal_store_mode_test";
     const auto original_cwd = std::filesystem::current_path();
     std::error_code cleanup_error;
     std::filesystem::remove_all(directory, cleanup_error);
     std::filesystem::remove_all(legacy_directory, cleanup_error);
+    std::filesystem::remove_all(mode_directory, cleanup_error);
 
     try {
         mt5bridge::WindowsFileJournalStore store(directory);
@@ -330,6 +392,30 @@ int main() {
         require(legacy_scan.complete() && legacy_scan.records.size() == 4,
                 "legacy journal fixtures did not survive a complete scan");
 
+        mt5bridge::WindowsFileJournalStore mode_store(mode_directory);
+        require(mode_store.ready(), "mode journal store did not open its directory");
+        const auto gated_key = key(80, 81);
+        mt5bridge::OperationJournal mode_journal(mode_store);
+        require(mode_journal
+                    .create(gated_key, {0x51}, mt5bridge::OperationKind::close,
+                            mt5bridge::ManagedSettlementMode::allocation_gated)
+                    .accepted(),
+                "allocation-gated journal record was not committed");
+        const auto gated = mode_store.load(gated_key);
+        require(gated.found() && gated.record &&
+                    gated.record->settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::allocation_gated,
+                "allocation-gated journal mode did not survive round-trip");
+        auto mode_mutation = *gated.record;
+        mode_mutation.settlement_mode = mt5bridge::ManagedSettlementMode::legacy;
+        ++mode_mutation.revision;
+        require(mode_store.commit(mode_mutation, gated.record->revision) ==
+                    mt5bridge::StoreCommitStatus::conflict,
+                "journal CAS allowed settlement mode mutation");
+        rewrite_v5_mode(fixture_path(mode_store.directory(), gated_key), 99);
+        require(mode_store.load(gated_key).status == mt5bridge::StoreLoadStatus::invalid_record,
+                "journal decoder admitted an unknown settlement mode");
+
         const auto operation_key = key();
         const auto lease_account = operation_key.account;
         std::uint64_t first_fencing_token = 0;
@@ -379,7 +465,9 @@ int main() {
         require(recovered_record.found() && recovered_record.record->journal_state ==
                                        mt5bridge::JournalState::dispatching &&
                     recovered_record.record->operation_kind ==
-                        mt5bridge::OperationKind::open &&
+                                       mt5bridge::OperationKind::open &&
+                    recovered_record.record->settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::legacy &&
                     recovered_record.record->fencing_token == 77 &&
                     recovered_record.record->reconciliation_descriptor &&
                     recovered_record.record->reconciliation_descriptor->valid() &&
@@ -600,12 +688,14 @@ int main() {
 
         std::filesystem::remove_all(directory, cleanup_error);
         std::filesystem::remove_all(legacy_directory, cleanup_error);
+        std::filesystem::remove_all(mode_directory, cleanup_error);
         std::cout << "file journal store checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::filesystem::current_path(original_cwd);
         std::filesystem::remove_all(directory, cleanup_error);
         std::filesystem::remove_all(legacy_directory, cleanup_error);
+        std::filesystem::remove_all(mode_directory, cleanup_error);
         std::cerr << "file journal store checks failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }

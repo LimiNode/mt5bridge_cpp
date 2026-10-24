@@ -29,7 +29,8 @@ constexpr std::array<char, 8> kBrokerReversalMagic{{'M', 'T', '5', 'R', 'V', 'L'
 constexpr std::uint32_t kLegacyFormatVersion = 1;
 constexpr std::uint32_t kCausalFormatVersion = 2;
 constexpr std::uint32_t kManagedVolumeFormatVersion = 3;
-constexpr std::uint32_t kFormatVersion = 4;
+constexpr std::uint32_t kOperationKindFormatVersion = 4;
+constexpr std::uint32_t kFormatVersion = 5;
 constexpr std::array<char, 8> kEpochMagic{{'M', 'T', '5', 'E', 'P', 'C', '0', '1'}};
 constexpr std::uint32_t kEpochFormatVersion = 1;
 constexpr std::uint32_t kMaxReconciliationPredicates = 1U << 20;
@@ -229,6 +230,7 @@ std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &r
     append_u64(body, record.fencing_token);
     append_u64(body, record.settled_volume);
     append_u32(body, static_cast<std::uint32_t>(record.operation_kind));
+    append_u32(body, static_cast<std::uint32_t>(record.settlement_mode));
     if (!append_reconciliation_descriptor(body, record.reconciliation_descriptor))
         return std::nullopt;
     if (!append_reconciliation_bindings(body, record.reconciliation_bindings))
@@ -263,7 +265,8 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     std::uint64_t expected_checksum = 0;
     if (!read_u32(bytes, offset, version) || !read_u64(bytes, offset, body_size) ||
         !read_u64(bytes, offset, expected_checksum) ||
-        (version != kFormatVersion && version != kManagedVolumeFormatVersion &&
+        (version != kFormatVersion && version != kOperationKindFormatVersion &&
+         version != kManagedVolumeFormatVersion &&
          version != kCausalFormatVersion && version != kLegacyFormatVersion) ||
         body_size > kMaxBodyBytes || body_size != bytes.size() - offset)
         return std::nullopt;
@@ -286,14 +289,17 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     std::uint32_t operation_state = 0;
     std::uint32_t journal_state = 0;
     std::uint32_t operation_kind = 0;
+    std::uint32_t settlement_mode = 0;
     if (!read_u32(body, body_offset, operation_state) ||
         !read_u32(body, body_offset, journal_state) ||
         !read_u64(body, body_offset, record.revision) ||
         !read_u64(body, body_offset, record.fencing_token) ||
         (version >= kManagedVolumeFormatVersion &&
          !read_u64(body, body_offset, record.settled_volume)) ||
-        (version >= kFormatVersion &&
+        (version >= kOperationKindFormatVersion &&
          !read_u32(body, body_offset, operation_kind)) ||
+        (version >= kFormatVersion &&
+         !read_u32(body, body_offset, settlement_mode)) ||
         !read_reconciliation_descriptor(body, body_offset,
                                         record.reconciliation_descriptor,
                                         version >= kCausalFormatVersion,
@@ -318,8 +324,10 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
         return std::nullopt;
     record.operation_state = static_cast<OperationState>(operation_state);
     record.journal_state = static_cast<JournalState>(journal_state);
-    if (version >= kFormatVersion)
+    if (version >= kOperationKindFormatVersion)
         record.operation_kind = static_cast<OperationKind>(operation_kind);
+    if (version >= kFormatVersion)
+        record.settlement_mode = static_cast<ManagedSettlementMode>(settlement_mode);
     if (version == kManagedVolumeFormatVersion &&
         record.reconciliation_descriptor &&
         record.reconciliation_descriptor->requested_volume != 0)
@@ -817,8 +825,9 @@ StoreCommitStatus WindowsFileJournalStore::commit(
         return StoreCommitStatus::conflict;
     }
     if (status == ReadStatus::valid && existing &&
-        existing->operation_kind != record.operation_kind) {
-        set_error(last_error_, "operation kind is immutable");
+        (existing->operation_kind != record.operation_kind ||
+         existing->settlement_mode != record.settlement_mode)) {
+        set_error(last_error_, "operation kind and settlement mode are immutable");
         return StoreCommitStatus::conflict;
     }
 

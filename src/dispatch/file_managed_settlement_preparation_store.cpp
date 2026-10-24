@@ -22,7 +22,8 @@ namespace mt5bridge {
 namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'P', 'R', 'P', '0', '1'}};
-constexpr std::uint32_t kFormatVersion = 1;
+constexpr std::uint32_t kLegacyFormatVersion = 1;
+constexpr std::uint32_t kFormatVersion = 2;
 constexpr std::size_t kMaxEntries = 4096;
 constexpr std::size_t kMaxBodyBytes = 2U << 20;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
@@ -43,6 +44,7 @@ bool valid_managed_settlement_transition(const OperationRecord &base,
         base.key != target.key || base.revision != base_revision || base_revision == 0 ||
         base_revision == (std::numeric_limits<std::uint64_t>::max)() ||
         target.revision != base_revision + 1 || base.operation_kind != target.operation_kind ||
+        base.settlement_mode != target.settlement_mode ||
         base.request_payload != target.request_payload ||
         base.result_payload != target.result_payload ||
         base.journal_state != target.journal_state ||
@@ -248,6 +250,7 @@ bool append_operation(std::vector<std::uint8_t> &bytes, const OperationRecord &r
     append_u64(bytes, record.key.trade_id);
     append_u64(bytes, record.key.operation_id);
     append_u32(bytes, static_cast<std::uint32_t>(record.operation_kind));
+    append_u32(bytes, static_cast<std::uint32_t>(record.settlement_mode));
     append_u32(bytes, static_cast<std::uint32_t>(record.operation_state));
     append_u32(bytes, static_cast<std::uint32_t>(record.journal_state));
     append_u64(bytes, record.revision);
@@ -269,7 +272,7 @@ bool append_operation(std::vector<std::uint8_t> &bytes, const OperationRecord &r
 }
 
 bool read_operation(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-                    OperationRecord &record) {
+                    OperationRecord &record, bool read_mode) {
     if (!read_string(bytes, offset, record.key.account.server) ||
         !read_payload(bytes, offset, record.request_payload) ||
         !read_payload(bytes, offset, record.result_payload) ||
@@ -281,7 +284,10 @@ bool read_operation(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
     std::uint32_t state = 0;
     std::uint32_t journal = 0;
     std::uint32_t bindings = 0;
-    if (!read_u32(bytes, offset, kind) || !read_u32(bytes, offset, state) ||
+    std::uint32_t mode = 0;
+    if (!read_u32(bytes, offset, kind) ||
+        (read_mode && !read_u32(bytes, offset, mode)) ||
+        !read_u32(bytes, offset, state) ||
         !read_u32(bytes, offset, journal) || !read_u64(bytes, offset, record.revision) ||
         !read_u64(bytes, offset, record.fencing_token) ||
         !read_u64(bytes, offset, record.settled_volume) ||
@@ -289,6 +295,8 @@ bool read_operation(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
         !read_u32(bytes, offset, bindings) || bindings > kMaxEntries)
         return false;
     record.operation_kind = static_cast<OperationKind>(kind);
+    record.settlement_mode = read_mode ? static_cast<ManagedSettlementMode>(mode)
+                                       : ManagedSettlementMode::legacy;
     record.operation_state = static_cast<OperationState>(state);
     record.journal_state = static_cast<JournalState>(journal);
     record.reconciliation_bindings.reserve(bindings);
@@ -451,7 +459,8 @@ std::optional<ManagedSettlementPreparation> deserialize_preparation(
     std::uint64_t expected_checksum = 0;
     if (!read_u32(bytes, envelope_offset, version) ||
         !read_u64(bytes, envelope_offset, body_size) ||
-        !read_u64(bytes, envelope_offset, expected_checksum) || version != kFormatVersion ||
+        !read_u64(bytes, envelope_offset, expected_checksum) ||
+        (version != kLegacyFormatVersion && version != kFormatVersion) ||
         body_size != bytes.size() - envelope_offset || body_size > kMaxBodyBytes)
         return std::nullopt;
     const std::vector<std::uint8_t> body(
@@ -472,7 +481,8 @@ std::optional<ManagedSettlementPreparation> deserialize_preparation(
     if (!read_staged(body, offset, preparation.staged_ownership)) {
         return std::nullopt;
     }
-    if (!read_operation(body, offset, preparation.target_operation)) {
+    if (!read_operation(body, offset, preparation.target_operation,
+                         version >= kFormatVersion)) {
         return std::nullopt;
     }
     if (offset != body.size()) {
@@ -595,6 +605,7 @@ bool valid_historical_journal_progression(const OperationRecord &target,
     if (!target.valid() || !current.valid() || target.key != current.key ||
         current.revision <= target.revision ||
         current.operation_kind != target.operation_kind ||
+        current.settlement_mode != target.settlement_mode ||
         current.request_payload != target.request_payload ||
         current.result_payload != target.result_payload ||
         current.journal_state != target.journal_state ||

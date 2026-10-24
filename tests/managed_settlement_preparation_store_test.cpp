@@ -604,6 +604,31 @@ void run_restart_regression() {
     }
 
     {
+        PreparedFixture gated_fixture;
+        gated_fixture.data.base_operation.settlement_mode =
+            mt5bridge::ManagedSettlementMode::allocation_gated;
+        gated_fixture.data.target_operation.settlement_mode =
+            mt5bridge::ManagedSettlementMode::allocation_gated;
+        require(gated_fixture.data.base_operation.valid() &&
+                    gated_fixture.data.target_operation.valid(),
+                "allocation-gated preparation fixture is malformed");
+        gated_fixture.journal.records[gated_fixture.data.base_operation.key] =
+            gated_fixture.data.base_operation;
+        const auto gated_root = root / "gated-mode";
+        mt5bridge::WindowsFileManagedSettlementPreparationStore gated_store(gated_root);
+        require(gated_store.prepare(
+                    gated_fixture.data.proof, gated_fixture.data.target_operation, 8,
+                    gated_fixture.staged, gated_fixture.journal) ==
+                    mt5bridge::ManagedSettlementPreparationStatus::prepared,
+                "allocation-gated preparation was not published");
+        const auto gated_scan = gated_store.scan();
+        require(gated_scan.complete() && gated_scan.records.size() == 1 &&
+                    gated_scan.records.front().target_operation.settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::allocation_gated,
+                "allocation-gated preparation mode did not survive restart scan");
+    }
+
+    {
         PreparedFixture forged_fixture;
         auto forged_target = forged_fixture.data.target_operation;
         forged_target.request_payload.push_back(0x7f);

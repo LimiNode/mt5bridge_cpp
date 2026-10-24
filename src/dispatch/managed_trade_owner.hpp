@@ -35,6 +35,7 @@ enum class OwnerStepStatus {
 struct ManagedTradeIntent {
     std::vector<std::uint8_t> request_payload;
     ReconciliationDescriptor reconciliation_descriptor;
+    ManagedSettlementMode settlement_mode = ManagedSettlementMode::legacy;
 };
 
 /// \struct OwnerStepResult

@@ -1512,6 +1512,39 @@ int main() {
                         mt5bridge::managed_trade::OperationState::filled,
                 "restart did not reconstruct OPEN/CANCEL/CLOSE exposure");
 
+        // A gated CLOSE must never be reinterpreted by the legacy recovery
+        // path when its allocation/frontier evidence is unavailable.
+        MemoryStore gated_recovery_store;
+        mt5bridge::OperationRecord gated_record;
+        gated_record.key = {operation_account, 62, 1};
+        gated_record.operation_kind = mt5bridge::OperationKind::close;
+        gated_record.settlement_mode =
+            mt5bridge::ManagedSettlementMode::allocation_gated;
+        gated_record.request_payload = {0xF1};
+        gated_record.result_payload = {0xF2};
+        gated_record.operation_state = mt5bridge::OperationState::filled;
+        gated_record.journal_state = mt5bridge::JournalState::reconciling;
+        gated_record.revision = 1;
+        gated_record.fencing_token = 1;
+        gated_record.settled_volume = 2;
+        gated_record.reconciliation_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, recovery_baseline,
+            {mt5bridge::require_active_order(2001)},
+            mt5bridge::OperationState::filled, 62, 1, 2};
+        require(gated_record.valid() &&
+                    gated_recovery_store.commit(gated_record, std::nullopt) ==
+                        mt5bridge::StoreCommitStatus::committed,
+                "gated recovery fixture was not committed");
+        mt5bridge::OperationJournal gated_recovery_journal(gated_recovery_store);
+        const auto gated_recovery = gated_recovery_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState gated_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &gated_seed, mt5bridge::managed_trade::TradeId{62}, 2, 2, 2),
+                "gated recovery seed initialization failed");
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_settled_trade(
+                     gated_seed, operation_account, gated_recovery),
+                "gated close without allocation evidence fell back to legacy recovery");
+
         mt5bridge::OperationJournal restarted_journal(store);
         const auto recovered_records = restarted_journal.recover_all();
         require(recovered_records.accepted(),

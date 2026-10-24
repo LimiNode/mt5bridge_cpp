@@ -11,6 +11,7 @@
 
 #include "support/memory_journal_store.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -74,6 +75,16 @@ mt5bridge::BrokerReversalRecord broker_record() {
     result.broker_reverse_open_leg = result.post_volume;
     result.provenance = broker_provenance();
     require(result.valid(), "broker reversal fixture is invalid");
+    return result;
+}
+
+mt5bridge::BrokerReversalRecord broker_record_for(std::uint64_t deal_ticket,
+                                                   std::uint64_t evidence_digest) {
+    auto result = broker_record();
+    result.deal_ticket = deal_ticket;
+    result.order_ticket += deal_ticket - 701;
+    result.provenance.evidence_digest = evidence_digest;
+    require(result.valid(), "parameterized broker reversal fixture is invalid");
     return result;
 }
 
@@ -165,22 +176,30 @@ public:
 
     mt5bridge::ManagedDealSettlementLoadResult load(
         const mt5bridge::ManagedDealSettlementKey &key) const override {
-        if (!fact || !(fact->key == key))
+        const auto found = std::find_if(
+            facts.begin(), facts.end(),
+            [&key](const auto &candidate) { return candidate.key == key; });
+        if (found == facts.end())
             return {mt5bridge::ManagedDealSettlementLoadStatus::not_found, std::nullopt};
-        return {mt5bridge::ManagedDealSettlementLoadStatus::found, fact};
+        return {mt5bridge::ManagedDealSettlementLoadStatus::found, *found};
     }
 
     mt5bridge::ManagedSettlementFrontierLoadResult load_frontier(
         const mt5bridge::OperationKey &key, std::uint64_t revision) const override {
-        if (!frontier || !(frontier->operation_key == key) ||
-            frontier->operation_revision != revision)
+        const auto found = std::find_if(
+            frontiers.begin(), frontiers.end(),
+            [&key, revision](const auto &candidate) {
+                return candidate.operation_key == key &&
+                       candidate.operation_revision == revision;
+            });
+        if (found == frontiers.end())
             return {mt5bridge::ManagedSettlementFrontierLoadStatus::not_found,
                     std::nullopt};
-        return {mt5bridge::ManagedSettlementFrontierLoadStatus::found, frontier};
+        return {mt5bridge::ManagedSettlementFrontierLoadStatus::found, *found};
     }
 
-    std::optional<mt5bridge::ManagedDealSettlement> fact;
-    std::optional<mt5bridge::ManagedSettlementFrontier> frontier;
+    std::vector<mt5bridge::ManagedDealSettlement> facts;
+    std::vector<mt5bridge::ManagedSettlementFrontier> frontiers;
 };
 
 class MemoryBasisStore final : public mt5bridge::DurableManagedOwnershipBasisStore {
@@ -194,20 +213,22 @@ public:
 
     mt5bridge::ManagedOwnershipBasisLoadResult load(
         const mt5bridge::ManagedOwnershipBasisKey &key) const override {
-        if (!basis || !(basis->key() == key))
+        const auto found = std::find_if(
+            bases.begin(), bases.end(),
+            [&key](const auto &candidate) { return candidate.key() == key; });
+        if (found == bases.end())
             return {mt5bridge::ManagedOwnershipBasisLoadStatus::not_found, std::nullopt};
-        return {mt5bridge::ManagedOwnershipBasisLoadStatus::found, basis};
+        return {mt5bridge::ManagedOwnershipBasisLoadStatus::found, *found};
     }
 
     mt5bridge::ManagedOwnershipBasisScanResult scan() const override {
         mt5bridge::ManagedOwnershipBasisScanResult result;
         result.status = mt5bridge::ManagedOwnershipBasisScanStatus::complete;
-        if (basis)
-            result.records.push_back(*basis);
+        result.records = bases;
         return result;
     }
 
-    std::optional<mt5bridge::ManagedOwnershipBasis> basis;
+    std::vector<mt5bridge::ManagedOwnershipBasis> bases;
 };
 
 class MemoryAllocationStore final : public mt5bridge::DurableManagedAllocationStore {
@@ -240,9 +261,12 @@ public:
 
     mt5bridge::ManagedAllocationLoadResult load(
         const mt5bridge::ManagedAllocationKey &key) const override {
-        if (!allocation || !(allocation->allocation_key == key))
+        const auto found = std::find_if(
+            allocations.begin(), allocations.end(),
+            [&key](const auto &candidate) { return candidate.allocation_key == key; });
+        if (found == allocations.end())
             return {mt5bridge::ManagedAllocationLoadStatus::not_found, std::nullopt};
-        return {mt5bridge::ManagedAllocationLoadStatus::found, allocation};
+        return {mt5bridge::ManagedAllocationLoadStatus::found, *found};
     }
 
     mt5bridge::ManagedAllocationScanResult scan(
@@ -262,14 +286,13 @@ public:
         return scan_result();
     }
 
-    std::optional<mt5bridge::ManagedAllocationEntry> allocation;
+    std::vector<mt5bridge::ManagedAllocationEntry> allocations;
 
 private:
     mt5bridge::ManagedAllocationScanResult scan_result() const {
         mt5bridge::ManagedAllocationScanResult result;
         result.status = mt5bridge::ManagedAllocationScanStatus::complete;
-        if (allocation)
-            result.records.push_back(*allocation);
+        result.records = allocations;
         return result;
     }
 };
@@ -290,12 +313,12 @@ mt5bridge::BrokerAllocationEnvelope envelope(
 
 mt5bridge::OperationRecord operation(
     const mt5bridge::ReconciliationBaseline &baseline, std::uint64_t revision,
-    std::uint64_t settled_volume) {
+    std::uint64_t settled_volume, std::uint64_t deal_ticket = 701) {
     const auto key = mt5bridge::OperationKey{account(), 71, 4};
     mt5bridge::ReconciliationDescriptor descriptor{
         key.account,
         baseline,
-        {mt5bridge::require_history_deal(701,
+        {mt5bridge::require_history_deal(deal_ticket,
                                          mt5bridge::ObservationWindow{1000, 2000})},
         mt5bridge::OperationState::partially_filled,
         key.trade_id,
@@ -661,12 +684,13 @@ void run_restart_regression() {
             historical_fixture.data.proof.fact(), historical_fixture.data.proof.frontier(),
             historical_fixture.data.target_operation, 8, historical_fixture.staged};
         MemorySettlementStore historical_settlement;
-        historical_settlement.fact = historical_preparation.fact;
-        historical_settlement.frontier = historical_preparation.frontier;
+        historical_settlement.facts.push_back(historical_preparation.fact);
+        historical_settlement.frontiers.push_back(historical_preparation.frontier);
         MemoryBasisStore historical_basis;
-        historical_basis.basis = historical_preparation.staged_ownership.settled_basis();
+        historical_basis.bases.push_back(
+            historical_preparation.staged_ownership.settled_basis());
         MemoryAllocationStore historical_allocation;
-        historical_allocation.allocation = historical_fixture.allocation;
+        historical_allocation.allocations.push_back(historical_fixture.allocation);
         mt5bridge_test_support::MemoryJournalStore historical_journal;
         historical_journal.records[historical_preparation.target_operation.key] =
             operation(historical_fixture.data.baseline, 10, 3);
@@ -688,6 +712,151 @@ void run_restart_regression() {
     std::filesystem::remove_all(root);
 }
 
+void run_incremental_historical_replay_regression() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("mt5bridge_managed_settlement_incremental_" +
+                       std::to_string(std::chrono::steady_clock::now()
+                                          .time_since_epoch()
+                                          .count()));
+    std::filesystem::remove_all(root);
+
+    mt5bridge::ObservationGraph graph(account());
+    mt5bridge::ObservationBatch baseline_batch;
+    baseline_batch.account = account();
+    baseline_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+    baseline_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+    require(graph.apply(baseline_batch).accepted(), "incremental baseline observation failed");
+    const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
+
+    auto deal_a = deal_snapshot();
+    deal_a.ticket = 702;
+    deal_a.volume = 1.0;
+    deal_a.time_msc = 1400;
+    mt5bridge::ObservationBatch first_deal_batch;
+    first_deal_batch.account = account();
+    first_deal_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+    first_deal_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+    first_deal_batch.history_deals = {deal_a};
+    require(graph.apply(first_deal_batch).accepted(), "first incremental deal observation failed");
+
+    const auto target_a = operation(baseline, 9, 1, 702);
+    const auto proof_a = mt5bridge::dispatch::ManagedDealSettlementProducer::create(
+        target_a, baseline, graph, 702, 1);
+    require(proof_a.has_value(), "first incremental proof was not derived");
+    const auto fact_a = proof_a->fact();
+    const auto frontier_a = proof_a->frontier();
+
+    auto deal_b = deal_snapshot();
+    mt5bridge::ObservationBatch second_deal_batch;
+    second_deal_batch.account = account();
+    second_deal_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
+    second_deal_batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
+    second_deal_batch.history_deals = {deal_a, deal_b};
+    require(graph.apply(second_deal_batch).accepted(), "second incremental deal observation failed");
+
+    const auto base_b = operation(baseline, 9, 1, 701);
+    const auto target_b = operation(baseline, 10, 3, 701);
+    const auto proof_b = mt5bridge::dispatch::ManagedDealSettlementProducer::create(
+        target_b, baseline, graph, 701, 2, {fact_a});
+    require(proof_b.has_value(), "second incremental proof was not derived");
+    const auto fact_b = proof_b->fact();
+    const auto frontier_b = proof_b->frontier();
+    require(frontier_b.entries.size() == 2 && frontier_b.settled_volume == 3,
+            "second incremental frontier is not cumulative");
+
+    const auto broker_a = broker_record_for(702, 303);
+    const auto broker_b = broker_record();
+    const auto mapping_a =
+        mt5bridge::derive_managed_broker_volume_mapping(fact_a, broker_a);
+    const auto mapping_b =
+        mt5bridge::derive_managed_broker_volume_mapping(fact_b, broker_b);
+    require(mapping_a && mapping_b, "incremental broker mappings were not derived");
+
+    const auto allocation_a = PreparedFixture::make_allocation(
+        fact_a, frontier_a, *mapping_a, broker_a);
+    const auto allocation_b = PreparedFixture::make_allocation(
+        fact_b, frontier_b, *mapping_b, broker_b);
+    require(allocation_a.valid() && allocation_b.valid(),
+            "incremental allocation fixtures are invalid");
+    require(allocation_a.settlement_frontier_revision == frontier_a.operation_revision &&
+                allocation_b.settlement_frontier_revision == frontier_b.operation_revision &&
+                allocation_a.settlement_frontier_digest ==
+                    mt5bridge::managed_settlement_frontier_digest(frontier_a),
+            "immutable allocation frontier references were rewritten");
+
+    mt5bridge::ManagedStagedOwnershipAssociation staged_b{
+        account(), {broker_b.key(), target_b.key}, broker_b.provenance, 9, 10, 0xbeef};
+    require(staged_b.valid(), "incremental staged ownership fixture is invalid");
+    mt5bridge::ManagedSettlementPreparation preparation_b{
+        fact_b, frontier_b, target_b, 9, staged_b};
+    require(preparation_b.valid(), "incremental preparation fixture is invalid");
+
+    mt5bridge_test_support::MemoryJournalStore preparation_journal;
+    preparation_journal.records[base_b.key] = base_b;
+    mt5bridge::WindowsFileManagedSettlementPreparationStore preparation_store(root);
+    require(preparation_store.prepare(
+                *proof_b, target_b, 9, staged_b, preparation_journal) ==
+                mt5bridge::ManagedSettlementPreparationStatus::prepared,
+            "incremental preparation did not publish");
+
+    mt5bridge::WindowsFileManagedSettlementPreparationStore restarted_preparation(root);
+    const auto scanned = restarted_preparation.scan();
+    require(scanned.complete() && scanned.records.size() == 1 &&
+                scanned.records.front() == preparation_b,
+            "incremental preparation did not survive restart");
+
+    MemoryBrokerStore broker_store;
+    broker_store.records[broker_a.key()] = broker_a;
+    broker_store.records[broker_b.key()] = broker_b;
+    MemoryEnvelopeStore envelope_store;
+    envelope_store.records[broker_a.key()] = envelope(broker_a);
+    envelope_store.records[broker_b.key()] = envelope(broker_b);
+
+    MemorySettlementStore settlement_store;
+    settlement_store.facts = {fact_a, fact_b};
+    settlement_store.frontiers = {frontier_a, frontier_b};
+    MemoryBasisStore basis_store;
+    basis_store.bases = {staged_b.settled_basis()};
+    MemoryAllocationStore allocation_store;
+    allocation_store.allocations = {allocation_a, allocation_b};
+
+    mt5bridge_test_support::MemoryJournalStore current_journal;
+    current_journal.records[target_b.key] = operation(baseline, 11, 4, 701);
+    TestLease lease;
+    require(restarted_preparation.finalize(
+                preparation_b, current_journal, settlement_store, basis_store,
+                envelope_store, broker_store, allocation_store, lease) ==
+                mt5bridge::ManagedSettlementFinalizeStatus::already_finalized,
+            "incremental historical replay rejected cumulative allocations");
+    require(current_journal.records.at(target_b.key).revision == 11,
+            "incremental historical replay changed the current journal");
+
+    auto incomplete_allocation_store = allocation_store;
+    incomplete_allocation_store.allocations.erase(
+        std::remove_if(incomplete_allocation_store.allocations.begin(),
+                       incomplete_allocation_store.allocations.end(),
+                       [&allocation_a](const auto &candidate) {
+                           return candidate.allocation_key == allocation_a.allocation_key;
+                       }),
+        incomplete_allocation_store.allocations.end());
+    require(restarted_preparation.finalize(
+                preparation_b, current_journal, settlement_store, basis_store,
+                envelope_store, broker_store, incomplete_allocation_store, lease) ==
+                mt5bridge::ManagedSettlementFinalizeStatus::invalid_source,
+            "incomplete prior frontier allocation was admitted");
+
+    auto forged_current = current_journal.records.at(target_b.key);
+    forged_current.request_payload.push_back(0x7f);
+    current_journal.records[target_b.key] = forged_current;
+    require(restarted_preparation.finalize(
+                preparation_b, current_journal, settlement_store, basis_store,
+                envelope_store, broker_store, allocation_store, lease) ==
+                mt5bridge::ManagedSettlementFinalizeStatus::invalid_source,
+            "historical replay accepted a journal with forged immutable payload");
+
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 /// \brief Runs durable staged preparation and restart recovery checks.
@@ -695,6 +864,7 @@ void run_restart_regression() {
 int main() {
     try {
         run_restart_regression();
+        run_incremental_historical_replay_regression();
         std::cout << "managed settlement preparation checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {

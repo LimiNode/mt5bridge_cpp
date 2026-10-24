@@ -557,7 +557,6 @@ bool frontier_has_allocation_claims(
     const ManagedSettlementFrontier &frontier,
     const std::vector<ManagedAllocationEntry> &allocations,
     std::string &error) {
-    const auto digest = managed_settlement_frontier_digest(frontier);
     for (const auto &frontier_entry : frontier.entries) {
         std::size_t matches = 0;
         for (const auto &allocation : allocations) {
@@ -570,10 +569,11 @@ bool frontier_has_allocation_claims(
                 allocation.managed_logical_units != frontier_entry.managed_logical_units)
                 continue;
             if (!allocation.settlement_frontier_digest ||
-                *allocation.settlement_frontier_digest != digest ||
-                allocation.settlement_frontier_revision != frontier.operation_revision ||
-                allocation.basis_operation_revision != frontier.operation_revision) {
-                error = "managed settlement frontier has a mismatched allocation claim";
+                allocation.settlement_frontier_revision == 0 ||
+                allocation.settlement_frontier_revision > frontier.operation_revision ||
+                allocation.basis_operation_revision == 0 ||
+                allocation.basis_operation_revision > frontier.operation_revision) {
+                error = "managed settlement frontier has a legacy or future allocation claim";
                 return false;
             }
             ++matches;
@@ -586,18 +586,54 @@ bool frontier_has_allocation_claims(
     return true;
 }
 
-/// rief Classifies durable evidence for a preparation whose journal is newer.
+/// @brief Tests whether a newer journal record preserves one prepared target.
+/// @param target Historical operation record sealed by the preparation.
+/// @param current Current durable operation record.
+/// @return True only for a legal cumulative progression with immutable identity.
+bool valid_historical_journal_progression(const OperationRecord &target,
+                                          const OperationRecord &current) {
+    if (!target.valid() || !current.valid() || target.key != current.key ||
+        current.revision <= target.revision ||
+        current.operation_kind != target.operation_kind ||
+        current.request_payload != target.request_payload ||
+        current.result_payload != target.result_payload ||
+        current.journal_state != target.journal_state ||
+        current.fencing_token != target.fencing_token ||
+        !managed_settlement_preparation_detail::same_descriptor(
+            current.reconciliation_descriptor, target.reconciliation_descriptor) ||
+        current.reconciliation_bindings != target.reconciliation_bindings ||
+        (current.operation_state != OperationState::partially_filled &&
+         current.operation_state != OperationState::filled) ||
+        current.settled_volume < target.settled_volume ||
+        current.settled_volume == 0)
+        return false;
+
+    const bool late_partial_settlement =
+        target.operation_state == OperationState::partially_filled &&
+        current.operation_state == OperationState::partially_filled &&
+        current.settled_volume > target.settled_volume;
+    return OperationJournal::can_transition_operation(target.operation_state,
+                                                      current.operation_state) ||
+           late_partial_settlement;
+}
+
+/// @brief Classifies durable evidence for a preparation whose journal is newer.
 enum class HistoricalPreparationEvidence { complete, missing, invalid, io_error };
 
-/// rief Validates that a retained preparation was already fully published.
-/// param preparation Retained staged recipe being replayed.
-/// param settlement_store Durable committed fact/frontier source.
-/// param basis_store Durable settled ownership-basis source.
-/// eturn Historical evidence classification; no store is mutated.
+/// @brief Validates that a retained preparation was already fully published.
+/// @param preparation Retained staged recipe being replayed.
+/// @param current Current durable operation record.
+/// @param settlement_store Durable committed fact/frontier source.
+/// @param basis_store Durable settled ownership-basis source.
+/// @return Historical evidence classification; no store is mutated.
 HistoricalPreparationEvidence validate_historical_preparation_evidence(
     const ManagedSettlementPreparation &preparation,
+    const OperationRecord &current,
     const DurableManagedDealSettlementStore &settlement_store,
     const DurableManagedOwnershipBasisStore &basis_store) {
+    if (!valid_historical_journal_progression(preparation.target_operation, current))
+        return HistoricalPreparationEvidence::invalid;
+
     const auto fact = settlement_store.load(preparation.fact.key);
     if (fact.status == ManagedDealSettlementLoadStatus::not_found)
         return HistoricalPreparationEvidence::missing;
@@ -898,7 +934,7 @@ WindowsFileManagedSettlementPreparationStore::finalize(
         // The journal CAS already happened; continue idempotent publication.
     } else if (current.record->revision > preparation.target_operation.revision) {
         const auto historical = validate_historical_preparation_evidence(
-            preparation, settlement_store, basis_store);
+            preparation, *current.record, settlement_store, basis_store);
         if (historical == HistoricalPreparationEvidence::complete)
             return ManagedSettlementFinalizeStatus::already_finalized;
         if (historical == HistoricalPreparationEvidence::io_error)

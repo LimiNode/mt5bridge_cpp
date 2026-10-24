@@ -1,7 +1,7 @@
 #pragma once
 
 /// \file dispatch/managed_inout_close_delta_proof.hpp
-/// \brief Defines the private authoritative proof for one managed INOUT close.
+/// \brief Defines the private structural candidate for one managed INOUT close.
 
 #include "managed_trade.hpp"
 
@@ -9,7 +9,7 @@
 #include <mt5bridge/dispatch/broker_reversal_reconciliation.hpp>
 #include <mt5bridge/dispatch/journal_types.hpp>
 #include <mt5bridge/dispatch/managed_deal_settlement.hpp>
-#include <mt5bridge/dispatch/managed_ownership_basis.hpp>
+#include <mt5bridge/dispatch/managed_settlement_preparation.hpp>
 #include <mt5bridge/reconciliation/graph.hpp>
 
 #include <cstddef>
@@ -22,7 +22,7 @@
 namespace mt5bridge::dispatch {
 
 /// \struct ManagedExposureFrontier
-/// \brief Compact owner-authoritative exposure boundary used by an INOUT proof.
+/// \brief Compact exposure boundary captured by an INOUT candidate.
 struct ManagedExposureFrontier {
     AccountKey account; ///< Account scope of the managed trade.
     TradeId trade_id = 0; ///< Managed logical trade identity.
@@ -57,9 +57,13 @@ struct ManagedExposureFrontier {
     }
 };
 
-/// \class ManagedInoutCloseDeltaProof
-/// \brief Sealed proof that one authoritative INOUT deal reduced managed exposure.
-class ManagedInoutCloseDeltaProof {
+/// \class ManagedInoutCloseDeltaCandidate
+/// \brief Sealed structural candidate for one managed INOUT close.
+///
+/// This type proves only that its supplied inputs are internally coherent. It
+/// is not an authorization for allocation or exposure mutation until an
+/// independent managed-attribution source is available.
+class ManagedInoutCloseDeltaCandidate {
 public:
     /// \brief Returns the managed operation receiving the close delta.
     /// \return Operation identity.
@@ -69,9 +73,15 @@ public:
     /// \return DEAL_TICKET.
     std::uint64_t deal_ticket() const { return deal_ticket_; }
 
-    /// \brief Returns the ownership-basis identity bound by the proof.
+    /// \brief Returns the ownership-basis identity bound by the candidate.
     /// \return Durable broker/operation composite key.
     const ManagedOwnershipBasisKey &ownership_key() const { return ownership_key_; }
+
+    /// \brief Returns the staged ownership association bound by the candidate.
+    /// \return Exact pre-CAS ownership association.
+    const ManagedStagedOwnershipAssociation &staged_ownership() const {
+        return staged_ownership_;
+    }
 
     /// \brief Returns the logical close intent volume.
     /// \return Requested managed close volume.
@@ -84,14 +94,14 @@ public:
     managed_trade::Volume managed_logical_delta() const { return managed_logical_delta_; }
 
     /// \brief Returns the pre-close managed exposure boundary.
-    /// \return Owner-authoritative pre-state summary.
+    /// \return Captured pre-state summary.
     const ManagedExposureFrontier &pre_exposure() const { return pre_exposure_; }
 
     /// \brief Returns the post-close managed exposure boundary.
-    /// \return Owner-authoritative post-state summary.
+    /// \return Captured post-state summary.
     const ManagedExposureFrontier &post_exposure() const { return post_exposure_; }
 
-    /// \brief Returns the broker provenance copied into the proof binding.
+    /// \brief Returns the broker provenance copied into the candidate binding.
     /// \return Durable reversal provenance.
     const BrokerReversalProvenance &broker_provenance() const {
         return broker_provenance_;
@@ -103,17 +113,23 @@ public:
         return observation_provenance_;
     }
 
-    /// \brief Returns the immutable proof digest.
-    /// \return Non-zero digest covering all proof fields.
+    /// \brief Returns the immutable candidate digest.
+    /// \return Non-zero digest covering all candidate fields.
     std::uint64_t evidence_digest() const { return evidence_digest_; }
 
-    /// \brief Tests the sealed proof's local invariants.
-    /// \return True only for a positive, identity-consistent delta proof.
+    /// \brief Tests the sealed candidate's local invariants.
+    /// \return True only for a positive, identity-consistent delta candidate.
     bool valid() const {
         if (!operation_key_.valid() || deal_ticket_ == 0 ||
-            !ownership_key_.valid() || ownership_key_.operation_key != operation_key_ ||
+            !staged_ownership_.valid() || !ownership_key_.valid() ||
+            ownership_key_.operation_key != operation_key_ ||
+            !(staged_ownership_.basis_key == ownership_key_) ||
+            staged_ownership_.basis_key.operation_key != operation_key_ ||
+            staged_ownership_.basis_key.broker_key.account != operation_key_.account ||
+            staged_ownership_.basis_key.broker_key.deal_ticket != deal_ticket_ ||
             ownership_key_.broker_key.account != operation_key_.account ||
             ownership_key_.broker_key.deal_ticket != deal_ticket_ ||
+            !(staged_ownership_.broker_provenance == broker_provenance_) ||
             !broker_provenance_.valid() || managed_close_intent_volume_ == 0 ||
             managed_logical_delta_ == 0 || !pre_exposure_.valid() ||
             !post_exposure_.valid() || pre_exposure_.account != operation_key_.account ||
@@ -138,12 +154,13 @@ public:
         return true;
     }
 
-    /// \brief Compares two sealed proofs for exact replay.
-    /// \param other Proof to compare.
-    /// \return True when every durable proof field matches.
-    bool operator==(const ManagedInoutCloseDeltaProof &other) const {
+    /// \brief Compares two sealed candidates for exact replay.
+    /// \param other Candidate to compare.
+    /// \return True when every candidate field matches.
+    bool operator==(const ManagedInoutCloseDeltaCandidate &other) const {
         return operation_key_ == other.operation_key_ &&
                deal_ticket_ == other.deal_ticket_ && ownership_key_ == other.ownership_key_ &&
+               staged_ownership_ == other.staged_ownership_ &&
                managed_close_intent_volume_ == other.managed_close_intent_volume_ &&
                managed_logical_delta_ == other.managed_logical_delta_ &&
                pre_exposure_ == other.pre_exposure_ &&
@@ -154,15 +171,17 @@ public:
     }
 
 private:
-    ManagedInoutCloseDeltaProof(
+    ManagedInoutCloseDeltaCandidate(
         OperationKey operation_key, std::uint64_t deal_ticket,
-        ManagedOwnershipBasisKey ownership_key, managed_trade::Volume intent_volume,
+        ManagedStagedOwnershipAssociation staged_ownership,
+        managed_trade::Volume intent_volume,
         managed_trade::Volume logical_delta, ManagedExposureFrontier pre_exposure,
         ManagedExposureFrontier post_exposure, BrokerReversalProvenance broker_provenance,
         ManagedSettlementProvenance observation_provenance, std::uint64_t evidence_digest)
         : operation_key_(std::move(operation_key)),
           deal_ticket_(deal_ticket),
-          ownership_key_(std::move(ownership_key)),
+          ownership_key_(staged_ownership.basis_key),
+          staged_ownership_(std::move(staged_ownership)),
           managed_close_intent_volume_(intent_volume),
           managed_logical_delta_(logical_delta),
           pre_exposure_(std::move(pre_exposure)),
@@ -174,6 +193,7 @@ private:
     OperationKey operation_key_;
     std::uint64_t deal_ticket_ = 0;
     ManagedOwnershipBasisKey ownership_key_;
+    ManagedStagedOwnershipAssociation staged_ownership_;
     managed_trade::Volume managed_close_intent_volume_ = 0;
     managed_trade::Volume managed_logical_delta_ = 0;
     ManagedExposureFrontier pre_exposure_;
@@ -182,20 +202,20 @@ private:
     ManagedSettlementProvenance observation_provenance_;
     std::uint64_t evidence_digest_ = 0;
 
-    friend class ManagedInoutCloseDeltaProofProducer;
+    friend class ManagedInoutCloseDeltaCandidateProducer;
 };
 
 namespace detail {
 
-inline std::optional<std::string> inout_proof_snapshot_text(const char *value,
-                                                            std::size_t capacity) {
+inline std::optional<std::string> inout_candidate_snapshot_text(const char *value,
+                                                                std::size_t capacity) {
     const auto *terminator = static_cast<const char *>(std::memchr(value, '\0', capacity));
     if (!terminator)
         return std::nullopt;
     return std::string(value, static_cast<std::size_t>(terminator - value));
 }
 
-inline std::optional<ReconciliationPredicate> inout_proof_history_predicate(
+inline std::optional<ReconciliationPredicate> inout_candidate_history_predicate(
     const OperationRecord &operation, std::uint64_t deal_ticket) {
     if (!operation.reconciliation_descriptor || deal_ticket == 0)
         return std::nullopt;
@@ -207,14 +227,25 @@ inline std::optional<ReconciliationPredicate> inout_proof_history_predicate(
             return std::nullopt;
         result = predicate;
     }
-    if (!result || !result->history_window || !result->history_window->valid() ||
-        !mt5bridge::detail::operation_binds_deal(operation, deal_ticket))
+    if (!result || result->ticket != 0 || result->correlation_id == 0 ||
+        !result->history_window || !result->history_window->valid())
+        return std::nullopt;
+    std::size_t matching_bindings = 0;
+    std::uint64_t resolved_ticket = 0;
+    for (const auto &binding : operation.reconciliation_bindings) {
+        if (binding.correlation_id != result->correlation_id)
+            continue;
+        if (++matching_bindings != 1 || !binding.valid())
+            return std::nullopt;
+        resolved_ticket = binding.broker_ticket;
+    }
+    if (matching_bindings != 1 || resolved_ticket != deal_ticket)
         return std::nullopt;
     return result;
 }
 
-inline std::optional<Mt5DealSnapshot> inout_proof_deal(const ObservationGraph &graph,
-                                                       std::uint64_t deal_ticket) {
+inline std::optional<Mt5DealSnapshot> inout_candidate_deal(const ObservationGraph &graph,
+                                                           std::uint64_t deal_ticket) {
     std::optional<Mt5DealSnapshot> result;
     for (const auto &deal : graph.history_deals()) {
         if (deal.ticket != deal_ticket)
@@ -226,7 +257,7 @@ inline std::optional<Mt5DealSnapshot> inout_proof_deal(const ObservationGraph &g
     return result;
 }
 
-inline ManagedExposureFrontier inout_proof_frontier(
+inline ManagedExposureFrontier inout_candidate_frontier(
     const managed_trade::ManagedTradeState &state) {
     return {AccountKey{}, state.trade_id.value, state.slice.operation_id,
             state.open_volume, state.pending_remainder_volume, state.slice.result_volume,
@@ -281,8 +312,29 @@ private:
     std::uint64_t value_ = 1469598103934665603ULL;
 };
 
-inline std::uint64_t inout_proof_digest(const OperationRecord &operation,
-                                        const ManagedOwnershipBasis &basis,
+inline std::uint64_t inout_candidate_close_intent_digest(
+    const OperationRecord &operation, std::uint64_t deal_ticket) {
+    if (!operation.key.valid() || operation.operation_kind != OperationKind::close ||
+        operation.settlement_mode != ManagedSettlementMode::allocation_gated ||
+        !operation.reconciliation_descriptor ||
+        operation.reconciliation_descriptor->requested_volume == 0 || deal_ticket == 0)
+        return 0;
+    InoutProofDigest digest;
+    digest.add_text("mt5bridge-managed-inout-close-intent-v1");
+    digest.add_text(operation.key.account.server);
+    digest.add_u64(operation.key.account.login);
+    digest.add_u64(operation.key.trade_id);
+    digest.add_u64(operation.key.operation_id);
+    digest.add_u64(static_cast<std::uint64_t>(operation.operation_kind));
+    digest.add_u64(static_cast<std::uint64_t>(operation.settlement_mode));
+    digest.add_u64(operation.reconciliation_descriptor->requested_volume);
+    digest.add_u64(deal_ticket);
+    return digest.value();
+}
+
+inline std::uint64_t inout_candidate_digest(
+                                        const OperationRecord &operation,
+                                        const ManagedStagedOwnershipAssociation &staged,
                                         const BrokerReversalRecord &reversal,
                                         const ManagedExposureFrontier &pre_exposure,
                                         const ManagedExposureFrontier &post_exposure,
@@ -290,13 +342,15 @@ inline std::uint64_t inout_proof_digest(const OperationRecord &operation,
                                         managed_trade::Volume intent_volume,
                                         managed_trade::Volume logical_delta) {
     InoutProofDigest digest;
-    digest.add_text("mt5bridge-managed-inout-close-proof-v1");
+    digest.add_text("mt5bridge-managed-inout-close-candidate-v1");
     digest.add_text(operation.key.account.server);
     digest.add_u64(operation.key.account.login);
     digest.add_u64(operation.key.trade_id);
     digest.add_u64(operation.key.operation_id);
     digest.add_u64(operation.revision);
-    digest.add_u64(basis.operation_revision);
+    digest.add_u64(staged.base_operation_revision);
+    digest.add_u64(staged.target_operation_revision);
+    digest.add_u64(staged.close_intent_digest);
     digest.add_u64(reversal.deal_ticket);
     digest.add_u64(intent_volume);
     digest.add_u64(logical_delta);
@@ -312,21 +366,26 @@ inline std::uint64_t inout_proof_digest(const OperationRecord &operation,
 
 } // namespace detail
 
-/// \class ManagedInoutCloseDeltaProofProducer
-/// \brief Privately derives a sealed managed delta from fresh INOUT evidence.
-class ManagedInoutCloseDeltaProofProducer {
+/// \class ManagedInoutCloseDeltaCandidateProducer
+/// \brief Privately validates a structural managed delta candidate.
+///
+/// The producer does not establish independent managed attribution. Its
+/// result must remain outside allocation and exposure authorization until a
+/// separate authoritative source is implemented.
+class ManagedInoutCloseDeltaCandidateProducer {
 public:
-    /// \brief Builds a proof without accepting caller-supplied logical units.
-    /// \param operation Durable allocation-gated close operation.
-    /// \param basis Durable ownership association for the same operation/deal.
+    /// \brief Builds a structural candidate without accepting caller-supplied logical units.
+    /// \param operation Target allocation-gated close operation candidate.
+    /// \param staged_ownership Exact pre-CAS staged ownership association.
     /// \param reversal Durable broker-only INOUT decomposition.
     /// \param baseline Fresh-cycle baseline bound to the operation descriptor.
     /// \param graph Account-scoped graph containing complete post-deal evidence.
     /// \param pre_state Owner state immediately before applying this close delta.
     /// \param post_state Owner candidate after applying this close delta.
-    /// \return Sealed proof, or empty when any source is stale, ambiguous, or mismatched.
-    static std::optional<ManagedInoutCloseDeltaProof> create(
-        const OperationRecord &operation, const ManagedOwnershipBasis &basis,
+    /// \return Sealed candidate, or empty when any source is stale, ambiguous, or mismatched.
+    static std::optional<ManagedInoutCloseDeltaCandidate> create(
+        const OperationRecord &operation,
+        const ManagedStagedOwnershipAssociation &staged_ownership,
         const BrokerReversalRecord &reversal, const ReconciliationBaseline &baseline,
         const ObservationGraph &graph, const managed_trade::ManagedTradeState &pre_state,
         const managed_trade::ManagedTradeState &post_state) {
@@ -341,7 +400,8 @@ public:
             operation.settled_volume == 0 ||
             operation.settled_volume >
                 operation.reconciliation_descriptor->requested_volume ||
-            !basis.valid() || !reversal.valid() || !baseline.valid() || !graph.bound() ||
+            !staged_ownership.valid() || !reversal.valid() || !baseline.valid() ||
+            !graph.bound() ||
             operation.key.account != graph.account_key() ||
             baseline.account() != operation.key.account ||
             operation.reconciliation_descriptor->account != operation.key.account ||
@@ -351,16 +411,19 @@ public:
                 baseline.graph_instance_id() ||
             operation.reconciliation_descriptor->baseline.graph_revision() !=
                 baseline.graph_revision() ||
-            basis.account != operation.key.account ||
-            basis.basis_key.operation_key != operation.key ||
-            !(basis.basis_key.broker_key == reversal.key()) ||
-            basis.operation_revision != operation.revision ||
-            !(basis.broker_provenance == reversal.provenance) ||
+            staged_ownership.account != operation.key.account ||
+            staged_ownership.basis_key.operation_key != operation.key ||
+            !(staged_ownership.basis_key.broker_key == reversal.key()) ||
+            staged_ownership.target_operation_revision != operation.revision ||
+            staged_ownership.base_operation_revision + 1 != operation.revision ||
+            !(staged_ownership.broker_provenance == reversal.provenance) ||
+            staged_ownership.close_intent_digest !=
+                detail::inout_candidate_close_intent_digest(operation, reversal.deal_ticket) ||
             reversal.account != graph.account_key())
             return std::nullopt;
 
         const auto predicate =
-            detail::inout_proof_history_predicate(operation, reversal.deal_ticket);
+            detail::inout_candidate_history_predicate(operation, reversal.deal_ticket);
         if (!predicate || !graph.history_deals_covered(*predicate->history_window,
                                                         baseline.history_deals_revision()))
             return std::nullopt;
@@ -378,8 +441,8 @@ public:
             MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_ENTRY |
             MT5BRIDGE_DEAL_KNOWN_VOLUME | MT5BRIDGE_DEAL_KNOWN_TIME |
             MT5BRIDGE_DEAL_KNOWN_SYMBOL;
-        const auto deal = detail::inout_proof_deal(graph, reversal.deal_ticket);
-        const auto symbol = deal ? detail::inout_proof_snapshot_text(
+        const auto deal = detail::inout_candidate_deal(graph, reversal.deal_ticket);
+        const auto symbol = deal ? detail::inout_candidate_snapshot_text(
                                         deal->symbol, sizeof(deal->symbol))
                                  : std::nullopt;
         if (!deal || !symbol || *symbol != reversal.symbol ||
@@ -399,8 +462,7 @@ public:
 
         std::size_t matching_fresh_deals = 0;
         for (const auto &candidate : graph.history_deals()) {
-            if (candidate.order_ticket != reversal.order_ticket ||
-                candidate.position_id != reversal.deal_position_id ||
+            if (candidate.position_id != reversal.deal_position_id ||
                 candidate.time_msc < predicate->history_window->from_msc ||
                 candidate.time_msc > predicate->history_window->to_msc ||
                 graph.history_deal_evidence_revision(candidate.ticket) != history_revision)
@@ -448,8 +510,8 @@ public:
             pre_state.close_obligation.satisfied || !pre_state.close_obligation.requested)
             return std::nullopt;
 
-        auto pre_exposure = detail::inout_proof_frontier(pre_state);
-        auto post_exposure = detail::inout_proof_frontier(post_state);
+        auto pre_exposure = detail::inout_candidate_frontier(pre_state);
+        auto post_exposure = detail::inout_candidate_frontier(post_state);
         pre_exposure.account = operation.key.account;
         post_exposure.account = operation.key.account;
         const auto logical_delta = pre_state.open_volume - post_state.open_volume;
@@ -460,14 +522,14 @@ public:
             reversal.provenance.evidence_digest};
         if (!observation.valid())
             return std::nullopt;
-        const auto digest = detail::inout_proof_digest(
-            operation, basis, reversal, pre_exposure, post_exposure, observation,
+        const auto digest = detail::inout_candidate_digest(
+            operation, staged_ownership, reversal, pre_exposure, post_exposure, observation,
             intent_volume, logical_delta);
-        ManagedInoutCloseDeltaProof result(
-            operation.key, reversal.deal_ticket, basis.basis_key, intent_volume,
+        ManagedInoutCloseDeltaCandidate result(
+            operation.key, reversal.deal_ticket, staged_ownership, intent_volume,
             logical_delta, pre_exposure, post_exposure, reversal.provenance, observation,
             digest);
-        return result.valid() ? std::optional<ManagedInoutCloseDeltaProof>(std::move(result))
+        return result.valid() ? std::optional<ManagedInoutCloseDeltaCandidate>(std::move(result))
                               : std::nullopt;
     }
 };

@@ -436,8 +436,9 @@ OwnerStepResult ManagedTradeOwner::prepare_durable_operation(
          intent.reconciliation_descriptor.settled_state != OperationState::cancelled))
         return result_for(OwnerStepStatus::invalid_request);
 
-    // The authoritative INOUT proof producer is a later slice. Until it is
-    // present, production owner preparation must not create a gated record.
+    // C2 currently validates only a structural INOUT candidate. Until an
+    // independent managed-attribution source exists, production owner
+    // preparation must not create a gated record.
     if (intent.settlement_mode == ManagedSettlementMode::allocation_gated)
         return result_for(OwnerStepStatus::invalid_request);
 

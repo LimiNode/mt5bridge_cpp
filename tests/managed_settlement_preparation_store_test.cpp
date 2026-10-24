@@ -9,6 +9,7 @@
 #include <mt5bridge/dispatch/file_managed_settlement_preparation_store.hpp>
 #include <mt5bridge/dispatch/managed_staged_allocation_admission.hpp>
 
+#include "file_store_support.hpp"
 #include "support/memory_journal_store.hpp"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -297,6 +299,28 @@ private:
     }
 };
 
+class MemoryPreparationStore final
+    : public mt5bridge::DurableManagedSettlementPreparationStore {
+public:
+    mt5bridge::ManagedSettlementPreparationLoadResult load(
+        const mt5bridge::OperationKey &key, std::uint64_t revision,
+        std::uint64_t deal_ticket) const override {
+        const auto found = std::find_if(
+            records.begin(), records.end(),
+            [&key, revision, deal_ticket](const auto &candidate) {
+                return candidate.target_operation.key == key &&
+                       candidate.target_operation.revision == revision &&
+                       candidate.fact.key.deal_ticket == deal_ticket;
+            });
+        if (found == records.end())
+            return {mt5bridge::ManagedSettlementPreparationLoadStatus::not_found,
+                    std::nullopt};
+        return {mt5bridge::ManagedSettlementPreparationLoadStatus::found, *found};
+    }
+
+    std::vector<mt5bridge::ManagedSettlementPreparation> records;
+};
+
 mt5bridge::BrokerAllocationEnvelope envelope(
     const mt5bridge::BrokerReversalRecord &source) {
     mt5bridge::BrokerAllocationEnvelope result;
@@ -313,8 +337,9 @@ mt5bridge::BrokerAllocationEnvelope envelope(
 
 mt5bridge::OperationRecord operation(
     const mt5bridge::ReconciliationBaseline &baseline, std::uint64_t revision,
-    std::uint64_t settled_volume, std::uint64_t deal_ticket = 701) {
-    const auto key = mt5bridge::OperationKey{account(), 71, 4};
+    std::uint64_t settled_volume, std::uint64_t deal_ticket = 701,
+    std::uint64_t operation_id = 4) {
+    const auto key = mt5bridge::OperationKey{account(), 71, operation_id};
     mt5bridge::ReconciliationDescriptor descriptor{
         key.account,
         baseline,
@@ -340,6 +365,122 @@ mt5bridge::OperationRecord operation(
     record.settled_volume = settled_volume;
     require(record.valid(), "operation fixture is invalid");
     return record;
+}
+
+void append_managed_provenance_fixture(
+    std::vector<std::uint8_t> &bytes,
+    const mt5bridge::ManagedSettlementProvenance &provenance) {
+    mt5bridge::file_store_support::append_u64(bytes, provenance.graph_instance_id);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.graph_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.history_deals_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.evidence_digest);
+}
+
+void append_broker_provenance_fixture(
+    std::vector<std::uint8_t> &bytes,
+    const mt5bridge::BrokerReversalProvenance &provenance) {
+    mt5bridge::file_store_support::append_u64(bytes, provenance.graph_instance_id);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.pre_graph_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.post_graph_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.pre_positions_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.post_positions_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.history_deals_revision);
+    mt5bridge::file_store_support::append_u64(bytes, provenance.evidence_digest);
+}
+
+void append_volume_fixture(std::vector<std::uint8_t> &bytes,
+                           const mt5bridge::BrokerVolume &volume) {
+    mt5bridge::file_store_support::append_u64(bytes, volume.units);
+    mt5bridge::file_store_support::append_u32(bytes, volume.scale);
+    mt5bridge::file_store_support::append_u64(bytes, volume.step_units);
+}
+
+std::filesystem::path allocation_record_path_fixture(
+    const std::filesystem::path &directory,
+    const mt5bridge::ManagedAllocationKey &key) {
+    const auto suffix =
+        "alloc-" +
+        mt5bridge::file_store_support::hex_u64(
+            mt5bridge::file_store_support::fnv1a(key.broker_key.account.server)) +
+        "-" + mt5bridge::file_store_support::hex_u64(key.broker_key.account.login) +
+        "-" + mt5bridge::file_store_support::hex_u64(key.broker_key.deal_ticket) +
+        "-" +
+        mt5bridge::file_store_support::hex_u64(
+            key.managed_key.operation_key.trade_id) +
+        "-" +
+        mt5bridge::file_store_support::hex_u64(
+            key.managed_key.operation_key.operation_id) +
+        "-" +
+        mt5bridge::file_store_support::hex_u64(key.managed_key.deal_ticket) +
+        "-" + mt5bridge::file_store_support::hex_u64(
+                    static_cast<std::uint32_t>(key.leg)) +
+        ".bin";
+    return directory / suffix;
+}
+
+/// \brief Writes a v2 allocation fixture without invoking production INOUT admission.
+/// \param directory Durable allocation directory.
+/// \param record Valid allocation entry to encode.
+///
+/// The Stage B producer intentionally rejects INOUT at commit time. This test-only
+/// fixture represents the immutable v2 record that a future authoritative producer
+/// may publish, so restart validation can exercise the real file-store decoder and
+/// source-validation path without weakening that production gate.
+void write_v2_allocation_fixture(const std::filesystem::path &directory,
+                                 const mt5bridge::ManagedAllocationEntry &record) {
+    require(record.valid(), "allocation fixture is invalid");
+    std::vector<std::uint8_t> body;
+    const auto append_string = [&body](const std::string &value) {
+        require(mt5bridge::file_store_support::append_string(body, value),
+                "allocation fixture string is too long");
+    };
+    append_string(record.account.server);
+    append_string(record.allocation_key.broker_key.account.server);
+    append_string(record.allocation_key.managed_key.account.server);
+    append_string(record.allocation_key.managed_key.operation_key.account.server);
+    mt5bridge::file_store_support::append_u64(body, record.account.login);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.broker_key.account.login);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.broker_key.deal_ticket);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.managed_key.account.login);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.managed_key.operation_key.account.login);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.managed_key.operation_key.trade_id);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.managed_key.operation_key.operation_id);
+    mt5bridge::file_store_support::append_u64(
+        body, record.allocation_key.managed_key.deal_ticket);
+    mt5bridge::file_store_support::append_u32(
+        body, static_cast<std::uint32_t>(record.allocation_key.leg));
+    append_managed_provenance_fixture(body, record.settlement_provenance);
+    append_broker_provenance_fixture(body, record.broker_provenance);
+    mt5bridge::file_store_support::append_u64(
+        body, record.settlement_source_operation_revision);
+    mt5bridge::file_store_support::append_u64(body, record.settlement_frontier_revision);
+    mt5bridge::file_store_support::append_u64(
+        body, record.settlement_frontier_digest.value_or(0));
+    mt5bridge::file_store_support::append_u64(body, record.basis_operation_revision);
+    mt5bridge::file_store_support::append_u64(body, record.managed_logical_units);
+    append_volume_fixture(body, record.broker_volume);
+
+    std::vector<std::uint8_t> bytes{'M', 'T', '5', 'A', 'L', 'G', '0', '1'};
+    mt5bridge::file_store_support::append_u32(bytes, 2);
+    mt5bridge::file_store_support::append_u64(bytes,
+                                              static_cast<std::uint64_t>(body.size()));
+    mt5bridge::file_store_support::append_u64(
+        bytes, mt5bridge::file_store_support::checksum(body));
+    bytes.insert(bytes.end(), body.begin(), body.end());
+
+    std::filesystem::create_directories(directory);
+    std::ofstream output(allocation_record_path_fixture(directory, record.allocation_key),
+                         std::ios::binary | std::ios::trunc);
+    require(output.good(), "allocation fixture could not be opened");
+    output.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(output.good(), "allocation fixture could not be written");
 }
 
 struct DurableSources {
@@ -712,12 +853,18 @@ void run_restart_regression() {
     std::filesystem::remove_all(root);
 }
 
-void run_incremental_historical_replay_regression() {
+// This regression exercises cumulative frontier claims across two immutable
+// facts. The current single-deal operation contract does not permit changing
+// an operation's immutable deal predicate between revisions, so the A/B
+// frontier is a test-only recovery model rather than a journal transition.
+void run_cumulative_frontier_recovery_regression() {
     const auto root = std::filesystem::temp_directory_path() /
                       ("mt5bridge_managed_settlement_incremental_" +
                        std::to_string(std::chrono::steady_clock::now()
                                           .time_since_epoch()
                                           .count()));
+    const auto preparation_root = root / "preparation";
+    const auto allocation_root = root / "allocations";
     std::filesystem::remove_all(root);
 
     mt5bridge::ObservationGraph graph(account());
@@ -787,23 +934,31 @@ void run_incremental_historical_replay_regression() {
     mt5bridge::ManagedStagedOwnershipAssociation staged_b{
         account(), {broker_b.key(), target_b.key}, broker_b.provenance, 9, 10, 0xbeef};
     require(staged_b.valid(), "incremental staged ownership fixture is invalid");
+    mt5bridge::ManagedStagedOwnershipAssociation staged_a{
+        account(), {broker_a.key(), target_a.key}, broker_a.provenance, 8, 9, 0xcafe};
+    require(staged_a.valid(), "first staged ownership fixture is invalid");
+    mt5bridge::ManagedSettlementPreparation preparation_a{
+        fact_a, frontier_a, target_a, 8, staged_a};
     mt5bridge::ManagedSettlementPreparation preparation_b{
         fact_b, frontier_b, target_b, 9, staged_b};
+    require(preparation_a.valid(), "first preparation fixture is invalid");
     require(preparation_b.valid(), "incremental preparation fixture is invalid");
 
     mt5bridge_test_support::MemoryJournalStore preparation_journal;
     preparation_journal.records[base_b.key] = base_b;
-    mt5bridge::WindowsFileManagedSettlementPreparationStore preparation_store(root);
+    mt5bridge::WindowsFileManagedSettlementPreparationStore preparation_store(
+        preparation_root);
     require(preparation_store.prepare(
                 *proof_b, target_b, 9, staged_b, preparation_journal) ==
                 mt5bridge::ManagedSettlementPreparationStatus::prepared,
             "incremental preparation did not publish");
 
-    mt5bridge::WindowsFileManagedSettlementPreparationStore restarted_preparation(root);
+    mt5bridge::WindowsFileManagedSettlementPreparationStore restarted_preparation(
+        preparation_root);
     const auto scanned = restarted_preparation.scan();
     require(scanned.complete() && scanned.records.size() == 1 &&
                 scanned.records.front() == preparation_b,
-            "incremental preparation did not survive restart");
+            "durable preparation did not survive restart");
 
     MemoryBrokerStore broker_store;
     broker_store.records[broker_a.key()] = broker_a;
@@ -816,7 +971,35 @@ void run_incremental_historical_replay_regression() {
     settlement_store.facts = {fact_a, fact_b};
     settlement_store.frontiers = {frontier_a, frontier_b};
     MemoryBasisStore basis_store;
-    basis_store.bases = {staged_b.settled_basis()};
+    basis_store.bases = {staged_a.settled_basis(), staged_b.settled_basis()};
+
+    // The A manifest is intentionally supplied through a test-only lookup seam:
+    // the current production single-deal binding cannot prepare two conflicting
+    // immutable descriptors under one journal key. The real allocation scanner
+    // still validates both durable v2 records against these exact manifests.
+    MemoryPreparationStore source_preparations;
+    source_preparations.records = {preparation_a, preparation_b};
+
+    // Production commit remains fail-closed for INOUT. Write only the exact
+    // v2 bytes that a future authoritative producer would publish, then let
+    // the real file-backed scan_recovery() validate every source.
+    write_v2_allocation_fixture(allocation_root, allocation_a);
+    write_v2_allocation_fixture(allocation_root, allocation_b);
+    mt5bridge::WindowsFileManagedAllocationStore restarted_allocation(allocation_root);
+    require(restarted_allocation.ready(), "cumulative allocation store did not open");
+    const auto recovered_allocations = restarted_allocation.scan_recovery(
+        settlement_store, broker_store, basis_store, envelope_store,
+        source_preparations);
+    require(recovered_allocations.complete() && recovered_allocations.records.size() == 2,
+            "historical replay did not validate durable allocation sources");
+    MemoryPreparationStore missing_preparation;
+    missing_preparation.records = {preparation_b};
+    const auto missing_source = restarted_allocation.scan_recovery(
+        settlement_store, broker_store, basis_store, envelope_store,
+        missing_preparation);
+    require(!missing_source.complete(),
+            "historical allocation without its preparation was admitted");
+
     MemoryAllocationStore allocation_store;
     allocation_store.allocations = {allocation_a, allocation_b};
 
@@ -864,7 +1047,7 @@ void run_incremental_historical_replay_regression() {
 int main() {
     try {
         run_restart_regression();
-        run_incremental_historical_replay_regression();
+        run_cumulative_frontier_recovery_regression();
         std::cout << "managed settlement preparation checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {

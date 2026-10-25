@@ -68,9 +68,13 @@ defines:
 No implementation in this slice can construct the sealed proof. A future
 producer may do so only after it has independently validated the journal,
 opening allocation, result binding, position identity, and committed
-consumption history. Returning `found` without the sealed value is invalid.
-There is intentionally no `is_authoritative` flag, caller-provided signature,
-or trust bit that upgrades a structural entry.
+consumption history. `found()` checks only the local shape of a returned
+sealed value; it does not compare the value with the lookup request or confer
+authority on its own. A future producer must compare the exact operation key,
+revision, and `POSITION_IDENTIFIER` with independently reloaded durable
+records before returning `found`. Returning `found` without the sealed value
+is invalid. There is intentionally no `is_authoritative` flag, caller-provided
+signature, or trust bit that upgrades a structural entry.
 
 The existing `DurableManagedPositionOwnershipSource` remains a structural
 frontier lookup used by the ADR-0037 contract test. It is not changed into an
@@ -115,7 +119,8 @@ The C3A contract test verifies that:
 1. a structurally valid lookup request does not itself produce a proof;
 2. the current unavailable source returns fail-closed without a sealed value;
 3. a result marked `found` without a sealed value is rejected; and
-4. the sealed proof cannot be constructed from caller-supplied identity,
+4. changing caller-supplied query identity still returns `unavailable`; and
+5. the sealed proof cannot be constructed from caller-supplied identity,
    revision, units, or digest.
 
 Positive durable opening-authority tests are intentionally deferred until the

@@ -205,6 +205,20 @@ void builds_partial_frontier_and_extends_without_rewrite() {
             "stale source revision extended the frontier");
 }
 
+void keeps_frontier_canonical_and_terminal_replay_safe() {
+    const auto first = evidence(5001, 4, 0.05);
+    const auto second = evidence(5002, 5, 0.03);
+    const auto left = ManagedOpeningExecutionEvidenceProducer::frontier(
+        account(), operation(), 3, 8, {first, second}, true);
+    const auto right = ManagedOpeningExecutionEvidenceProducer::frontier(
+        account(), operation(), 3, 8, {second, first}, true);
+    require(left.valid() && right.valid() && left == right,
+            "frontier canonicalization depends on source order");
+    const auto late = append_managed_opening_execution(left, evidence(5003, 6, 0.01));
+    require(late.status == ManagedOpeningExecutionFrontierAppendStatus::terminal_frontier,
+            "terminal frontier accepted a late execution");
+}
+
 void rejects_frontier_mixing_and_overfill() {
     const auto first = evidence(5001, 4, 0.05);
     auto foreign_observation = observation(5004, 4, 0.01);
@@ -236,6 +250,7 @@ int main() {
         rejects_inexact_or_missing_quantity();
         protects_duplicate_execution_and_conflicting_replay();
         builds_partial_frontier_and_extends_without_rewrite();
+        keeps_frontier_canonical_and_terminal_replay_safe();
         rejects_frontier_mixing_and_overfill();
         std::cout << "managed opening execution evidence tests passed\n";
         return 0;

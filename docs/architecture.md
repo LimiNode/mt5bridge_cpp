@@ -263,6 +263,15 @@ Python implementation of that seam is specified in
 [ADR-0014](adr/0014-private-python-dispatch-transport.md).
 The bridge never retries a side-effecting order implicitly.
 
+The release sequence and gate dependencies are recorded in
+[`roadmap.md`](roadmap.md). Trade Event Observation is a separate
+polling-first contour specified by
+[ADR-0039](adr/0039-trade-event-observation.md): it observes orders, deals, and
+positions through snapshot/history reconciliation, optionally consumes MQL5
+transaction hints, and delivers explicit changes, gaps, and resynchronization
+states. It is not automatic copy-trading and is not coupled to
+`ManagedTradeOwner` internals.
+
 The dispatch/recovery interleavings are also specified by the finite TLC model
 in [ADR-0021](adr/0021-formal-dispatch-recovery-model.md). It checks the
 non-resendable barrier, writer/epoch fencing, atomic result-plus-binding

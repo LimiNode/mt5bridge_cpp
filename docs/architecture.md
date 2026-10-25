@@ -224,15 +224,20 @@ claim before the exposure-effective journal frontier and managed exposure may
 advance. The prepared receipt is durable recovery evidence but is not
 committed-only settlement admission; finalization publishes settlement and the
 ordinary ownership basis after the journal CAS. An `INOUT` close remains
-fail-closed until a sealed authoritative managed-delta proof binds the managed
-intent to the broker close leg. Exact allocation replay is compared with the
+fail-closed until an independent authoritative managed-delta source binds the
+managed intent to the broker close leg; the C2 structural candidate is not that
+source. Exact allocation replay is compared with the
 durable journal during restart, so an interrupted publication can be completed
 without applying one broker deal twice.
 The C1 implementation persists an immutable `ManagedSettlementMode` in new
 journal and preparation formats; old formats remain `legacy`, and an
 `allocation_gated` CLOSE without allocation-backed evidence fails closed rather
-than entering the legacy recovery path. Authoritative INOUT proof and owner
-exposure wiring remain later slices.
+than entering the legacy recovery path. Stage C2 now provides the private
+sealed `ManagedInoutCloseDeltaCandidateProducer`, which validates staged
+ownership, result-derived history binding, and fresh graph evidence against a
+structural pre/post exposure candidate. It is not an independent managed
+attribution source and cannot authorize allocation or exposure mutation;
+owner/reconciliation wiring and that authority remain deferred to Stage C3.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

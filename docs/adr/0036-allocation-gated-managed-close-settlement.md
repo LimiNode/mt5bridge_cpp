@@ -61,10 +61,16 @@ discriminator to the operation journal and `MT5PRP01` preparation receipt:
 allocation-backed evidence described below. Existing journal versions 1--4
 and preparation version 1 decode as `legacy`; unknown or malformed mode values
 fail closed, and compare-and-commit cannot change the mode. The legacy owner
-recovery path never interprets a gated CLOSE as legacy. Stage C2 will add the
-authoritative INOUT close proof, and Stage C3 will connect gated publication to
-the owner/reconciliation loop and exposure mutation. Those later stages are
-not part of this implementation slice.
+recovery path never interprets a gated CLOSE as legacy. Stage C2 now provides a
+private structural `ManagedInoutCloseDeltaCandidateProducer`: it checks a
+positive delta candidate against pre/post exposure frontiers, one fresh,
+complete INOUT history observation, a staged ownership association, and the
+exact close intent. The candidate is not an independent managed-attribution
+source and therefore is not authorization for allocation or exposure
+mutation. It accepts neither a caller scalar nor broker volume, does not
+attribute the reverse-open leg, and does not publish settlement, allocation,
+journal state, or exposure. Stage C3 remains blocked until an independent
+managed-attribution source is defined and connected to the owner loop.
 
 ### Close settlement publication protocol
 
@@ -95,7 +101,9 @@ managed state mutation is allowed before the final step succeeds.
    observation provenance using the applicable close proof. The existing
    ADR-0029 aggregator remains the path for `OUT` and `OUT_BY`; it is not
    silently broadened to accept `INOUT`. For an `INOUT` close, the owner must
-   first obtain the separate `ManagedInoutCloseDeltaProof` described below.
+   first obtain the structural `ManagedInoutCloseDeltaCandidate` described
+   below and an independent managed-attribution authorization. That source is
+   not implemented in this slice.
 2. Build a target operation at `R + 1` and produce the exact per-deal fact and
    complete cumulative frontier for `(OperationKey, DEAL_TICKET)`. The fact's
    source revision may be `<=` the target frontier revision. Cumulative
@@ -108,7 +116,8 @@ managed state mutation is allowed before the final step succeeds.
 4. Under the same account fencing capability and allocation-store lock, run a
    staged admission for the prepared target. It reloads and compares the
    prepared fact/frontier, staged ownership association, broker reversal,
-   operation base, authoritative managed-delta proof, and broker-only
+   operation base, the structural managed-delta candidate plus its independent
+   authorization, and broker-only
    envelope, and checks capacity. This is a separate owner protocol; the
    ordinary committed-only ADR-0034 admission and
    `validate_managed_ownership_basis()` contract are unchanged.
@@ -190,36 +199,39 @@ managed_logical_units)`. The digest covers the complete frontier, not only the
 new deal's observation. A digest mismatch, duplicate entry, missing entry, or
 different canonical composition is a durable conflict.
 
-### INOUT close-leg proof
+### INOUT close-leg candidate and authority boundary
 
-The allocation-gated path uses a separate bounded proof for
-`DEAL_ENTRY_INOUT`. It must bind the operation's single history-deal identity
-to the durable `BrokerReversalRecord`, the durable ownership basis, and the
-managed close intent. The proof derives managed logical units from an
-authoritative managed reconciliation source named
-`ManagedInoutCloseDeltaProof`. This is a private, sealed producer result, not a
-caller-supplied scalar and not the broker volume. It contains the operation and
-deal identities, the managed trade/close-intent binding, the exact positive
-managed logical delta, the validated pre/post managed exposure frontier, fresh
-account-scoped observation provenance, and a digest covering those facts.
+The allocation-gated path will eventually need a separate bounded authorization
+for `DEAL_ENTRY_INOUT`. C2 currently provides only the structural
+`ManagedInoutCloseDeltaCandidate`: it binds the operation's result-derived
+history-deal identity to the staged ownership association, durable
+`BrokerReversalRecord`, managed close intent, and fresh observation provenance.
+It derives a positive delta from the supplied pre/post exposure frontiers, but
+those frontiers are not an independent attribution source. The candidate is
+therefore not a caller-supplied scalar, not broker volume, and not authorization
+for allocation or exposure mutation.
 
-The proof is authoritative only when a fresh graph has complete history
-coverage, the operation has exactly one binding to the same broker deal, the
-managed close intent identifies the same trade, the pre/post managed exposure
-states prove one unambiguous delta, and the durable broker reversal binds the
-same account/deal and position context. The delta must be positive, fit the
-remaining managed exposure and target operation volume, and be the only new
-managed contribution in the covered observation. Broker `broker_close_leg` is
-used only for the later integer-domain mapping; broker volume is never copied
-into managed logical units.
+The missing authoritative source must independently establish that the managed
+delta belongs to the observed INOUT close. Until that source exists, C2 remains
+a fail-closed structural validator. Its candidate checks still require complete
+history coverage, a zero-ticket predicate with exactly one non-zero correlation
+binding, a staged association with the exact close-intent digest, and durable
+broker reversal identity. Broker `broker_close_leg` remains reserved for later
+integer-domain mapping; broker volume is never copied into managed logical units.
+The close-intent digest uses a domain/version tag and canonical length-delimited
+encoding of the operation identity, request payload, complete immutable
+reconciliation descriptor (including baseline, predicates, optional windows and
+transitions), result-derived bindings, and bound deal ticket. A payload,
+descriptor, or binding change therefore conflicts with the retained staged
+association even when the operation key and requested volume are unchanged.
 
 `broker_reverse_open_leg` remains unallocated, and ambiguous position/order
-binding, stale observation, incomplete deal fields, or missing managed-delta
-evidence fail closed. Until a producer can create this proof, an `INOUT` close
-remains unsupported and produces no prepared settlement, allocation, journal
-advance, or exposure mutation. The existing
-`history_deal_volume(..., exit)` path is not reused for this proof because it
-deliberately rejects `INOUT`.
+binding, stale observation, incomplete deal fields, competing same-position
+history, or missing managed-delta authority fail closed. An `INOUT` close
+remains unsupported in production and produces no prepared settlement,
+allocation, journal advance, or exposure mutation. The existing
+`history_deal_volume(..., exit)` path is not reused because it deliberately
+rejects `INOUT`.
 
 ### Restart recovery
 
@@ -246,8 +258,8 @@ For every allocation-backed close operation, recovery verifies:
 
 - every entry passes ADR-0035 historical source validation;
 - every entry has a matching committed or exact prepared settlement frontier;
-- every prepared frontier has a matching staged ownership association and
-  authoritative managed-delta proof;
+- every prepared frontier has a matching staged ownership association and, once
+  C3 exists, an independent authoritative managed-delta authorization;
 - every frontier entry has exactly one matching allocation claim for the gated
   close being advanced;
 - each managed settlement key occurs at most once;
@@ -324,8 +336,9 @@ The implementation slice must add focused regressions for:
   unchanged; and
 - successful close settlement proving that the committed allocation and the
   journal frontier agree before exposure mutation;
-- INOUT close-leg proof accepts only an authoritative managed delta and rejects
-  reverse-open or ambiguous ownership;
+- C2 structural INOUT candidate validation rejects reverse-open attribution,
+  caller-selected tickets, competing same-position history, or ambiguous
+  ownership; authoritative managed-delta authorization remains a C3 prerequisite;
 - staged ownership cannot be admitted through the ordinary settled-basis
   validator and is finalized only after the target journal CAS;
 - legacy close recovery remains separate from explicitly allocation-gated close

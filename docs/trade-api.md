@@ -667,9 +667,9 @@ reversals and CloseBy, respectively.
   admission and allocation claim before the durable journal frontier and
   managed exposure update. Prepared evidence is not committed-only admission;
   finalization publishes settlement and the ordinary ownership basis after the
-  journal CAS. `INOUT` close allocation remains fail-closed until a sealed
-  authoritative managed-delta proof binds the managed intent to the broker
-  close leg.
+  journal CAS. `INOUT` close allocation remains fail-closed until an
+  independent authoritative managed-delta source binds the managed intent to
+  the broker close leg. C2's structural candidate validator is not that source.
   Restart recovery accepts either the exact prepared receipt for an interrupted
   publication or a committed settlement, and compares the complete frontier
   with the allocation claims so an exact replay cannot apply one broker deal
@@ -677,8 +677,12 @@ reversals and CloseBy, respectively.
   close recovery, and the latter must fail closed without its allocation proof.
   New journal/preparation records carry an immutable `ManagedSettlementMode`;
   versions 1--4 of the journal and preparation version 1 decode as `legacy`,
-  while unknown modes are rejected. The C1 slice does not yet provide the
-  authoritative INOUT proof producer or owner exposure wiring.
+  while unknown modes are rejected. Stage C2 now provides a private sealed
+  structural INOUT close-delta candidate validator; it checks staged ownership,
+  result-derived history binding, and fresh graph evidence without accepting a
+  caller scalar or broker volume. It is not managed-delta authorization, and
+  owner exposure wiring remains fail-closed until Stage C3 supplies an
+  independent attribution source.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

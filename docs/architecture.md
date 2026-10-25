@@ -254,6 +254,22 @@ ownership. The private sealed opening-proof contract therefore returns
 `unavailable` until a future durable producer joins committed OPEN evidence,
 opening allocation, broker position identity, and consumption history; no
 structural frontier or digest is upgraded into authority.
+[ADR-0040](adr/0040-managed-opening-attribution-producer-research.md) records
+the C3A B1 producer research boundary. The current result path persists order
+and deal tickets but not `POSITION_IDENTIFIER` or an opening allocation, while
+the position identifier recovered from history remains observation evidence.
+The first producer must therefore join complete polling-based order/deal/
+position evidence to a durable opening record under account fencing; hints and
+caller-selected facts cannot authorize publication. Its publication protocol
+separates source evidence, a recovery manifest, immutable allocation commit,
+and independent verification. The current whole-number managed-volume domain
+also cannot represent ordinary fractional Forex lots without a separately
+validated contract that maps an MT5 binary floating-point value to one unique
+integer number of canonical broker steps. The recovery manifest must reference
+versioned durable per-deal facts; its digest verifies but never replaces that
+source chain. Until both source and quantity chains are implemented and
+restart-tested, the opening proof and production `INOUT` paths remain
+fail-closed.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

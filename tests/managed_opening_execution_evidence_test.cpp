@@ -1,42 +1,17 @@
 /// \file managed_opening_execution_evidence_test.cpp
-/// \brief Verifies immutable OPEN execution evidence and frontier contracts.
+/// \brief Verifies OPEN execution replay and cumulative-frontier semantics.
 
 #include "managed_opening_execution_evidence.hpp"
 
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
-
-namespace mt5bridge::dispatch {
-
-// Test-only seam. Production has no producer or owner wiring in this slice.
-class ManagedOpeningExecutionEvidenceProducer {
-public:
-    static std::optional<ManagedOpeningDealEvidence> seal(
-        const ManagedOpeningExecutionRequest &request,
-        const ManagedOpeningDealObservation &observation) {
-        if (validate_managed_opening_observation(request, observation) !=
-            ManagedOpeningExecutionValidationStatus::valid)
-            return std::nullopt;
-        return ManagedOpeningDealEvidence(request, observation);
-    }
-
-    static ManagedOpeningExecutionFrontier frontier(
-        const AccountKey &account, const OperationKey &operation_key,
-        std::uint64_t operation_revision, std::uint64_t requested,
-        std::vector<ManagedOpeningDealEvidence> entries, bool terminal) {
-        std::sort(entries.begin(), entries.end(), [](const auto &left, const auto &right) {
-            return left.deal_ticket() < right.deal_ticket();
-        });
-        return ManagedOpeningExecutionFrontier(
-            account, operation_key, operation_revision, requested,
-            std::move(entries), terminal);
-    }
-};
-
-} // namespace mt5bridge::dispatch
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -50,208 +25,330 @@ void require(bool condition, const char *message) {
 
 AccountKey account() { return {"demo", 42}; }
 
-OperationKey operation() { return {account(), 71, 9}; }
-
-ManagedOpeningExecutionRequest request(std::uint64_t source_revision = 4) {
-    return {account(), operation(), OperationKind::open, 3, 3001, 88001,
-            source_revision, source_revision};
+OperationKey operation(std::uint64_t operation_id = 9) {
+    return {account(), 71, operation_id};
 }
 
-std::optional<ManagedOpeningQuantity> quantity(double volume) {
-    return derive_managed_opening_quantity(
-        volume, 0.01, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000});
+ManagedOpeningExecutionRequest request_for(
+    const ManagedOpeningDealObservation &observation) {
+    return {observation.operation_key, OperationKind::open,
+            observation.operation_revision, observation.order_ticket,
+            observation.position_identifier};
 }
 
-ManagedOpeningDealObservation observation(std::uint64_t deal_ticket,
-                                          std::uint64_t source_revision,
+ManagedOpeningDealObservation observation(std::uint64_t deal_ticket = 5001,
+                                          std::uint64_t source_revision = 4,
                                           double volume = 0.05) {
-    return {account(), operation(), 3, source_revision, 99, source_revision,
-            1000, 2000, 3001, deal_ticket, 88001,
-            kManagedOpeningRequiredDealFields,
-            BrokerPositionDirection::buy, BrokerDealEntry::in, 1500,
-            volume, 0.01, 1, quantity(volume)};
+    return {operation(), 3, 3001, deal_ticket, 88001,
+            kManagedOpeningRequiredDealFields, BrokerPositionDirection::buy,
+            BrokerDealEntry::in, 1500, volume, 0.01,
+            ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000},
+            source_revision, 99, source_revision, 1000, 2000};
 }
 
-ManagedOpeningDealEvidence evidence(std::uint64_t deal_ticket,
-                                    std::uint64_t source_revision,
-                                    double volume = 0.05) {
-    const auto candidate = observation(deal_ticket, source_revision, volume);
-    const auto result = ManagedOpeningExecutionEvidenceProducer::seal(
-        request(source_revision), candidate);
-    require(result.has_value(), "valid source observation was rejected");
+ManagedOpeningDealFact fact(ManagedOpeningDealObservation candidate) {
+    const auto result = ManagedOpeningDealFact::from_observation(
+        request_for(candidate), candidate);
+    require(result.has_value(), "locally valid OPEN deal was rejected");
     return *result;
 }
 
-void accepts_complete_source_and_canonical_replay() {
-    const auto source = observation(5001, 4);
-    require(validate_managed_opening_observation(request(), source) ==
+template <typename T, typename = void>
+struct has_terminal_method : std::false_type {};
+
+template <typename T>
+struct has_terminal_method<T,
+                           std::void_t<decltype(std::declval<const T &>().terminal())>>
+    : std::true_type {};
+
+std::string hex(const std::vector<std::uint8_t> &bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0x0f]);
+    }
+    return result;
+}
+
+void validates_local_shape_without_claiming_authority() {
+    const auto candidate = observation();
+    require(validate_managed_opening_observation(request_for(candidate), candidate) ==
                 ManagedOpeningExecutionValidationStatus::valid,
-            "complete source observation was rejected");
-    const auto first = evidence(5001, 4);
-    const auto second = evidence(5001, 4);
-    require(first.valid(), "sealed opening evidence is invalid");
-    require(first == second, "canonical replay changed immutable evidence");
-    require(first.canonical_bytes() == second.canonical_bytes(),
-            "canonical evidence bytes are not deterministic");
-    require(first.evidence_digest() != 0, "opening evidence digest is empty");
-    require(classify_managed_opening_replay(first, second) ==
-                ManagedOpeningExecutionReplayStatus::already_committed,
-            "exact deal replay was not idempotent");
-    static_assert(!std::is_default_constructible_v<ManagedOpeningDealEvidence>);
+            "complete local OPEN join was rejected");
+    const auto admitted = fact(candidate);
+    require(admitted.valid(), "created OPEN fact is internally inconsistent");
+
+    auto incomplete = candidate;
+    incomplete.history_coverage_revision = 5;
+    require(validate_managed_opening_observation(request_for(incomplete), incomplete) ==
+                ManagedOpeningExecutionValidationStatus::incomplete_history,
+            "mismatched sampled and coverage revisions were accepted");
+    require(!ManagedOpeningDealFact::from_observation(
+                 request_for(incomplete), incomplete),
+            "incomplete history created a local fact");
+
+    incomplete = candidate;
+    incomplete.known_fields &=
+        ~static_cast<std::uint64_t>(MT5BRIDGE_DEAL_KNOWN_TIME);
+    require(validate_managed_opening_observation(request_for(incomplete), incomplete) ==
+                ManagedOpeningExecutionValidationStatus::invalid_deal,
+            "missing history field was accepted");
+
+    incomplete = candidate;
+    incomplete.entry = BrokerDealEntry::inout;
+    require(validate_managed_opening_observation(request_for(incomplete), incomplete) ==
+                ManagedOpeningExecutionValidationStatus::invalid_deal,
+            "INOUT crossed the OPEN-only gate");
+
+    incomplete = observation(5001, 4, 0.015);
+    require(!ManagedOpeningDealFact::from_observation(
+                 request_for(incomplete), incomplete),
+            "fractional broker step created a fact");
+
+    incomplete = candidate;
+    incomplete.quantity_domain.canonical_scale = 10;
+    require(validate_managed_opening_observation(request_for(incomplete), incomplete) ==
+                ManagedOpeningExecutionValidationStatus::invalid_quantity,
+            "invalid quantity domain passed local validation");
 }
 
-void rejects_missing_history_and_foreign_identity() {
-    auto candidate = observation(5001, 4);
-    candidate.history_window_to_msc = 1499;
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::missing_history,
-            "deal outside history coverage was accepted");
+void rejects_mismatched_join_constraints() {
+    const auto candidate = observation();
+    auto request = request_for(candidate);
+    request.operation_revision = 0;
+    require(validate_managed_opening_observation(request, candidate) ==
+                ManagedOpeningExecutionValidationStatus::invalid_request,
+            "invalid OPEN query was accepted");
 
-    candidate = observation(5001, 4);
-    candidate.account = {"other", 42};
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::account_mismatch,
-            "foreign account evidence was accepted");
-
-    candidate = observation(5001, 4);
-    candidate.order_ticket = 3002;
-    require(validate_managed_opening_observation(request(), candidate) ==
+    request = request_for(candidate);
+    request.operation_key.operation_id = 10;
+    require(validate_managed_opening_observation(request, candidate) ==
+                ManagedOpeningExecutionValidationStatus::operation_mismatch,
+            "foreign operation joined to a deal");
+    request = request_for(candidate);
+    request.order_ticket = 3002;
+    require(validate_managed_opening_observation(request, candidate) ==
                 ManagedOpeningExecutionValidationStatus::order_mismatch,
-            "foreign order evidence was accepted");
-
-    candidate = observation(5001, 4);
-    candidate.position_identifier = 88002;
-    require(validate_managed_opening_observation(request(), candidate) ==
+            "foreign order joined to a deal");
+    request = request_for(candidate);
+    request.position_identifier = 88002;
+    require(validate_managed_opening_observation(request, candidate) ==
                 ManagedOpeningExecutionValidationStatus::position_mismatch,
-            "foreign position evidence was accepted");
-
-    candidate = observation(5001, 4);
-    candidate.entry = BrokerDealEntry::inout;
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::foreign_or_invalid_deal,
-            "INOUT evidence crossed the OPEN gate");
-
-    candidate = observation(5001, 4);
-    candidate.known_fields &= ~static_cast<std::uint64_t>(MT5BRIDGE_DEAL_KNOWN_TIME);
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::foreign_or_invalid_deal,
-            "missing deal timestamp field was accepted");
-
-    candidate = observation(5001, 4);
-    candidate.source_revision = 5;
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::source_revision_mismatch,
-            "source revision mismatch was accepted");
+            "foreign position joined to a deal");
 }
 
-void rejects_inexact_or_missing_quantity() {
-    auto candidate = observation(5001, 4, 0.015);
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::invalid_quantity,
-            "fractional broker volume was accepted as exact evidence");
+void makes_repoll_and_restart_idempotent() {
+    const auto committed = fact(observation());
+    const auto original_bytes = committed.canonical_bytes();
 
-    candidate = observation(5001, 4);
-    candidate.quantity.reset();
-    require(validate_managed_opening_observation(request(), candidate) ==
-                ManagedOpeningExecutionValidationStatus::invalid_quantity,
-            "missing exact quantity was accepted");
+    auto repoll = observation(5001, 5);
+    repoll.graph_instance_id = 99;
+    const auto repolled = fact(repoll);
+    require(committed.admission_receipt().source_revision !=
+                repolled.admission_receipt().source_revision,
+            "repoll fixture did not change provenance");
+    require(classify_managed_opening_replay(committed, repolled) ==
+                ManagedOpeningExecutionReplayStatus::already_committed,
+            "unchanged deal after repoll was not idempotent");
+
+    auto restart = observation(5001, 6);
+    restart.graph_instance_id = 100;
+    const auto restarted = fact(restart);
+    require(classify_managed_opening_replay(committed, restarted) ==
+                ManagedOpeningExecutionReplayStatus::already_committed,
+            "unchanged deal after graph restart was not idempotent");
+    require(committed.canonical_bytes() == original_bytes,
+            "replay rewrote the original admission receipt");
 }
 
-void protects_duplicate_execution_and_conflicting_replay() {
-    const auto first = evidence(5001, 4);
-    const auto different_deal = evidence(5002, 5, 0.03);
-    require(classify_managed_opening_replay(first, different_deal) ==
+void rejects_conflicting_broker_payload() {
+    const auto committed = fact(observation());
+    const auto expect_conflict = [&](ManagedOpeningDealObservation changed,
+                                     const char *message) {
+        require(classify_managed_opening_replay(committed, fact(std::move(changed))) ==
+                    ManagedOpeningExecutionReplayStatus::conflict,
+                message);
+    };
+
+    expect_conflict(observation(5001, 5, 0.04),
+                    "same deal with changed volume was not a conflict");
+    auto changed = observation(5001, 5);
+    changed.order_ticket = 3002;
+    expect_conflict(changed, "same deal with changed order was not a conflict");
+    changed = observation(5001, 5);
+    changed.position_identifier = 88002;
+    expect_conflict(changed, "same deal with changed position was not a conflict");
+    changed = observation(5001, 5);
+    changed.direction = BrokerPositionDirection::sell;
+    expect_conflict(changed, "same deal with changed direction was not a conflict");
+    changed = observation(5001, 5);
+    changed.deal_time_msc = 1501;
+    expect_conflict(changed, "same deal with changed timestamp was not a conflict");
+
+    require(classify_managed_opening_replay(
+                committed, fact(observation(5002, 5))) ==
                 ManagedOpeningExecutionReplayStatus::new_execution,
-            "new deal identity was treated as a replay");
-
-    const auto conflicting = evidence(5001, 5, 0.03);
-    require(classify_managed_opening_replay(first, conflicting) ==
-                ManagedOpeningExecutionReplayStatus::conflict,
-            "same deal ticket with different facts was accepted");
+            "different deal ticket was treated as replay");
 }
 
-void builds_partial_frontier_and_extends_without_rewrite() {
-    const auto first = evidence(5001, 4, 0.05);
-    const auto second = evidence(5002, 5, 0.03);
-    const auto third = evidence(5003, 6, 0.02);
-    auto frontier = ManagedOpeningExecutionEvidenceProducer::frontier(
-        account(), operation(), 3, 10, {first}, false);
-    require(frontier.valid() && !frontier.terminal() &&
-                frontier.cumulative_managed_logical_units() == 5,
-            "partial opening frontier is invalid");
+void enforces_one_opening_identity_and_quantity_domain() {
+    const auto first = fact(observation(5001, 4, 0.05));
+    const auto second = fact(observation(5002, 4, 0.03));
+    const auto same_batch = ManagedOpeningExecutionFrontier::create({first, second});
+    require(same_batch && same_batch->cumulative_broker_units() == 8 &&
+                same_batch->cumulative_managed_logical_units() == 8,
+            "multiple fills from one observation revision were rejected");
 
-    const auto extended = append_managed_opening_execution(frontier, second);
-    require(extended.appended() && extended.frontier &&
-                !extended.frontier->terminal() &&
-                extended.frontier->cumulative_managed_logical_units() == 8,
-            "partial frontier extension failed");
-    require(frontier.entries().size() == 1 &&
-                frontier.cumulative_managed_logical_units() == 5,
-            "frontier extension rewrote historical state");
+    const auto expect_mixed_rejection = [&](ManagedOpeningDealObservation mixed,
+                                            const char *message) {
+        require(!ManagedOpeningExecutionFrontier::create({first, fact(std::move(mixed))}),
+                message);
+    };
 
-    const auto terminal = append_managed_opening_execution(*extended.frontier, third);
-    require(terminal.appended() && terminal.frontier && terminal.frontier->terminal() &&
-                terminal.frontier->cumulative_managed_logical_units() == 10,
-            "terminal opening frontier was not reached");
-    require(terminal.frontier->entries().size() == 3,
-            "late fill did not extend the cumulative frontier");
+    auto mixed = observation(5002, 5, 0.03);
+    mixed.operation_key.account.login = 43;
+    expect_mixed_rejection(mixed, "mixed accounts formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.operation_key.operation_id = 10;
+    expect_mixed_rejection(mixed, "mixed operations formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.operation_revision = 4;
+    expect_mixed_rejection(mixed, "mixed journal revisions formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.position_identifier = 88002;
+    expect_mixed_rejection(mixed, "mixed positions formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.order_ticket = 3002;
+    expect_mixed_rejection(mixed, "mixed orders formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.direction = BrokerPositionDirection::sell;
+    expect_mixed_rejection(mixed, "mixed directions formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.quantity_domain = {2, 1, 2, 1000, 2000};
+    expect_mixed_rejection(mixed, "mixed logical mappings formed one frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.observed_step = 0.001;
+    mixed.quantity_domain = {3, 1, 1, 1000, 1000};
+    expect_mixed_rejection(mixed, "mixed broker scales formed one frontier");
 
-    const auto duplicate = append_managed_opening_execution(*extended.frontier, second);
+    const auto initial = ManagedOpeningExecutionFrontier::create({first});
+    require(initial.has_value(), "single opening fact did not form a frontier");
+    mixed = observation(5002, 5, 0.03);
+    mixed.position_identifier = 88002;
+    const auto incompatible = append_managed_opening_execution(*initial, fact(mixed));
+    require(incompatible.status ==
+                ManagedOpeningExecutionFrontierAppendStatus::incompatible_identity,
+            "append accepted a foreign opening identity");
+    const auto conflicting = append_managed_opening_execution(
+        *initial, fact(observation(5001, 5, 0.04)));
+    require(conflicting.status == ManagedOpeningExecutionFrontierAppendStatus::conflict,
+            "append accepted conflicting payload for one deal ticket");
+
+    auto huge_first = observation(6001, 6, 0.01);
+    huge_first.quantity_domain = {
+        2, 1, (std::numeric_limits<std::uint64_t>::max)(), 1,
+        (std::numeric_limits<std::uint64_t>::max)()};
+    auto huge_second = huge_first;
+    huge_second.deal_ticket = 6002;
+    require(!ManagedOpeningExecutionFrontier::create(
+                 {fact(huge_first), fact(huge_second)}),
+             "cumulative logical-unit overflow formed a frontier");
+
+    auto broker_huge_first = observation(7001, 7, 9.3e18);
+    broker_huge_first.observed_step = 1000000.0;
+    broker_huge_first.quantity_domain = {
+        0, 1000000, 1, (std::numeric_limits<std::uint64_t>::max)(),
+        (std::numeric_limits<std::uint64_t>::max)()};
+    auto broker_huge_second = broker_huge_first;
+    broker_huge_second.deal_ticket = 7002;
+    require(!ManagedOpeningExecutionFrontier::create(
+                 {fact(broker_huge_first), fact(broker_huge_second)}),
+            "cumulative broker-unit overflow formed a frontier");
+}
+
+void extends_frontier_without_terminal_authority_or_rewrite() {
+    static_assert(!has_terminal_method<ManagedOpeningExecutionFrontier>::value,
+                  "execution frontier must not assert lifecycle terminality");
+    const auto first = fact(observation(5001, 4, 0.05));
+    const auto initial = ManagedOpeningExecutionFrontier::create({first});
+    require(initial && initial->cumulative_managed_logical_units() == 5,
+            "partial cumulative frontier was rejected");
+
+    // The same cumulative five units can coexist with either a pending
+    // remainder or a separately proven cancelled remainder. This contract
+    // intentionally cannot distinguish or manufacture either lifecycle fact.
+    const auto original = initial->canonical_bytes();
+    const auto extended = append_managed_opening_execution(
+        *initial, fact(observation(5002, 5, 0.05)));
+    require(extended.appended() &&
+                extended.frontier->cumulative_managed_logical_units() == 10,
+            "late fill did not extend cumulative executions");
+    require(initial->canonical_bytes() == original,
+            "frontier extension rewrote its historical revision");
+
+    const auto same_revision = append_managed_opening_execution(
+        *initial, fact(observation(5002, 4, 0.03)));
+    require(same_revision.appended(),
+            "second partial fill from the same sampled revision was rejected");
+    const auto duplicate = append_managed_opening_execution(*initial, first);
     require(duplicate.status == ManagedOpeningExecutionFrontierAppendStatus::duplicate,
-            "duplicate deal was appended twice");
+            "duplicate execution was appended twice");
     const auto stale = append_managed_opening_execution(
-        *extended.frontier, evidence(5004, 5, 0.01));
-    require(stale.status == ManagedOpeningExecutionFrontierAppendStatus::source_revision_mismatch,
-            "stale source revision extended the frontier");
+        *extended.frontier, fact(observation(5003, 4, 0.01)));
+    require(stale.status == ManagedOpeningExecutionFrontierAppendStatus::stale_source,
+            "older source revision extended a newer frontier");
 }
 
-void keeps_frontier_canonical_and_terminal_replay_safe() {
-    const auto first = evidence(5001, 4, 0.05);
-    const auto second = evidence(5002, 5, 0.03);
-    const auto left = ManagedOpeningExecutionEvidenceProducer::frontier(
-        account(), operation(), 3, 8, {first, second}, true);
-    const auto right = ManagedOpeningExecutionEvidenceProducer::frontier(
-        account(), operation(), 3, 8, {second, first}, true);
-    require(left.valid() && right.valid() && left == right,
-            "frontier canonicalization depends on source order");
-    const auto late = append_managed_opening_execution(left, evidence(5003, 6, 0.01));
-    require(late.status == ManagedOpeningExecutionFrontierAppendStatus::terminal_frontier,
-            "terminal frontier accepted a late execution");
-}
+void preserves_canonical_golden_vectors() {
+    const auto entry = fact(observation());
+    const auto frontier = ManagedOpeningExecutionFrontier::create({entry});
+    require(frontier.has_value(), "golden frontier fixture was rejected");
 
-void rejects_frontier_mixing_and_overfill() {
-    const auto first = evidence(5001, 4, 0.05);
-    auto foreign_observation = observation(5004, 4, 0.01);
-    foreign_observation.operation_key = OperationKey{account(), 71, 10};
-    auto frontier = ManagedOpeningExecutionEvidenceProducer::frontier(
-        account(), operation(), 3, 4, {first}, false);
-    require(!frontier.valid(), "over-target partial frontier was accepted");
-
-    const auto foreign_operation = ManagedOpeningExecutionEvidenceProducer::seal(
-        ManagedOpeningExecutionRequest{account(), OperationKey{account(), 71, 10},
-                                       OperationKind::open, 3, 3001, 88001, 4, 4},
-        foreign_observation);
-    require(foreign_operation.has_value(),
-            "test foreign operation evidence could not be sealed");
-    const auto valid_frontier = ManagedOpeningExecutionEvidenceProducer::frontier(
-        account(), operation(), 3, 10, {first}, false);
-    const auto result = append_managed_opening_execution(valid_frontier,
-                                                         *foreign_operation);
-    require(result.status == ManagedOpeningExecutionFrontierAppendStatus::operation_mismatch,
-            "foreign operation was mixed into opening frontier");
+    const std::string expected_fact =
+        "23000000000000006d74356272696467652d6d616e616765642d6f70656e696e672d64"
+        "65616c2d666163740100000000000000040000000000000064656d6f2a000000000000"
+        "00470000000000000009000000000000000300000000000000b90b0000000000008913"
+        "000000000000c15701000000000001000000000000000000000000000000dc05000000"
+        "0000000200000000000000010000000000000005000000000000000500000000000000"
+        "0500000000000000040000000000000063000000000000000400000000000000e80300"
+        "0000000000d007000000000000";
+    const std::string expected_frontier =
+        "22000000000000006d74356272696467652d6d616e616765642d6f70656e696e672d66"
+        "726f6e7469657201000000000000000500000000000000050000000000000001000000"
+        "00000000df0000000000000023000000000000006d74356272696467652d6d616e6167"
+        "65642d6f70656e696e672d6465616c2d66616374010000000000000004000000000000"
+        "0064656d6f2a0000000000000047000000000000000900000000000000030000000000"
+        "0000b90b0000000000008913000000000000c157010000000000010000000000000000"
+        "00000000000000dc050000000000000200000000000000010000000000000005000000"
+        "0000000005000000000000000500000000000000040000000000000063000000000000"
+        "000400000000000000e803000000000000d007000000000000";
+    const auto actual_fact = hex(entry.canonical_bytes());
+    const auto actual_frontier = hex(frontier->canonical_bytes());
+    if (actual_fact != expected_fact)
+        std::cerr << "FACT_GOLDEN=" << actual_fact << '\n';
+    if (actual_frontier != expected_frontier)
+        std::cerr << "FRONTIER_GOLDEN=" << actual_frontier << '\n';
+    require(actual_fact == expected_fact,
+            "canonical deal-fact bytes changed without a version bump");
+    require(actual_frontier == expected_frontier,
+            "canonical frontier bytes changed without a version bump");
 }
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
     try {
-        accepts_complete_source_and_canonical_replay();
-        rejects_missing_history_and_foreign_identity();
-        rejects_inexact_or_missing_quantity();
-        protects_duplicate_execution_and_conflicting_replay();
-        builds_partial_frontier_and_extends_without_rewrite();
-        keeps_frontier_canonical_and_terminal_replay_safe();
-        rejects_frontier_mixing_and_overfill();
+        if (argc == 2 && std::string(argv[1]) == "--negative-control")
+            require(false, "intentional Release negative control");
+        validates_local_shape_without_claiming_authority();
+        rejects_mismatched_join_constraints();
+        makes_repoll_and_restart_idempotent();
+        rejects_conflicting_broker_payload();
+        enforces_one_opening_identity_and_quantity_domain();
+        extends_frontier_without_terminal_authority_or_rewrite();
+        preserves_canonical_golden_vectors();
         std::cout << "managed opening execution evidence tests passed\n";
         return 0;
     } catch (const std::exception &error) {

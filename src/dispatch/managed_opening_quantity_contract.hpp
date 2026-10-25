@@ -12,6 +12,14 @@
 
 namespace mt5bridge::dispatch {
 
+static_assert(sizeof(double) == 8,
+              "opening quantity contract requires 64-bit double");
+static_assert(std::numeric_limits<double>::is_iec559,
+              "opening quantity contract requires IEEE-754 double");
+static_assert(std::numeric_limits<double>::radix == 2 &&
+                  std::numeric_limits<double>::digits == 53,
+              "opening quantity contract requires binary64 precision");
+
 namespace detail {
 
 /// \brief Fixed-width unsigned integer used for exact binary/decimal comparisons.
@@ -163,15 +171,32 @@ inline OpeningQuantityBinaryRational midpoint_opening_quantity(
 }
 
 /// \struct OpeningQuantityRoundingInterval
-/// \brief Exact open interval that rounds to one finite binary64 value.
+/// \brief Exact midpoint interval that rounds to one finite binary64 value.
 struct OpeningQuantityRoundingInterval {
     OpeningQuantityBinaryRational lower;
     OpeningQuantityBinaryRational upper;
+    bool lower_inclusive = false; ///< Tie maps to the observed value.
+    bool upper_inclusive = false; ///< Tie maps to the observed value.
 };
+
+/// \brief Returns the least-significant significand parity of a finite double.
+/// \param value Value whose binary64 significand is inspected.
+/// \return True when the observed significand is even.
+inline bool opening_quantity_significand_is_even(double value) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint64_t fraction = bits & ((std::uint64_t{1} << 52) - 1);
+    const std::uint32_t exponent =
+        static_cast<std::uint32_t>((bits >> 52) & 0x7ffU);
+    const std::uint64_t significand =
+        exponent == 0 ? fraction : (std::uint64_t{1} << 52) | fraction;
+    return (significand & 1U) == 0;
+}
 
 /// \brief Builds the exact rounding interval for a positive finite double.
 /// \param raw MT5 binary volume.
-/// \return Open midpoint interval, or empty for an unbounded/non-finite value.
+/// \return Tie-aware midpoint interval, or empty for an unbounded/non-finite
+///         value.
 inline std::optional<OpeningQuantityRoundingInterval>
 opening_quantity_rounding_interval(double raw) {
     if (!std::isfinite(raw) || raw <= 0.0)
@@ -187,7 +212,9 @@ opening_quantity_rounding_interval(double raw) {
     if (lower_midpoint.exponent == std::numeric_limits<int>::max() ||
         upper_midpoint.exponent == std::numeric_limits<int>::max())
         return std::nullopt;
-    return OpeningQuantityRoundingInterval{lower_midpoint, upper_midpoint};
+    const bool ties_to_observed = opening_quantity_significand_is_even(raw);
+    return OpeningQuantityRoundingInterval{
+        lower_midpoint, upper_midpoint, ties_to_observed, ties_to_observed};
 }
 
 /// \brief Compares a canonical decimal integer with a binary rational.
@@ -220,8 +247,8 @@ inline int compare_opening_quantity_decimal_to_binary(
 /// \param raw MT5 binary volume.
 /// \param units Expected decimal numerator.
 /// \param scale Decimal denominator exponent.
-/// \return True only when the expected value is strictly inside the rounding
-///         interval and neither adjacent decimal value is also inside it.
+/// \return True only when the expected value is the unique value inside the
+///         tie-aware rounding interval.
 inline bool opening_quantity_decimal_is_unique(double raw, std::uint64_t units,
                                                std::uint32_t scale) {
     if (units == 0 || scale > 9)
@@ -230,18 +257,22 @@ inline bool opening_quantity_decimal_is_unique(double raw, std::uint64_t units,
     if (!interval)
         return false;
 
-    const auto strictly_inside = [&](std::uint64_t candidate) {
-        return compare_opening_quantity_decimal_to_binary(
-                   candidate, scale, interval->lower) > 0 &&
-               compare_opening_quantity_decimal_to_binary(
-                   candidate, scale, interval->upper) < 0;
+    const auto inside = [&](std::uint64_t candidate) {
+        const int lower_comparison = compare_opening_quantity_decimal_to_binary(
+            candidate, scale, interval->lower);
+        const int upper_comparison = compare_opening_quantity_decimal_to_binary(
+            candidate, scale, interval->upper);
+        return (lower_comparison > 0 ||
+                (lower_comparison == 0 && interval->lower_inclusive)) &&
+               (upper_comparison < 0 ||
+                (upper_comparison == 0 && interval->upper_inclusive));
     };
-    if (!strictly_inside(units))
+    if (!inside(units))
         return false;
-    if (units > 1 && strictly_inside(units - 1))
+    if (units > 1 && inside(units - 1))
         return false;
     return units == (std::numeric_limits<std::uint64_t>::max)() ||
-           !strictly_inside(units + 1);
+           !inside(units + 1);
 }
 
 /// \brief Compares one broker-step multiple with an exact binary boundary.
@@ -268,14 +299,16 @@ inline int compare_opening_quantity_step_to_boundary(
 /// \return First matching step count, or empty when none is representable.
 inline std::optional<std::uint64_t> first_opening_quantity_step_above(
     const OpeningQuantityBinaryRational &boundary, std::uint64_t step_units,
-    std::uint32_t scale, std::uint64_t max_step_count) {
+    std::uint32_t scale, bool boundary_inclusive,
+    std::uint64_t max_step_count) {
     std::uint64_t low = 1;
     std::uint64_t high = max_step_count;
     std::optional<std::uint64_t> result;
     while (low <= high) {
         const std::uint64_t middle = low + (high - low) / 2;
-        if (compare_opening_quantity_step_to_boundary(
-                middle, step_units, scale, boundary) > 0) {
+        const int comparison = compare_opening_quantity_step_to_boundary(
+            middle, step_units, scale, boundary);
+        if (comparison > 0 || (comparison == 0 && boundary_inclusive)) {
             result = middle;
             if (middle == 0)
                 break;
@@ -393,16 +426,20 @@ inline std::optional<ManagedOpeningQuantity> derive_managed_opening_quantity(
         domain.max_step_count < capacity ? domain.max_step_count : capacity;
     const auto first = detail::first_opening_quantity_step_above(
         interval->lower, domain.broker_step_units, domain.canonical_scale,
-        max_step_count);
-    if (!first ||
-        detail::compare_opening_quantity_step_to_boundary(
-            *first, domain.broker_step_units, domain.canonical_scale,
-            interval->upper) >= 0)
+        interval->lower_inclusive, max_step_count);
+    if (!first)
+        return std::nullopt;
+    const auto below_upper = [&](std::uint64_t step_count) {
+        const int comparison = detail::compare_opening_quantity_step_to_boundary(
+            step_count, domain.broker_step_units, domain.canonical_scale,
+            interval->upper);
+        return comparison < 0 ||
+               (comparison == 0 && interval->upper_inclusive);
+    };
+    if (!below_upper(*first))
         return std::nullopt;
     if (*first < max_step_count &&
-        detail::compare_opening_quantity_step_to_boundary(
-            *first + 1, domain.broker_step_units, domain.canonical_scale,
-            interval->upper) < 0)
+        below_upper(*first + 1))
         return std::nullopt;
 
     if (*first >

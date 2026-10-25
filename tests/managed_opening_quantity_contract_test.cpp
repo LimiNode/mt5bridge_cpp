@@ -128,6 +128,59 @@ void rejects_checked_arithmetic_overflow() {
             "bounded step capacity was ignored");
 }
 
+void handles_ties_to_even_midpoints() {
+    const double even_raw = 4503599627370502.0;
+    const ManagedOpeningQuantityDomain half_step{1, 5, 1,
+                                                (std::numeric_limits<std::uint64_t>::max)(),
+                                                (std::numeric_limits<std::uint64_t>::max)()};
+    require(!mt5bridge::dispatch::derive_managed_opening_quantity(
+                even_raw, 0.5, half_step),
+            "two midpoint candidates were treated as unique");
+
+    const double odd_raw = 4503599627370501.0;
+    const auto odd_result = mt5bridge::dispatch::derive_managed_opening_quantity(
+        odd_raw, 0.5, half_step);
+    require(odd_result && odd_result->integer_step_count() == 9007199254741002,
+            "odd-significand midpoint ties were not excluded");
+
+    const ManagedOpeningQuantityDomain one_and_half{1, 15, 1,
+                                                    (std::numeric_limits<std::uint64_t>::max)(),
+                                                    (std::numeric_limits<std::uint64_t>::max)()};
+    const auto upper_midpoint =
+        mt5bridge::dispatch::derive_managed_opening_quantity(
+            even_raw, 1.5, one_and_half);
+    require(upper_midpoint &&
+                upper_midpoint->integer_step_count() == 3002399751580335 &&
+                upper_midpoint->broker_units() == 45035996273705025 &&
+                upper_midpoint->managed_logical_units() ==
+                    3002399751580335,
+            "unique included upper midpoint was rejected");
+
+    const auto lower_midpoint =
+        mt5bridge::dispatch::derive_managed_opening_quantity(
+            4503599627370506.0, 1.5, one_and_half);
+    require(lower_midpoint &&
+                lower_midpoint->integer_step_count() == 3002399751580337 &&
+                lower_midpoint->broker_units() == 45035996273705055,
+            "unique included lower midpoint was rejected");
+}
+
+void handles_asymmetric_and_subnormal_boundaries() {
+    const ManagedOpeningQuantityDomain whole_step{0, 1, 1, 1ULL << 53,
+                                                   1ULL << 53};
+    const auto power_of_two =
+        mt5bridge::dispatch::derive_managed_opening_quantity(
+            4503599627370496.0, 1.0, whole_step);
+    require(power_of_two && power_of_two->integer_step_count() ==
+                                  4503599627370496,
+            "asymmetric power-of-two spacing was mishandled");
+
+    require(!mt5bridge::dispatch::derive_managed_opening_quantity(
+                std::numeric_limits<double>::denorm_min(), 0.01,
+                ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}),
+            "subnormal quantity produced a decimal broker step");
+}
+
 } // namespace
 
 int main() {
@@ -137,6 +190,8 @@ int main() {
         rejects_near_step_values();
         rejects_ambiguous_or_incompatible_domains();
         rejects_checked_arithmetic_overflow();
+        handles_ties_to_even_midpoints();
+        handles_asymmetric_and_subnormal_boundaries();
         std::cout << "managed opening quantity contract tests passed\n";
         return 0;
     } catch (const std::exception &error) {

@@ -254,6 +254,15 @@ ownership. The private sealed opening-proof contract therefore returns
 `unavailable` until a future durable producer joins committed OPEN evidence,
 opening allocation, broker position identity, and consumption history; no
 structural frontier or digest is upgraded into authority.
+[ADR-0040](adr/0040-managed-opening-attribution-producer-research.md) records
+the C3A B1 producer research boundary. The current result path persists order
+and deal tickets but not `POSITION_IDENTIFIER` or an opening allocation, while
+the position identifier recovered from history remains observation evidence.
+The first producer must therefore join complete polling-based order/deal/
+position evidence to a durable opening record under account fencing; hints and
+caller-selected facts cannot authorize publication. Until that source chain is
+implemented and restart-tested, the opening proof and production `INOUT`
+paths remain fail-closed.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

@@ -157,17 +157,23 @@ through source validation and publication of the opening allocation. The
 bounded protocol is deliberately one-way and has no producer/allocation cycle:
 
 1. **Source evidence:** reload the committed OPEN journal record and complete
-   broker history, then derive a sealed source-evidence value. This value is
-   not yet an opening allocation and cannot authorize ownership.
+   broker history, then publish immutable per-deal source facts under the
+   account lease. Each fact retains the execution identity and fields,
+   normalized quantity, observation provenance, coverage revision, format
+   version, and exact journal source revision. Exact replay is idempotent and a
+   different payload for the same key conflicts. These facts are not yet an
+   opening allocation and cannot authorize ownership.
 2. **Preparation:** persist an immutable opening-allocation preparation
-   manifest containing the exact journal revision, per-deal set or cumulative
-   frontier digest, position identifier, normalized quantity, and source
-   revisions. A prepared manifest is recovery evidence only.
+   manifest containing the exact journal revision, position identifier,
+   normalized quantity, exact durable keys and versions of every per-deal
+   source fact, source revisions, and the canonical cumulative frontier
+   digest. The digest verifies the referenced source set; it never replaces
+   those reproducible facts. A prepared manifest is recovery evidence only.
 3. **Publication:** while the lease is held, revalidate the manifest and the
-   journal/history sources, then commit the immutable opening-allocation record
-   with exact replay/conflict handling. The record is keyed by the operation,
-   execution identity, and frontier revision; it is not constructed from
-   caller-selected fields.
+   journal and referenced durable per-deal sources, then commit the immutable
+   opening-allocation record with exact replay/conflict handling. The record is
+   keyed by the operation, execution identity, and frontier revision; it is not
+   constructed from caller-selected fields.
 4. **Independent verification:** reload the committed allocation and all of
    its sources. Only this final comparison may construct the sealed verified
    proof.
@@ -178,6 +184,17 @@ creating the journal source it is meant to prove. A crash before preparation
 leaves no allocation. A crash after preparation leaves a retryable manifest.
 A crash after allocation publication is resolved by exact idempotent replay and
 source revalidation. Lease loss at any publication step rejects the writer.
+
+Recovery is all-or-nothing. A missing referenced source fact, unknown source
+version, malformed or checksum-invalid manifest, or digest/source-set mismatch
+is invalid evidence. Restart between preparation and allocation commit reloads
+the exact manifest and referenced durable facts before retrying publication. A
+committed allocation whose referenced facts are unavailable cannot produce a
+sealed proof. If MT5 later rewrites its history, the immutable historical facts
+remain the evidence that was admitted at their recorded coverage revision; a
+conflicting fresh observation emits contradiction/resynchronization and cannot
+rewrite them. A new live broker snapshot is never used to reconstruct a lost
+source fact or repair a corrupt manifest.
 
 The durable opening record must retain the exact source revisions, position
 identifier, normalized broker quantity, managed logical quantity, and canonical
@@ -195,15 +212,40 @@ unrepresentable and must remain fail-closed.
 
 The future producer therefore needs a separate exact quantity-domain contract:
 
-- broker quantities are converted to overflow-safe step units using an
-  explicit `scale` and `step_units` representation, never by rounding a
-  binary `double`;
+- a fractional lot value is valid when it represents an integer number of the
+  exact minimum broker volume step: `0.01` lot at step `0.01` is one step and
+  `0.05` lot is five steps; a fractional number of steps such as `0.015` lot at
+  step `0.01` is invalid;
+- the broker step is first represented canonically as positive integer
+  `step_units` plus an explicit decimal `scale`; the scale is supplied by a
+  reviewed symbol/account quantity contract, not guessed independently for
+  each observed volume;
+- an MT5 binary `double` is accepted only when it is finite and positive and
+  its IEEE-754 rounding interval contains exactly one in-range integer multiple
+  of the canonical broker step. No matching integer, more than one possible
+  integer, or a value beyond the bounded capacity is ambiguous and fails
+  closed. This bounded uniqueness check tolerates the representation error of
+  ordinary values such as `0.01` without applying an arbitrary epsilon or blind
+  decimal rounding;
+- the unique step count is converted to the overflow-safe `scale`/
+  `step_units`/`units` representation before comparison or persistence;
 - the mapping from broker step units to managed logical units is explicit,
   deterministic, and independently validated for every symbol/account mode;
-- zero, negative, fractional, overflowed, incompatible-step, and scale-mismatch
-  inputs are rejected; and
+- zero, negative, NaN, infinity, fractional-step, overflowed,
+  incompatible-step, ambiguous-conversion, and scale-mismatch inputs are
+  rejected; and
 - the normalized broker quantity and the managed logical quantity are both
   retained in the immutable opening record and included in its digest.
+
+Required examples are:
+
+```text
+0.01 lot / step 0.01  -> ACCEPT, 1 step
+0.05 lot / step 0.01  -> ACCEPT, 5 steps
+0.015 lot / step 0.01 -> REJECT, fractional step count
+negative / NaN / inf  -> REJECT
+overflow / scale mismatch / incompatible step -> REJECT
+```
 
 Closing this quantity-domain blocker is a prerequisite for release readiness
 of a real fractional-lot manager. It is not solved by changing the current
@@ -244,12 +286,16 @@ demonstrate with real durable stores:
   the later authoritative history join;
 - a missing or rewritten history page, duplicate/conflicting deal, position
   mismatch, and unrepresentable volume fail closed;
-- fractional lots, overflow, incompatible broker steps, and scale mismatches
-  fail the quantity-domain contract without rounding;
+- valid fractional lot values normalize to one unique integer step count,
+  while fractional-step values, non-finite values, overflow, incompatible
+  broker steps, ambiguous conversions, and scale mismatches fail closed;
 - an existing mixed or external netting position remains unavailable;
 - a crash after preparation but before allocation publication is retryable, and
   a crash after allocation publication is resolved by exact replay without
   creating a second record;
+- missing source facts, rewritten history, manifest corruption, and a committed
+  allocation with unavailable source facts fail closed without reconstruction
+  from a live broker snapshot;
 - replay after journal advancement returns the same proof or an exact conflict,
   without a second allocation; and
 - writer A cannot publish after its account lease is transferred to writer B.

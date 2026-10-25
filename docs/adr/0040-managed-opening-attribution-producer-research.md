@@ -74,7 +74,25 @@ broker volume, or caller flag is never sufficient.
 ### First bounded case
 
 The initial implementation should support only a new managed opening whose
-source chain is unambiguous:
+source chain is unambiguous. It must distinguish three different durable
+facts rather than treating the first successful deal as a completed OPEN:
+
+- **Per-deal execution evidence** is one immutable, independently validated
+  deal fact. A complete history observation may stage or publish a new fact
+  when its identity, fields, and source revision are complete. One fact does
+  not by itself prove that the operation is terminal or that the whole opening
+  frontier is complete.
+- **The cumulative opening frontier** is the canonical, deterministically
+  ordered set of all validated execution facts for one OPEN operation. A new
+  fill creates a new frontier revision; earlier frontiers remain immutable and
+  are never rewritten from a later position snapshot.
+- **Terminal OPEN state** is a separate durable lifecycle conclusion. It is
+  allowed only when the journal state and authoritative order/history evidence
+  prove that no pending remainder can execute (for example, a fully filled
+  order or an explicitly rejected, cancelled, or expired remainder). A first
+  deal, a covered history window, or a non-zero position is not terminality.
+
+For each newly observed fill, the bounded source chain is:
 
 1. the OPEN operation is committed and has a result-derived order/deal binding;
 2. the authoritative history window contains every execution deal for that
@@ -89,34 +107,107 @@ source chain is unambiguous:
 6. no external residue, conflicting deal, history gap, or rewritten evidence is
    present.
 
+History coverage is sufficient for this per-deal publication only when the
+declared history window is completely covered at the sampled history-domain
+revision, the observation reports no partial page or GAP, every matching deal
+in the window has the required identity/entry/volume/time fields, and the new
+deal's evidence revision equals that sampled revision. This proves the fact
+as-of that observation revision; it does not claim that the order can no
+longer fill.
+
+Terminality requires a separate complete observation at or after the last
+frontier: the durable OPEN lifecycle has no pending remainder, the active and
+history-order views agree on a terminal outcome, the relevant history window
+is complete through the terminal observation revision, and no later-fill or
+history-rewrite indicator is present. A pending order with a complete current
+window may publish a new per-deal fact, but it cannot publish a terminal OPEN
+frontier.
+
 Any existing netting position with unknown or mixed ownership, missing history,
 fractional/unrepresentable volume, or an observation gap is `unavailable` or an
 explicit invalid-evidence result. It is not repaired from the latest position
-volume.
+volume. A later fill after a non-terminal frontier is a new per-deal fact and
+must extend the cumulative frontier. A fill that appears after the operation
+was declared terminal is a contradiction requiring resynchronization or
+invalid evidence; it must not silently mutate the old proof.
 
 ### Observation boundary
 
-The producer consumes a provenance-bearing reconciliation sample, not a
-callback payload. The source of truth is polling of active orders, positions,
-history orders, and history deals with bounded overlap, durable cursors, and
-restart recovery. An optional MQL5 transaction adapter may provide low-latency
-hints, but hints only trigger a fresh poll and never authorize publication,
-allocation, or exposure mutation. Orders, deals, and positions remain separate
-identities throughout the join.
+Polling is an acquisition mechanism, not an authority source. The producer
+must keep these layers separate:
+
+1. broker observations acquired from active orders, positions, history orders,
+   and history deals;
+2. completeness and provenance checks over bounded-overlap snapshots and
+   history windows;
+3. committed journal and opening-allocation evidence; and
+4. the sealed verified ownership result returned only after all prior layers
+   agree.
+
+The source of observations is polling with durable cursors and restart
+recovery. An optional MQL5 transaction adapter may provide low-latency hints,
+but hints only trigger a fresh poll and never authorize publication,
+allocation, or exposure mutation. Orders, deals, and positions remain
+separate identities throughout the join.
 
 ### Publication and recovery boundary
 
 When implementation begins, the writer must hold the same account-scoped lease
 through source validation and publication of the opening allocation. The
-publication boundary must reject a stale writer after ownership transfer and
-must make the operation/allocation pair idempotent. A crash before or after
-publication must be recoverable from durable manifests without obtaining a new
-broker observation merely to manufacture missing evidence.
+bounded protocol is deliberately one-way and has no producer/allocation cycle:
+
+1. **Source evidence:** reload the committed OPEN journal record and complete
+   broker history, then derive a sealed source-evidence value. This value is
+   not yet an opening allocation and cannot authorize ownership.
+2. **Preparation:** persist an immutable opening-allocation preparation
+   manifest containing the exact journal revision, per-deal set or cumulative
+   frontier digest, position identifier, normalized quantity, and source
+   revisions. A prepared manifest is recovery evidence only.
+3. **Publication:** while the lease is held, revalidate the manifest and the
+   journal/history sources, then commit the immutable opening-allocation record
+   with exact replay/conflict handling. The record is keyed by the operation,
+   execution identity, and frontier revision; it is not constructed from
+   caller-selected fields.
+4. **Independent verification:** reload the committed allocation and all of
+   its sources. Only this final comparison may construct the sealed verified
+   proof.
+
+The journal OPEN is already committed before this bounded publication starts;
+the allocation record references its exact revision rather than recursively
+creating the journal source it is meant to prove. A crash before preparation
+leaves no allocation. A crash after preparation leaves a retryable manifest.
+A crash after allocation publication is resolved by exact idempotent replay and
+source revalidation. Lease loss at any publication step rejects the writer.
 
 The durable opening record must retain the exact source revisions, position
 identifier, normalized broker quantity, managed logical quantity, and canonical
 evidence digest. Historical replay validates those immutable sources and exact
 identity; it does not rerun current admission against a newer journal revision.
+
+### Quantity-domain prerequisite
+
+The current owner uses `managed_trade::Volume = std::uint64_t`, and
+`ManagedTradeOwner::history_deal_volume()` accepts an observed total only when
+it is a positive whole number (`std::floor(total) == total`). This is a real
+whole-lot/integer semantic, not a safe representation for ordinary fractional
+Forex lots such as `0.01`, `0.05`, or `0.10`; those observations are currently
+unrepresentable and must remain fail-closed.
+
+The future producer therefore needs a separate exact quantity-domain contract:
+
+- broker quantities are converted to overflow-safe step units using an
+  explicit `scale` and `step_units` representation, never by rounding a
+  binary `double`;
+- the mapping from broker step units to managed logical units is explicit,
+  deterministic, and independently validated for every symbol/account mode;
+- zero, negative, fractional, overflowed, incompatible-step, and scale-mismatch
+  inputs are rejected; and
+- the normalized broker quantity and the managed logical quantity are both
+  retained in the immutable opening record and included in its digest.
+
+Closing this quantity-domain blocker is a prerequisite for release readiness
+of a real fractional-lot manager. It is not solved by changing the current
+whole-number conversion or by silently rounding broker volume.
 
 ## Required implementation seams
 
@@ -140,13 +231,25 @@ caller-supplied `is_authoritative`/digest/revision escape hatch.
 Before a producer can replace the unavailable source, the implementation must
 demonstrate with real durable stores:
 
+- each partial deal produces one immutable per-deal fact, while the cumulative
+  frontier contains every validated deal and remains distinct from terminal
+  OPEN state;
 - a single OPEN with one or more partial deals produces one exact immutable
   position identity and survives restart;
+- a first deal does not terminate a pending OPEN, and a later fill extends the
+  frontier without rewriting an earlier revision;
+- a terminal OPEN requires durable no-more-fills evidence, and a late fill
+  after terminality produces contradiction/resync rather than silent replay;
 - a result containing only order/deal tickets cannot create a proof without
   the later authoritative history join;
 - a missing or rewritten history page, duplicate/conflicting deal, position
   mismatch, and unrepresentable volume fail closed;
+- fractional lots, overflow, incompatible broker steps, and scale mismatches
+  fail the quantity-domain contract without rounding;
 - an existing mixed or external netting position remains unavailable;
+- a crash after preparation but before allocation publication is retryable, and
+  a crash after allocation publication is resolved by exact replay without
+  creating a second record;
 - replay after journal advancement returns the same proof or an exact conflict,
   without a second allocation; and
 - writer A cannot publish after its account lease is transferred to writer B.

@@ -260,9 +260,13 @@ and deal tickets but not `POSITION_IDENTIFIER` or an opening allocation, while
 the position identifier recovered from history remains observation evidence.
 The first producer must therefore join complete polling-based order/deal/
 position evidence to a durable opening record under account fencing; hints and
-caller-selected facts cannot authorize publication. Until that source chain is
-implemented and restart-tested, the opening proof and production `INOUT`
-paths remain fail-closed.
+caller-selected facts cannot authorize publication. Its publication protocol
+separates source evidence, a recovery manifest, immutable allocation commit,
+and independent verification. The current whole-number managed-volume domain
+also cannot represent ordinary fractional Forex lots without a separately
+validated step-normalized quantity contract. Until both source and quantity
+chains are implemented and restart-tested, the opening proof and production
+`INOUT` paths remain fail-closed.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

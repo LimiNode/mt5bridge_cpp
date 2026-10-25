@@ -69,8 +69,9 @@ exact close intent. The candidate is not an independent managed-attribution
 source and therefore is not authorization for allocation or exposure
 mutation. It accepts neither a caller scalar nor broker volume, does not
 attribute the reverse-open leg, and does not publish settlement, allocation,
-journal state, or exposure. Stage C3 remains blocked until an independent
-managed-attribution source is defined and connected to the owner loop.
+journal state, or exposure. ADR-0037 now defines the independent, complete
+pre-position ownership frontier required by Stage C3, but no production source
+or owner-loop connection exists yet.
 
 ### Close settlement publication protocol
 
@@ -102,8 +103,9 @@ managed state mutation is allowed before the final step succeeds.
    ADR-0029 aggregator remains the path for `OUT` and `OUT_BY`; it is not
    silently broadened to accept `INOUT`. For an `INOUT` close, the owner must
    first obtain the structural `ManagedInoutCloseDeltaCandidate` described
-   below and an independent managed-attribution authorization. That source is
-   not implemented in this slice.
+   below and an independent managed-attribution authorization. ADR-0037 permits
+   only an exact full close of a pre-position owned exclusively by that
+   `TradeId`; its production durable source is not implemented in this slice.
 2. Build a target operation at `R + 1` and produce the exact per-deal fact and
    complete cumulative frontier for `(OperationKey, DEAL_TICKET)`. The fact's
    source revision may be `<=` the target frontier revision. Cumulative
@@ -211,9 +213,12 @@ those frontiers are not an independent attribution source. The candidate is
 therefore not a caller-supplied scalar, not broker volume, and not authorization
 for allocation or exposure mutation.
 
-The missing authoritative source must independently establish that the managed
-delta belongs to the observed INOUT close. Until that source exists, C2 remains
-a fail-closed structural validator. Its candidate checks still require complete
+ADR-0037 defines that authoritative source as a complete durable ownership
+frontier for the exact broker pre-position. The first bounded authorization
+requires exclusive target-`TradeId` ownership and a full close; mixed managed
+ownership, external residue, and partial close remain fail-closed. Until a
+production frontier store exists, C2 remains a fail-closed structural
+validator. Its candidate checks still require complete
 history coverage, a zero-ticket predicate with exactly one non-zero correlation
 binding, a staged association with the exact close-intent digest, and durable
 broker reversal identity. Broker `broker_close_leg` remains reserved for later
@@ -337,8 +342,9 @@ The implementation slice must add focused regressions for:
 - successful close settlement proving that the committed allocation and the
   journal frontier agree before exposure mutation;
 - C2 structural INOUT candidate validation rejects reverse-open attribution,
-  caller-selected tickets, competing same-position history, or ambiguous
-  ownership; authoritative managed-delta authorization remains a C3 prerequisite;
+  caller-selected tickets, and competing same-position history; the C3
+  prerequisite contract additionally rejects missing/stale ownership frontiers,
+  mixed managed owners, unmanaged residue, and partial closes;
 - staged ownership cannot be admitted through the ordinary settled-basis
   validator and is finalized only after the target journal CAS;
 - legacy close recovery remains separate from explicitly allocation-gated close

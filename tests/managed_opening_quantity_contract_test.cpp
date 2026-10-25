@@ -181,6 +181,28 @@ void handles_asymmetric_and_subnormal_boundaries() {
             "subnormal quantity produced a decimal broker step");
 }
 
+void handles_nonnegative_binary_exponents() {
+    const ManagedOpeningQuantityDomain domain{
+        1, 20, 1, (std::numeric_limits<std::uint64_t>::max)(),
+        (std::numeric_limits<std::uint64_t>::max)()};
+    const auto result = mt5bridge::dispatch::derive_managed_opening_quantity(
+        9007199254740992.0, 2.0, domain);
+    require(result && result->integer_step_count() == 4503599627370496 &&
+                result->broker_units() == 90071992547409920,
+            "large exact quantity with nonnegative exponent was rejected");
+
+    const ManagedOpeningQuantityDomain scale_zero{
+        0, 2, 1, (std::numeric_limits<std::uint64_t>::max)(),
+        (std::numeric_limits<std::uint64_t>::max)()};
+    const auto scale_zero_result =
+        mt5bridge::dispatch::derive_managed_opening_quantity(
+            9007199254740992.0, 2.0, scale_zero);
+    require(scale_zero_result &&
+                scale_zero_result->integer_step_count() == 4503599627370496 &&
+                scale_zero_result->broker_units() == 9007199254740992,
+            "scale-zero binary comparison was mishandled");
+}
+
 } // namespace
 
 int main() {
@@ -192,6 +214,7 @@ int main() {
         rejects_checked_arithmetic_overflow();
         handles_ties_to_even_midpoints();
         handles_asymmetric_and_subnormal_boundaries();
+        handles_nonnegative_binary_exponents();
         std::cout << "managed opening quantity contract tests passed\n";
         return 0;
     } catch (const std::exception &error) {

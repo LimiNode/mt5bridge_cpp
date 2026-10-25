@@ -229,8 +229,8 @@ inline int compare_opening_quantity_decimal_to_binary(
     auto binary = value.mantissa;
     if (value.exponent >= 0) {
         for (std::uint32_t index = 0; index != scale; ++index)
-            if (!decimal.multiply_small(10))
-                return 1;
+            if (!binary.multiply_small(10))
+                return -1;
         if (!binary.shift_left(static_cast<std::size_t>(value.exponent)))
             return -1;
     } else {

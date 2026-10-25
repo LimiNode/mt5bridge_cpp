@@ -238,6 +238,14 @@ ownership, result-derived history binding, and fresh graph evidence against a
 structural pre/post exposure candidate. It is not an independent managed
 attribution source and cannot authorize allocation or exposure mutation;
 owner/reconciliation wiring and that authority remain deferred to Stage C3.
+[ADR-0037](adr/0037-authoritative-managed-position-attribution.md) defines the
+Stage C3 prerequisite as a complete durable ownership frontier for the exact
+broker pre-position. The first bounded authorization accepts only an exact full
+close when every ownership entry belongs to the target `TradeId`; mixed managed
+ownership, unmanaged/external residue, partial close, and stale position
+provenance fail closed. The current implementation is a private executable
+contract with no production frontier store or owner caller, so INOUT allocation
+and exposure mutation remain disabled.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

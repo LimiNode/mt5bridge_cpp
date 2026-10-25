@@ -682,7 +682,13 @@ reversals and CloseBy, respectively.
   result-derived history binding, and fresh graph evidence without accepting a
   caller scalar or broker volume. It is not managed-delta authorization, and
   owner exposure wiring remains fail-closed until Stage C3 supplies an
-  independent attribution source.
+  independent attribution source. ADR-0037 defines that source as a complete
+  durable ownership frontier for the exact broker pre-position. Its first
+  bounded contract accepts only a full INOUT close when the target `TradeId`
+  exclusively owns the complete pre-position; mixed managed ownership,
+  unmanaged/external residue, partial close, missing evidence, and stale
+  provenance are rejected. Only the private validation contract and fixtures
+  exist today—there is no production frontier store or owner integration.
 - **Partial fills:** one logical operation can produce multiple deals and a
   pending remainder. Do not replace the deal list with one “final ticket”.
 - **Pending/limit orders:** retain the order while fills arrive; cancellation

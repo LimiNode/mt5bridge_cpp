@@ -188,6 +188,15 @@ if(BUILD_TESTING)
                           mt5bridge::client mt5bridge::managed_trade)
     add_test(NAME mt5bridge_managed_inout_close_delta_candidate
              COMMAND mt5bridge_managed_inout_close_delta_candidate_test)
+    add_executable(mt5bridge_managed_close_attribution_contract_test
+                   tests/managed_close_attribution_contract_test.cpp)
+    target_include_directories(mt5bridge_managed_close_attribution_contract_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/dispatch
+                               ${PROJECT_SOURCE_DIR}/src/trade)
+    target_link_libraries(mt5bridge_managed_close_attribution_contract_test PRIVATE
+                          mt5bridge::client mt5bridge::managed_trade)
+    add_test(NAME mt5bridge_managed_close_attribution_contract
+             COMMAND mt5bridge_managed_close_attribution_contract_test)
     add_executable(mt5bridge_managed_allocation_store_test
                    tests/managed_allocation_store_test.cpp)
     target_link_libraries(mt5bridge_managed_allocation_store_test PRIVATE

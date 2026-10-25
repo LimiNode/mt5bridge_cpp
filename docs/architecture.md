@@ -246,6 +246,14 @@ ownership, unmanaged/external residue, partial close, and stale position
 provenance fail closed. The current implementation is a private executable
 contract with no production frontier store or owner caller, so INOUT allocation
 and exposure mutation remain disabled.
+[ADR-0038](adr/0038-managed-opening-provenance-inventory.md) records the C3A
+provenance inventory and trust boundary. Journal identity, result bindings,
+reconciliation observations, broker volume, close intent, fencing, and
+historical recovery are explicitly insufficient to prove committed OPEN
+ownership. The private sealed opening-proof contract therefore returns
+`unavailable` until a future durable producer joins committed OPEN evidence,
+opening allocation, broker position identity, and consumption history; no
+structural frontier or digest is upgraded into authority.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

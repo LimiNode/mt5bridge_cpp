@@ -214,6 +214,15 @@ if(BUILD_TESTING)
                           mt5bridge::client)
     add_test(NAME mt5bridge_managed_opening_quantity_contract
              COMMAND mt5bridge_managed_opening_quantity_contract_test)
+    add_executable(mt5bridge_managed_opening_execution_evidence_test
+                   tests/managed_opening_execution_evidence_test.cpp)
+    target_include_directories(mt5bridge_managed_opening_execution_evidence_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/include
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
+    target_link_libraries(mt5bridge_managed_opening_execution_evidence_test PRIVATE
+                          mt5bridge::client)
+    add_test(NAME mt5bridge_managed_opening_execution_evidence
+             COMMAND mt5bridge_managed_opening_execution_evidence_test)
     add_executable(mt5bridge_managed_allocation_store_test
                    tests/managed_allocation_store_test.cpp)
     target_link_libraries(mt5bridge_managed_allocation_store_test PRIVATE

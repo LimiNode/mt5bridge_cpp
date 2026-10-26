@@ -295,10 +295,17 @@ void extends_frontier_without_terminal_authority_or_rewrite() {
     const auto duplicate = append_managed_opening_execution(*initial, first);
     require(duplicate.status == ManagedOpeningExecutionFrontierAppendStatus::duplicate,
             "duplicate execution was appended twice");
-    const auto stale = append_managed_opening_execution(
-        *extended.frontier, fact(observation(5003, 4, 0.01)));
-    require(stale.status == ManagedOpeningExecutionFrontierAppendStatus::stale_source,
-            "older source revision extended a newer frontier");
+    const auto restarted_source = append_managed_opening_execution(
+        *extended.frontier, fact(observation(5003, 1, 0.01)));
+    require(restarted_source.appended(),
+            "restart-local source revision was treated as globally stale");
+
+    auto earlier_local_revision = observation(5004, 2, 0.01);
+    earlier_local_revision.graph_instance_id = 101;
+    const auto earlier_source = append_managed_opening_execution(
+        *restarted_source.frontier, fact(earlier_local_revision));
+    require(earlier_source.appended(),
+            "independently valid earlier local revision was rejected");
 }
 
 void preserves_canonical_golden_vectors() {

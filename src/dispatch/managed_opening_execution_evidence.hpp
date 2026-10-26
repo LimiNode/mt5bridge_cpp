@@ -489,7 +489,6 @@ enum class ManagedOpeningExecutionFrontierAppendStatus : std::uint8_t {
     duplicate = 1,
     conflict = 2,
     incompatible_identity = 3,
-    stale_source = 4,
 };
 
 /// \struct ManagedOpeningExecutionFrontierAppendResult
@@ -508,6 +507,11 @@ struct ManagedOpeningExecutionFrontierAppendResult {
 };
 
 /// \brief Extends a cumulative frontier without rewriting committed facts.
+///
+/// Source revisions are retained as admission provenance, but are not ordered
+/// here: ObservationGraph revisions are local to one graph instance. A future
+/// authoritative producer must establish source freshness in its own durable
+/// revision domain before admitting a fact.
 /// \param frontier Existing immutable frontier.
 /// \param fact New locally validated deal fact.
 /// \return New frontier or duplicate/conflict/fail-closed status.
@@ -527,14 +531,6 @@ inline ManagedOpeningExecutionFrontierAppendResult append_managed_opening_execut
     if (!frontier.accepts_identity(fact))
         return {ManagedOpeningExecutionFrontierAppendStatus::incompatible_identity,
                 std::nullopt};
-    std::uint64_t latest_source_revision = 0;
-    for (const auto &entry : frontier.entries()) {
-        const auto revision = entry.admission_receipt().source_revision;
-        if (revision > latest_source_revision)
-            latest_source_revision = revision;
-    }
-    if (fact.admission_receipt().source_revision < latest_source_revision)
-        return {ManagedOpeningExecutionFrontierAppendStatus::stale_source, std::nullopt};
     auto entries = frontier.entries();
     entries.push_back(fact);
     auto extended = ManagedOpeningExecutionFrontier::create(std::move(entries));

@@ -62,6 +62,18 @@ std::optional<ManagedOpeningDealFact> try_fact(
     return ManagedOpeningDealFact::from_observation(request, candidate);
 }
 
+ManagedOpeningDealFact maximum_fact() {
+    const auto one_byte_server = fact(observation(5002, 4, 42, 0.05, "x"));
+    const auto maximum_server_length =
+        kManagedOpeningMaxCanonicalBytes - (one_byte_server.canonical_bytes().size() - 1U);
+    const auto maximum = try_fact(
+        observation(5003, 4, 42, 0.05, std::string(maximum_server_length, 'x')));
+    require(maximum.has_value() &&
+                maximum->canonical_bytes().size() == kManagedOpeningMaxCanonicalBytes,
+            "maximum canonical fact was rejected");
+    return *maximum;
+}
+
 class TestLease final : public SingleWriterLease {
 public:
     bool held = true;
@@ -145,17 +157,27 @@ void verifies_canonical_decoder() {
     require(!ManagedOpeningDealFact::from_canonical_bytes(oversized),
             "oversized canonical fact decoded");
 
-    const auto one_byte_server = fact(observation(5002, 4, 42, 0.05, "x"));
-    const auto maximum_server_length =
-        kManagedOpeningMaxCanonicalBytes - (one_byte_server.canonical_bytes().size() - 1U);
-    const auto maximum = try_fact(
-        observation(5003, 4, 42, 0.05, std::string(maximum_server_length, 'x')));
-    require(maximum.has_value() &&
-                maximum->canonical_bytes().size() == kManagedOpeningMaxCanonicalBytes,
-            "maximum canonical fact was rejected");
+    const auto maximum = maximum_fact();
     require(!try_fact(observation(5004, 4, 42, 0.05,
-                                  std::string(maximum_server_length + 1U, 'x'))),
+                                  std::string(maximum.operation_key().account.server.size() + 1U,
+                                              'x'))),
             "canonical fact above the shared bound was accepted");
+}
+
+void verifies_maximum_durable_round_trip(const std::filesystem::path &directory) {
+    const auto original = maximum_fact();
+    TestLease lease;
+    WindowsFileManagedOpeningFactStore store(directory);
+    require(store.ready(), "maximum fact store did not open");
+    require(store.commit(original, lease) == ManagedOpeningFactCommitStatus::committed,
+            "maximum canonical fact was not committed");
+
+    WindowsFileManagedOpeningFactStore restarted(directory);
+    const auto recovered = restarted.load(original.operation_key().account,
+                                          original.deal_ticket());
+    require(recovered.found() && *recovered.fact == original &&
+                recovered.fact->canonical_bytes() == original.canonical_bytes(),
+            "maximum canonical fact did not survive durable restart");
 }
 
 void verifies_durable_replay_and_account_isolation(
@@ -270,11 +292,22 @@ void rejects_corruption_and_ignores_incomplete_temp(
                 ManagedOpeningFactCommitStatus::committed,
             "corruption fixture fact was not committed");
     const auto record = only_record(directory);
+    const auto account_path = record.parent_path();
     // This is a deterministic incomplete-publication fixture, not a process-crash
     // simulation; the post-rename restart replay is covered separately.
     write_bytes(std::filesystem::path(record.wstring() + L".tmp"), {1, 2, 3});
     require(store.scan(account()).complete(),
             "incomplete temporary publication was treated as a record");
+    write_bytes(account_path / L"unreserved.bin", {1, 2, 3});
+    require(store.scan(account()).complete(),
+            "unreserved filesystem entry blocked account scan");
+
+    const auto reserved_directory = account_path / L"open-0123456789abcdef.bin";
+    require(std::filesystem::create_directory(reserved_directory),
+            "reserved directory fixture was not created");
+    require(store.scan(account()).status == ManagedOpeningFactScanStatus::invalid_record,
+            "reserved non-file entry was silently ignored");
+    std::filesystem::remove(reserved_directory);
 
     const auto original = read_bytes(record);
     require(!original.empty(), "durable record fixture was empty");
@@ -328,6 +361,7 @@ int main() {
         try {
             verifies_durable_replay_and_account_isolation(root / L"replay");
             rejects_corruption_and_ignores_incomplete_temp(root / L"corruption");
+            verifies_maximum_durable_round_trip(root / L"maximum");
         } catch (...) {
             std::filesystem::remove_all(root);
             throw;

@@ -304,10 +304,10 @@ ManagedOpeningFactLoadResult WindowsFileManagedOpeningFactStore::load(
         return {ManagedOpeningFactLoadStatus::invalid_record, std::nullopt};
     if (status == RecordReadStatus::io_error)
         return {ManagedOpeningFactLoadStatus::io_error, std::nullopt};
-    if (!matches_requested_identity(*fact, account, deal_ticket) ||
-        target.filename() !=
-            record_path(directory_, account, fact->deal_ticket()).filename())
+    if (!matches_requested_identity(*fact, account, deal_ticket)) {
+        last_error_ = "managed opening fact identity does not match requested lookup";
         return {ManagedOpeningFactLoadStatus::invalid_record, std::nullopt};
+    }
     return {ManagedOpeningFactLoadStatus::found, std::move(fact)};
 }
 
@@ -319,20 +319,55 @@ ManagedOpeningFactScanResult WindowsFileManagedOpeningFactStore::scan(
 #if defined(_WIN32)
     try {
         const auto account_path = account_directory(directory_, account);
-        if (!std::filesystem::exists(account_path))
+        std::error_code account_status_error;
+        const auto account_status =
+            std::filesystem::symlink_status(account_path, account_status_error);
+        if (account_status_error) {
+            last_error_ = account_status_error.message();
+            return {ManagedOpeningFactScanStatus::io_error, {}};
+        }
+        if (account_status.type() == std::filesystem::file_type::not_found)
             return {ManagedOpeningFactScanStatus::complete, {}};
-        if (!std::filesystem::is_directory(account_path)) {
+        if (std::filesystem::is_symlink(account_status) ||
+            !std::filesystem::is_directory(account_status)) {
             last_error_ = "managed opening account path is not a directory";
+            return {ManagedOpeningFactScanStatus::invalid_record, {}};
+        }
+        const auto account_attributes = GetFileAttributesW(account_path.c_str());
+        if (account_attributes == INVALID_FILE_ATTRIBUTES) {
+            last_error_ = win32_error("GetFileAttributesW(managed opening account)");
+            return {ManagedOpeningFactScanStatus::io_error, {}};
+        }
+        if ((account_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            last_error_ = "managed opening account path is a reparse point";
             return {ManagedOpeningFactScanStatus::invalid_record, {}};
         }
         std::vector<ManagedOpeningDealFact> facts;
         for (const auto &entry : std::filesystem::directory_iterator(account_path)) {
-            if (!entry.is_regular_file())
-                continue;
             const auto filename = entry.path().filename().wstring();
             if (filename.rfind(L"open-", 0) != 0 ||
                 entry.path().extension() != L".bin")
                 continue;
+            std::error_code entry_status_error;
+            const auto entry_status = entry.symlink_status(entry_status_error);
+            if (entry_status_error) {
+                last_error_ = entry_status_error.message();
+                return {ManagedOpeningFactScanStatus::io_error, {}};
+            }
+            if (std::filesystem::is_symlink(entry_status) ||
+                !std::filesystem::is_regular_file(entry_status)) {
+                last_error_ = "managed opening reserved path is not a regular file";
+                return {ManagedOpeningFactScanStatus::invalid_record, {}};
+            }
+            const auto entry_attributes = GetFileAttributesW(entry.path().c_str());
+            if (entry_attributes == INVALID_FILE_ATTRIBUTES) {
+                last_error_ = win32_error("GetFileAttributesW(managed opening fact)");
+                return {ManagedOpeningFactScanStatus::io_error, {}};
+            }
+            if ((entry_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                last_error_ = "managed opening reserved path is a reparse point";
+                return {ManagedOpeningFactScanStatus::invalid_record, {}};
+            }
             std::optional<ManagedOpeningDealFact> fact;
             std::string error;
             const auto read_status = read_record(entry.path(), fact, error);

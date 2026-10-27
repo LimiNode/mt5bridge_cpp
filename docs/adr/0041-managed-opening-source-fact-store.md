@@ -45,6 +45,10 @@ subdirectories, and each account scan reads only its own subdirectory. A digest
 collision is detected by the decoded identity/path check and fails closed. Thus
 corruption in another account namespace does not block this account, while any
 unknown, foreign, or malformed record in the requested namespace does.
+Unreserved names, including .tmp files, are ignored. A reserved
+open-*.bin name must resolve to a non-reparse regular file; a directory,
+symlink/reparse point, or other object at that name fails the account scan
+closed. The account directory itself is subject to the same no-reparse rule.
 
 The canonical fact payload has one shared maximum of 1 MiB enforced by fact
 construction, canonical decoding, and the durable envelope encoder/decoder.

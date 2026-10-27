@@ -10,6 +10,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #if defined(_WIN32)
@@ -322,12 +323,21 @@ ManagedOpeningFactScanResult WindowsFileManagedOpeningFactStore::scan(
         std::error_code account_status_error;
         const auto account_status =
             std::filesystem::symlink_status(account_path, account_status_error);
+        const bool no_such_account =
+            account_status_error ==
+                std::make_error_code(std::errc::no_such_file_or_directory) ||
+            account_status_error.value() == ERROR_FILE_NOT_FOUND ||
+            account_status_error.value() == ERROR_PATH_NOT_FOUND;
+        const bool account_missing =
+            (account_status.type() == std::filesystem::file_type::not_found ||
+             no_such_account) &&
+            (!account_status_error || no_such_account);
+        if (account_missing)
+            return {ManagedOpeningFactScanStatus::complete, {}};
         if (account_status_error) {
             last_error_ = account_status_error.message();
             return {ManagedOpeningFactScanStatus::io_error, {}};
         }
-        if (account_status.type() == std::filesystem::file_type::not_found)
-            return {ManagedOpeningFactScanStatus::complete, {}};
         if (std::filesystem::is_symlink(account_status) ||
             !std::filesystem::is_directory(account_status)) {
             last_error_ = "managed opening account path is not a directory";

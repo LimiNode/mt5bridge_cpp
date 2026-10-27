@@ -180,6 +180,34 @@ void verifies_maximum_durable_round_trip(const std::filesystem::path &directory)
             "maximum canonical fact did not survive durable restart");
 }
 
+void verifies_account_scan_boundaries(const std::filesystem::path &directory) {
+    WindowsFileManagedOpeningFactStore store(directory);
+    require(store.ready(), "account scan boundary store did not open");
+    const auto empty_account = account("fresh", 900);
+    const auto empty_scan = store.scan(empty_account);
+    require(empty_scan.complete() && empty_scan.facts.empty(),
+            "new account without records was not an empty complete scan");
+
+    TestLease lease;
+    require(store.commit(fact(observation()), lease) ==
+                ManagedOpeningFactCommitStatus::committed,
+            "account scan boundary fixture was not committed");
+    const auto unknown_scan = store.scan(account("missing", 901));
+    require(unknown_scan.complete() && unknown_scan.facts.empty(),
+            "unknown account scan was blocked by another account's record");
+    const auto existing_scan = store.scan(account());
+    require(existing_scan.complete() && existing_scan.facts.size() == 1,
+            "existing account records were not recovered by scan");
+
+    const auto account_path = only_record(directory).parent_path();
+    std::filesystem::remove_all(account_path);
+    write_bytes(account_path, {});
+    const auto invalid_namespace_scan = store.scan(account());
+    require(invalid_namespace_scan.status ==
+                ManagedOpeningFactScanStatus::invalid_record,
+            "non-directory account namespace was not rejected");
+}
+
 void verifies_durable_replay_and_account_isolation(
     const std::filesystem::path &directory) {
     WindowsFileManagedOpeningFactStore store(directory);
@@ -362,6 +390,7 @@ int main() {
             verifies_durable_replay_and_account_isolation(root / L"replay");
             rejects_corruption_and_ignores_incomplete_temp(root / L"corruption");
             verifies_maximum_durable_round_trip(root / L"maximum");
+            verifies_account_scan_boundaries(root / L"scan-boundaries");
         } catch (...) {
             std::filesystem::remove_all(root);
             throw;

@@ -19,6 +19,9 @@
 
 namespace mt5bridge::dispatch {
 
+/// \brief Maximum canonical byte size accepted for one durable OPEN fact.
+inline constexpr std::size_t kManagedOpeningMaxCanonicalBytes = 1U << 20;
+
 /// \struct ManagedOpeningExecutionRequest
 /// \brief Constrains a local OPEN deal join without supplying source authority.
 struct ManagedOpeningExecutionRequest {
@@ -149,8 +152,6 @@ struct ManagedOpeningAdmissionReceipt {
 
 namespace detail {
 
-inline constexpr std::size_t k_max_canonical_text_bytes = 1U << 20;
-
 inline void append_u64(std::vector<std::uint8_t> *bytes, std::uint64_t value) {
     for (unsigned shift = 0; shift != 64; shift += 8)
         bytes->push_back(static_cast<std::uint8_t>(value >> shift));
@@ -173,7 +174,7 @@ inline bool read_u64(const std::vector<std::uint8_t> &bytes, std::size_t &offset
 
 inline bool read_text(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
                       std::string *value,
-                      std::size_t max_bytes = k_max_canonical_text_bytes) {
+                      std::size_t max_bytes = kManagedOpeningMaxCanonicalBytes) {
     std::uint64_t size = 0;
     if (!read_u64(bytes, offset, &size) || size > max_bytes ||
         size > bytes.size() - offset)
@@ -254,7 +255,7 @@ public:
             observation.quantity_domain);
         if (!quantity)
             return std::nullopt;
-        return ManagedOpeningDealFact(
+        ManagedOpeningDealFact result(
             observation.operation_key, observation.operation_revision,
             observation.order_ticket, observation.deal_ticket,
             observation.position_identifier, observation.direction,
@@ -263,6 +264,8 @@ public:
              observation.history_coverage_revision,
              observation.history_window_from_msc,
              observation.history_window_to_msc});
+        return result.valid() ? std::optional<ManagedOpeningDealFact>(std::move(result))
+                              : std::nullopt;
     }
 
     /// \brief Decodes one exact canonical fact representation.
@@ -270,7 +273,7 @@ public:
     /// \return Locally valid fact, or empty for any malformed/non-canonical input.
     static std::optional<ManagedOpeningDealFact> from_canonical_bytes(
         const std::vector<std::uint8_t> &bytes) {
-        if (bytes.size() > detail::k_max_canonical_text_bytes)
+        if (bytes.size() > kManagedOpeningMaxCanonicalBytes)
             return std::nullopt;
         std::size_t offset = 0;
         std::string tag;
@@ -375,7 +378,8 @@ public:
                entry_ == BrokerDealEntry::in && quantity_.valid() &&
                detail::managed_units_per_step(quantity_) != 0 && receipt_.valid() &&
                deal_time_msc_ >= receipt_.history_window_from_msc &&
-               deal_time_msc_ <= receipt_.history_window_to_msc;
+               deal_time_msc_ <= receipt_.history_window_to_msc &&
+               canonical_bytes().size() <= kManagedOpeningMaxCanonicalBytes;
     }
 
     /// \brief Compares stable identity and immutable execution payload.

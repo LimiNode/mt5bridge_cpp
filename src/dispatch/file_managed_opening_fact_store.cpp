@@ -9,6 +9,7 @@
 #include <array>
 #include <limits>
 #include <set>
+#include <string>
 #include <utility>
 
 #if defined(_WIN32)
@@ -27,18 +28,43 @@ constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'O', 'P', 'N', '0', '1'}};
 constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
                                         2U * sizeof(std::uint64_t);
-constexpr std::size_t kMaxBodyBytes = kMaxPayloadBytes + 128U;
+constexpr std::size_t kMaxBodyBytes =
+    kManagedOpeningMaxCanonicalBytes + kMaxStringBytes + 64U;
 constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
 
 enum class RecordReadStatus { absent, valid, malformed, io_error };
 
-/// \brief Builds the stable namespace input for a record filename.
+/// \brief Builds an unambiguous binary key for an account namespace.
+/// \param account Account namespace.
+/// \return Length-delimited server and fixed-width login bytes.
+std::string account_key_bytes(const AccountKey &account) {
+    std::vector<std::uint8_t> bytes;
+    append_u64(bytes, static_cast<std::uint64_t>(account.server.size()));
+    bytes.insert(bytes.end(), account.server.begin(), account.server.end());
+    append_u64(bytes, account.login);
+    return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+/// \brief Builds an unambiguous binary key for one account/deal pair.
 /// \param account Account namespace.
 /// \param deal_ticket Stable broker execution identity.
-/// \return Length-delimited logical key text.
-std::string key_text(const AccountKey &account, std::uint64_t deal_ticket) {
-    return account.server + "\0" + std::to_string(account.login) + "\0" +
-           std::to_string(deal_ticket);
+/// \return Account key bytes followed by fixed-width deal ticket bytes.
+std::string record_key_bytes(const AccountKey &account, std::uint64_t deal_ticket) {
+    auto bytes = account_key_bytes(account);
+    std::vector<std::uint8_t> suffix;
+    append_u64(suffix, deal_ticket);
+    bytes.append(reinterpret_cast<const char *>(suffix.data()), suffix.size());
+    return bytes;
+}
+
+/// \brief Maps an account namespace to its isolated directory.
+/// \param directory Store root directory.
+/// \param account Account namespace.
+/// \return Deterministic account directory path.
+std::filesystem::path account_directory(const std::filesystem::path &directory,
+                                        const AccountKey &account) {
+    return directory /
+           widen_ascii("account-" + hex_u64(fnv1a(account_key_bytes(account))));
 }
 
 /// \brief Maps one account/deal key to its bounded record filename.
@@ -49,8 +75,9 @@ std::string key_text(const AccountKey &account, std::uint64_t deal_ticket) {
 std::filesystem::path record_path(const std::filesystem::path &directory,
                                   const AccountKey &account,
                                   std::uint64_t deal_ticket) {
-    return directory / widen_ascii("open-" + hex_u64(fnv1a(key_text(account, deal_ticket))) +
-                                   ".bin");
+    return account_directory(directory, account) /
+           widen_ascii("open-" + hex_u64(fnv1a(record_key_bytes(account, deal_ticket))) +
+                       ".bin");
 }
 
 /// \brief Encodes one fact inside the versioned durable envelope.
@@ -64,7 +91,7 @@ std::optional<std::vector<std::uint8_t>> serialize_record(
     std::vector<std::uint8_t> body;
     if (!append_string(body, fact.operation_key().account.server) ||
         body.size() > kMaxBodyBytes - sizeof(std::uint64_t) * 2U ||
-        !append_payload(body, canonical, kMaxPayloadBytes))
+        !append_payload(body, canonical, kManagedOpeningMaxCanonicalBytes))
         return std::nullopt;
     append_u64(body, fact.operation_key().account.login);
     append_u64(body, fact.deal_ticket());
@@ -126,7 +153,8 @@ RecordReadStatus read_record(const std::filesystem::path &path,
     std::uint64_t deal_ticket = 0;
     std::vector<std::uint8_t> canonical;
     if (!read_string(body, body_offset, account_server) ||
-        !read_payload(body, body_offset, canonical) ||
+        !read_payload(body, body_offset, canonical,
+                      kManagedOpeningMaxCanonicalBytes) ||
         !read_u64(body, body_offset, account_login) ||
         !read_u64(body, body_offset, deal_ticket) || body_offset != body.size()) {
         error = "managed opening fact body is malformed";
@@ -147,6 +175,12 @@ RecordReadStatus read_record(const std::filesystem::path &path,
     error = "WindowsFileManagedOpeningFactStore requires Windows";
     return RecordReadStatus::io_error;
 #endif
+}
+
+bool matches_requested_identity(const ManagedOpeningDealFact &fact,
+                                const AccountKey &account,
+                                std::uint64_t deal_ticket) {
+    return fact.operation_key().account == account && fact.deal_ticket() == deal_ticket;
 }
 
 } // namespace
@@ -198,9 +232,27 @@ ManagedOpeningFactCommitStatus WindowsFileManagedOpeningFactStore::commit(
             }
             const auto target = record_path(directory_, fact.operation_key().account,
                                             fact.deal_ticket());
+            try {
+                std::filesystem::create_directories(target.parent_path());
+                if (!std::filesystem::is_directory(target.parent_path())) {
+                    last_error_ = "managed opening account path is not a directory";
+                    result = ManagedOpeningFactCommitStatus::io_error;
+                    return;
+                }
+            } catch (const std::filesystem::filesystem_error &error) {
+                last_error_ = error.what();
+                result = ManagedOpeningFactCommitStatus::io_error;
+                return;
+            }
             std::optional<ManagedOpeningDealFact> existing;
             const auto read_status = read_record(target, existing, last_error_);
             if (read_status == RecordReadStatus::valid) {
+                if (!matches_requested_identity(*existing, fact.operation_key().account,
+                                                fact.deal_ticket())) {
+                    last_error_ = "managed opening fact identity collides with requested key";
+                    result = ManagedOpeningFactCommitStatus::invalid_record;
+                    return;
+                }
                 result = existing->same_execution_payload(fact)
                              ? ManagedOpeningFactCommitStatus::already_committed
                              : ManagedOpeningFactCommitStatus::conflict;
@@ -243,8 +295,8 @@ ManagedOpeningFactLoadResult WindowsFileManagedOpeningFactStore::load(
         return {ManagedOpeningFactLoadStatus::invalid_record, std::nullopt};
     std::optional<ManagedOpeningDealFact> fact;
     std::string error;
-    const auto status = read_record(record_path(directory_, account, deal_ticket), fact,
-                                    error);
+    const auto target = record_path(directory_, account, deal_ticket);
+    const auto status = read_record(target, fact, error);
     last_error_ = error;
     if (status == RecordReadStatus::absent)
         return {ManagedOpeningFactLoadStatus::not_found, std::nullopt};
@@ -252,6 +304,10 @@ ManagedOpeningFactLoadResult WindowsFileManagedOpeningFactStore::load(
         return {ManagedOpeningFactLoadStatus::invalid_record, std::nullopt};
     if (status == RecordReadStatus::io_error)
         return {ManagedOpeningFactLoadStatus::io_error, std::nullopt};
+    if (!matches_requested_identity(*fact, account, deal_ticket) ||
+        target.filename() !=
+            record_path(directory_, account, fact->deal_ticket()).filename())
+        return {ManagedOpeningFactLoadStatus::invalid_record, std::nullopt};
     return {ManagedOpeningFactLoadStatus::found, std::move(fact)};
 }
 
@@ -262,8 +318,15 @@ ManagedOpeningFactScanResult WindowsFileManagedOpeningFactStore::scan(
         return {ManagedOpeningFactScanStatus::invalid_record, {}};
 #if defined(_WIN32)
     try {
+        const auto account_path = account_directory(directory_, account);
+        if (!std::filesystem::exists(account_path))
+            return {ManagedOpeningFactScanStatus::complete, {}};
+        if (!std::filesystem::is_directory(account_path)) {
+            last_error_ = "managed opening account path is not a directory";
+            return {ManagedOpeningFactScanStatus::invalid_record, {}};
+        }
         std::vector<ManagedOpeningDealFact> facts;
-        for (const auto &entry : std::filesystem::directory_iterator(directory_)) {
+        for (const auto &entry : std::filesystem::directory_iterator(account_path)) {
             if (!entry.is_regular_file())
                 continue;
             const auto filename = entry.path().filename().wstring();
@@ -280,8 +343,10 @@ ManagedOpeningFactScanResult WindowsFileManagedOpeningFactStore::scan(
                             : ManagedOpeningFactScanStatus::invalid_record,
                         {}};
             }
-            if (fact->operation_key().account != account)
-                continue;
+            if (!matches_requested_identity(*fact, account, fact->deal_ticket())) {
+                last_error_ = "managed opening fact account collision";
+                return {ManagedOpeningFactScanStatus::invalid_record, {}};
+            }
             if (record_path(directory_, account, fact->deal_ticket()).filename() !=
                 entry.path().filename()) {
                 last_error_ = "managed opening fact filename collision";

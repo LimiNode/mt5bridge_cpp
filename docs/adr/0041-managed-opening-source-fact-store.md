@@ -15,7 +15,7 @@ The implementation uses the existing Windows file-store primitives:
 - a flushed temporary file followed by `MoveFileExW(...WRITE_THROUGH)`;
 - the existing account-scoped `SingleWriterLease` fencing callback;
 - the existing bounded little-endian file envelope and checksum helper;
-- a store-local file lock to serialize same-directory writers.
+- a store-local file lock to serialize same-root writers.
 
 The checksum detects accidental record corruption only. It is not a source
 authority proof and cannot replace independent journal or broker validation.
@@ -28,7 +28,7 @@ authority proof and cannot replace independent journal or broker validation.
 | Canonical byte order and schema | `canonical_bytes()` / `from_canonical_bytes()` | Authentication or provenance authority |
 | Record envelope bounds and corruption detection | `WindowsFileManagedOpeningFactStore` | Truth of the source observation |
 | First receipt preservation and exact replay | Store commit/load path | Freshness across graph instances |
-| Account + deal-ticket namespace isolation | Filename key plus decoded identity check | Allocation capacity and exposure |
+| Account + deal-ticket namespace isolation | Canonical length-delimited key, account subdirectory, and decoded identity check | Allocation capacity and exposure |
 | Atomic durable publication | Existing file writer + `MoveFileExW` under lease | Opening allocation publication |
 | Source freshness and producer trust | Future authoritative producer (B3B) | This store |
 | Lifecycle terminality | Future lifecycle proof | C3A frontier/fact store |
@@ -38,6 +38,16 @@ authority proof and cannot replace independent journal or broker validation.
 The durable envelope is `MT5OPN01` version `1`, followed by a little-endian
 body length and checksum. The body contains the account server, account login,
 deal ticket, and the exact `ManagedOpeningDealFact::canonical_bytes()` payload.
+The filename namespace uses explicit length-delimited server bytes followed by
+fixed-width login and deal-ticket fields; it never relies on text concatenation
+or embedded NUL separators. The root contains deterministic `account-<digest>`
+subdirectories, and each account scan reads only its own subdirectory. A digest
+collision is detected by the decoded identity/path check and fails closed. Thus
+corruption in another account namespace does not block this account, while any
+unknown, foreign, or malformed record in the requested namespace does.
+
+The canonical fact payload has one shared maximum of 1 MiB enforced by fact
+construction, canonical decoding, and the durable envelope encoder/decoder.
 The decoder rejects unknown versions, truncation, trailing bytes, invalid
 enums, invalid quantity fields, identity mismatch, and non-canonical payloads.
 

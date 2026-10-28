@@ -19,6 +19,9 @@
 
 namespace mt5bridge::dispatch {
 
+/// \brief Maximum canonical byte size accepted for one durable OPEN fact.
+inline constexpr std::size_t kManagedOpeningMaxCanonicalBytes = 1U << 20;
+
 /// \struct ManagedOpeningExecutionRequest
 /// \brief Constrains a local OPEN deal join without supplying source authority.
 struct ManagedOpeningExecutionRequest {
@@ -159,6 +162,29 @@ inline void append_text(std::vector<std::uint8_t> *bytes, const std::string &val
     bytes->insert(bytes->end(), value.begin(), value.end());
 }
 
+inline bool read_u64(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
+                     std::uint64_t *value) {
+    if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t))
+        return false;
+    *value = 0;
+    for (unsigned shift = 0; shift != 64; shift += 8)
+        *value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
+    return true;
+}
+
+inline bool read_text(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
+                      std::string *value,
+                      std::size_t max_bytes = kManagedOpeningMaxCanonicalBytes) {
+    std::uint64_t size = 0;
+    if (!read_u64(bytes, offset, &size) || size > max_bytes ||
+        size > bytes.size() - offset)
+        return false;
+    value->assign(reinterpret_cast<const char *>(bytes.data() + offset),
+                  static_cast<std::size_t>(size));
+    offset += static_cast<std::size_t>(size);
+    return true;
+}
+
 inline void append_operation_key(std::vector<std::uint8_t> *bytes,
                                  const OperationKey &key) {
     append_text(bytes, key.account.server);
@@ -229,7 +255,7 @@ public:
             observation.quantity_domain);
         if (!quantity)
             return std::nullopt;
-        return ManagedOpeningDealFact(
+        ManagedOpeningDealFact result(
             observation.operation_key, observation.operation_revision,
             observation.order_ticket, observation.deal_ticket,
             observation.position_identifier, observation.direction,
@@ -238,6 +264,84 @@ public:
              observation.history_coverage_revision,
              observation.history_window_from_msc,
              observation.history_window_to_msc});
+        return result.valid() ? std::optional<ManagedOpeningDealFact>(std::move(result))
+                              : std::nullopt;
+    }
+
+    /// \brief Decodes one exact canonical fact representation.
+    /// \param bytes Versioned bytes returned by canonical_bytes().
+    /// \return Locally valid fact, or empty for any malformed/non-canonical input.
+    static std::optional<ManagedOpeningDealFact> from_canonical_bytes(
+        const std::vector<std::uint8_t> &bytes) {
+        if (bytes.size() > kManagedOpeningMaxCanonicalBytes)
+            return std::nullopt;
+        std::size_t offset = 0;
+        std::string tag;
+        std::uint64_t schema = 0;
+        if (!detail::read_text(bytes, offset, &tag) ||
+            tag != "mt5bridge-managed-opening-deal-fact" ||
+            !detail::read_u64(bytes, offset, &schema) || schema != k_schema_version)
+            return std::nullopt;
+
+        OperationKey operation_key;
+        std::uint64_t operation_revision = 0;
+        std::uint64_t order_ticket = 0;
+        std::uint64_t deal_ticket = 0;
+        std::uint64_t position_identifier = 0;
+        std::uint64_t direction_value = 0;
+        std::uint64_t entry_value = 0;
+        std::uint64_t deal_time_value = 0;
+        std::uint64_t canonical_scale = 0;
+        std::uint64_t broker_step_units = 0;
+        std::uint64_t broker_units = 0;
+        std::uint64_t integer_step_count = 0;
+        std::uint64_t managed_logical_units = 0;
+        std::uint64_t history_window_from_value = 0;
+        std::uint64_t history_window_to_value = 0;
+        ManagedOpeningAdmissionReceipt receipt;
+        if (!detail::read_text(bytes, offset, &operation_key.account.server) ||
+            !detail::read_u64(bytes, offset, &operation_key.account.login) ||
+            !detail::read_u64(bytes, offset, &operation_key.trade_id) ||
+            !detail::read_u64(bytes, offset, &operation_key.operation_id) ||
+            !detail::read_u64(bytes, offset, &operation_revision) ||
+            !detail::read_u64(bytes, offset, &order_ticket) ||
+            !detail::read_u64(bytes, offset, &deal_ticket) ||
+            !detail::read_u64(bytes, offset, &position_identifier) ||
+            !detail::read_u64(bytes, offset, &direction_value) ||
+            !detail::read_u64(bytes, offset, &entry_value) ||
+            !detail::read_u64(bytes, offset, &deal_time_value) ||
+            !detail::read_u64(bytes, offset, &canonical_scale) ||
+            !detail::read_u64(bytes, offset, &broker_step_units) ||
+            !detail::read_u64(bytes, offset, &broker_units) ||
+            !detail::read_u64(bytes, offset, &integer_step_count) ||
+            !detail::read_u64(bytes, offset, &managed_logical_units) ||
+            !detail::read_u64(bytes, offset, &receipt.source_revision) ||
+            !detail::read_u64(bytes, offset, &receipt.graph_instance_id) ||
+            !detail::read_u64(bytes, offset, &receipt.history_coverage_revision) ||
+            !detail::read_u64(bytes, offset, &history_window_from_value) ||
+            !detail::read_u64(bytes, offset, &history_window_to_value) ||
+            offset != bytes.size() || canonical_scale > (std::numeric_limits<std::uint32_t>::max)())
+            return std::nullopt;
+        receipt.history_window_from_msc =
+            static_cast<std::int64_t>(history_window_from_value);
+        receipt.history_window_to_msc =
+            static_cast<std::int64_t>(history_window_to_value);
+        if (direction_value > static_cast<std::uint64_t>(BrokerPositionDirection::sell) ||
+            entry_value > static_cast<std::uint64_t>(BrokerDealEntry::out_by))
+            return std::nullopt;
+        const auto quantity = ManagedOpeningQuantity::from_canonical_fields(
+            static_cast<std::uint32_t>(canonical_scale), broker_step_units,
+            broker_units, integer_step_count, managed_logical_units);
+        if (!quantity)
+            return std::nullopt;
+        ManagedOpeningDealFact result(
+            std::move(operation_key), operation_revision, order_ticket, deal_ticket,
+            position_identifier, static_cast<BrokerPositionDirection>(direction_value),
+            static_cast<BrokerDealEntry>(entry_value),
+            static_cast<std::int64_t>(deal_time_value), *quantity, receipt);
+        return result.valid() && result.canonical_bytes() == bytes
+                   ? std::optional<ManagedOpeningDealFact>(std::move(result))
+                   : std::nullopt;
     }
 
     /// \brief Returns the operation identity.
@@ -274,7 +378,8 @@ public:
                entry_ == BrokerDealEntry::in && quantity_.valid() &&
                detail::managed_units_per_step(quantity_) != 0 && receipt_.valid() &&
                deal_time_msc_ >= receipt_.history_window_from_msc &&
-               deal_time_msc_ <= receipt_.history_window_to_msc;
+               deal_time_msc_ <= receipt_.history_window_to_msc &&
+               canonical_bytes().size() <= kManagedOpeningMaxCanonicalBytes;
     }
 
     /// \brief Compares stable identity and immutable execution payload.

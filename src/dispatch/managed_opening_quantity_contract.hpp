@@ -348,6 +348,24 @@ struct ManagedOpeningQuantityDomain {
 /// \brief Sealed broker and managed quantity from one MT5 observation.
 class ManagedOpeningQuantity {
 public:
+    /// \brief Reconstructs an exact quantity from canonical integer fields.
+    /// \param canonical_scale Decimal denominator exponent.
+    /// \param broker_step_units Canonical broker step numerator.
+    /// \param broker_units Canonical observed quantity numerator.
+    /// \param integer_step_count Exact broker-step count.
+    /// \param managed_logical_units Exact managed logical quantity.
+    /// \return Quantity when all stored fields satisfy the B2 invariants.
+    static std::optional<ManagedOpeningQuantity> from_canonical_fields(
+        std::uint32_t canonical_scale, std::uint64_t broker_step_units,
+        std::uint64_t broker_units, std::uint64_t integer_step_count,
+        std::uint64_t managed_logical_units) {
+        ManagedOpeningQuantity result(canonical_scale, broker_step_units,
+                                      broker_units, integer_step_count,
+                                      managed_logical_units);
+        return result.valid() ? std::optional<ManagedOpeningQuantity>(result)
+                              : std::nullopt;
+    }
+
     /// \brief Returns the canonical decimal scale.
     /// \return Decimal denominator exponent.
     std::uint32_t canonical_scale() const { return canonical_scale_; }

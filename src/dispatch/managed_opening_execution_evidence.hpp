@@ -362,6 +362,12 @@ public:
     /// \brief Returns the deal direction.
     /// \return Buy or sell.
     BrokerPositionDirection direction() const { return direction_; }
+    /// \brief Returns the immutable broker entry classification.
+    /// \return The admitted OPEN entry value.
+    BrokerDealEntry entry() const { return entry_; }
+    /// \brief Returns the broker execution timestamp.
+    /// \return DEAL_TIME in milliseconds.
+    std::int64_t deal_time_msc() const { return deal_time_msc_; }
     /// \brief Returns the exact normalized deal quantity.
     /// \return B2 quantity-domain result.
     const ManagedOpeningQuantity &quantity() const { return quantity_; }

@@ -46,6 +46,9 @@ public:
         }
     }
 
+    /// \brief Returns a deterministic fingerprint, not a cryptographic
+    /// authority proof.
+    /// \return Non-zero FNV-64 fingerprint of the committed source tuple.
     std::uint64_t value() const { return value_ == 0 ? 1 : value_; }
 
 private:
@@ -106,16 +109,24 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         record.revision != request.operation_revision ||
         !journal_at_least_result_persisted(record.journal_state) ||
         record.result_payload.empty() ||
-        (record.operation_state != OperationState::accepted &&
-         record.operation_state != OperationState::reconciling &&
-         record.operation_state != OperationState::partially_filled &&
-         record.operation_state != OperationState::filled) ||
+        // The current journal contract persists only the latest revision. A
+        // later reconciliation transition would hide the immutable result
+        // source anchor, so B3B fails closed until that durable seam exists.
+        record.journal_state != JournalState::result_persisted ||
+        record.operation_state != OperationState::accepted ||
         !record.reconciliation_descriptor)
         return invalid_evidence();
     const auto &descriptor = *record.reconciliation_descriptor;
     if (!descriptor.valid() || descriptor.account != request.operation_key.account ||
         descriptor.trade_id != request.operation_key.trade_id ||
-        descriptor.operation_id != request.operation_key.operation_id)
+        descriptor.operation_id != request.operation_key.operation_id ||
+        descriptor.baseline.account() != request.operation_key.account ||
+        descriptor.baseline.graph_instance_id() == 0)
+        return invalid_evidence();
+    const bool same_graph_instance =
+        descriptor.baseline.graph_instance_id() == graph.instance_id();
+    if (same_graph_instance &&
+        descriptor.baseline.graph_revision() > graph.revision())
         return invalid_evidence();
 
     std::vector<std::uint64_t> bound_deal_tickets;
@@ -153,12 +164,28 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
     // The opening source must be anchored by a result-derived history deal.
     if (!has_result_derived_binding || bound_deal_tickets.empty() || !declared_window)
         return invalid_evidence();
+    if (descriptor.baseline.history_deals_revision() == 0 ||
+        (same_graph_instance &&
+         !graph.history_deals_covered_at_exact(
+             *declared_window, descriptor.baseline.history_deals_revision())))
+        return invalid_evidence();
+
+    // Every binding must originate from an unknown-ticket predicate. This is
+    // the private transport trust boundary; fabricated extra correlations are
+    // never accepted merely because the journal record is structurally valid.
+    for (const auto &binding : record.reconciliation_bindings) {
+        const auto predicate = std::find_if(
+            descriptor.predicates.begin(), descriptor.predicates.end(),
+            [&binding](const auto &candidate) {
+                return candidate.ticket == 0 &&
+                       candidate.correlation_id == binding.correlation_id;
+            });
+        if (predicate == descriptor.predicates.end())
+            return invalid_evidence();
+    }
 
     const auto history_deals = graph.history_deals();
-    const auto history_revision =
-        graph.domain_revision(ObservationDomain::history_deals);
-    if (history_revision == 0 ||
-        !graph.history_deals_covered_at(*declared_window, history_revision))
+    if (graph.domain_revision(ObservationDomain::history_deals) == 0)
         return invalid_evidence();
 
     std::uint64_t order_ticket = 0;
@@ -171,7 +198,10 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             deal->time_msc < declared_window->from_msc ||
             deal->time_msc > declared_window->to_msc ||
             graph.history_deal_evidence_revision(ticket) == 0 ||
-            !graph.history_deals_covered_at(
+            (same_graph_instance &&
+             graph.history_deal_evidence_revision(ticket) <=
+                 descriptor.baseline.history_deals_revision()) ||
+            !graph.history_deals_covered_at_exact(
                 *declared_window, graph.history_deal_evidence_revision(ticket)))
             return invalid_evidence();
         const auto candidate_direction = direction_for_type(deal->type);
@@ -200,7 +230,10 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             deal.time_msc > declared_window->to_msc ||
             direction_for_type(deal.type) != direction ||
             graph.history_deal_evidence_revision(deal.ticket) == 0 ||
-            !graph.history_deals_covered_at(
+            (same_graph_instance &&
+             graph.history_deal_evidence_revision(deal.ticket) <=
+                 descriptor.baseline.history_deals_revision()) ||
+            !graph.history_deals_covered_at_exact(
                 *declared_window, graph.history_deal_evidence_revision(deal.ticket)) ||
             !deals_by_ticket.emplace(deal.ticket, &deal).second)
             return invalid_evidence();
@@ -248,6 +281,16 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         if (deal_it == deals_by_ticket.end())
             return invalid_evidence();
         const auto &deal = *deal_it->second;
+        const auto &receipt = fact.admission_receipt();
+        if (receipt.graph_instance_id != descriptor.baseline.graph_instance_id() ||
+            receipt.history_coverage_revision != receipt.source_revision ||
+            (same_graph_instance && receipt.graph_instance_id != graph.instance_id()) ||
+            (same_graph_instance &&
+             receipt.source_revision != graph.history_deal_evidence_revision(fact.deal_ticket())) ||
+            !graph.history_deals_covered_at_exact(
+                {receipt.history_window_from_msc, receipt.history_window_to_msc},
+                graph.history_deal_evidence_revision(fact.deal_ticket())))
+            return invalid_evidence();
         const auto deal_direction = direction_for_type(deal.type);
         const auto &quantity = fact.quantity();
         const bool quantity_domain_matches =
@@ -271,6 +314,11 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
     const auto frontier = ManagedOpeningExecutionFrontier::create(facts);
     if (!frontier)
         return invalid_evidence();
+    if (descriptor.requested_volume == 0 ||
+        frontier->cumulative_managed_logical_units() > descriptor.requested_volume ||
+        (record.settled_volume != 0 &&
+         record.settled_volume != frontier->cumulative_managed_logical_units()))
+        return invalid_evidence();
 
     SourceDigest digest;
     digest.add_text("mt5bridge-managed-opening-source-v1");
@@ -281,6 +329,39 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
     digest.add_u64(request.operation_revision);
     digest.add_u64(request.position_identifier);
     digest.add_u64(order_ticket);
+    digest.add_u64(static_cast<std::uint64_t>(record.operation_kind));
+    digest.add_u64(static_cast<std::uint64_t>(record.operation_state));
+    digest.add_u64(static_cast<std::uint64_t>(record.journal_state));
+    digest.add_bytes(record.request_payload);
+    digest.add_bytes(record.result_payload);
+    digest.add_u64(descriptor.baseline.graph_instance_id());
+    digest.add_u64(descriptor.baseline.graph_revision());
+    digest.add_u64(descriptor.baseline.history_deals_revision());
+    digest.add_u64(descriptor.trade_id);
+    digest.add_u64(descriptor.operation_id);
+    digest.add_u64(descriptor.requested_volume);
+    digest.add_u64(static_cast<std::uint64_t>(descriptor.settled_state));
+    digest.add_u64(static_cast<std::uint64_t>(descriptor.predicates.size()));
+    for (const auto &predicate : descriptor.predicates) {
+        digest.add_u64(static_cast<std::uint64_t>(predicate.kind));
+        digest.add_u64(predicate.ticket);
+        digest.add_u64(predicate.history_window
+                           ? static_cast<std::uint64_t>(predicate.history_window->from_msc)
+                           : 0);
+        digest.add_u64(predicate.history_window
+                           ? static_cast<std::uint64_t>(predicate.history_window->to_msc)
+                           : 0);
+        digest.add_u64(predicate.baseline_present
+                           ? (*predicate.baseline_present ? 2U : 1U)
+                           : 0U);
+        digest.add_u64(predicate.correlation_id);
+        digest.add_u64(static_cast<std::uint64_t>(predicate.expected_transition));
+    }
+    digest.add_u64(static_cast<std::uint64_t>(record.reconciliation_bindings.size()));
+    for (const auto &binding : record.reconciliation_bindings) {
+        digest.add_u64(binding.correlation_id);
+        digest.add_u64(binding.broker_ticket);
+    }
     digest.add_u64(static_cast<std::uint64_t>(declared_window->from_msc));
     digest.add_u64(static_cast<std::uint64_t>(declared_window->to_msc));
     std::vector<std::uint64_t> deal_tickets;

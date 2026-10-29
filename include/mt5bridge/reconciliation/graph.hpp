@@ -438,6 +438,18 @@ public:
         return coverage_covers_at(history_deal_coverage_, window, through_revision);
     }
 
+    /// \brief Tests whether one complete history-deal window was accepted at
+    /// exactly one observation revision.
+    /// \param window Inclusive history range to prove.
+    /// \param revision Revision that must have carried both the window and
+    /// the deal evidence.
+    /// \return True only when the complete range is covered by that exact
+    /// revision; older coverage cannot authorize later evidence.
+    bool history_deals_covered_at_exact(ObservationWindow window,
+                                        std::uint64_t revision) const {
+        return coverage_covers_exact(history_deal_coverage_, window, revision);
+    }
+
     /// \brief Finds active orders linked to a position identifier.
     /// \param position_id MT5 ORDER_POSITION_ID/POSITION_IDENTIFIER value.
     /// \return Matching active orders in deterministic ticket order.
@@ -687,6 +699,39 @@ private:
         for (const auto &entry : coverage) {
             if (entry.revision == 0 || entry.revision > through_revision ||
                 !entry.window.valid() || entry.window.to_msc < requested.from_msc ||
+                entry.window.from_msc > requested.to_msc)
+                continue;
+            candidates.push_back(entry.window);
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const ObservationWindow &left, const ObservationWindow &right) {
+                      if (left.from_msc != right.from_msc)
+                          return left.from_msc < right.from_msc;
+                      return left.to_msc < right.to_msc;
+                  });
+        std::int64_t cursor = requested.from_msc;
+        for (const auto &candidate : candidates) {
+            if (candidate.to_msc < cursor)
+                continue;
+            if (candidate.from_msc > cursor)
+                return false;
+            if (candidate.to_msc >= requested.to_msc ||
+                candidate.to_msc == (std::numeric_limits<std::int64_t>::max)())
+                return true;
+            cursor = candidate.to_msc + 1;
+        }
+        return false;
+    }
+
+    static bool coverage_covers_exact(const std::vector<ObservationCoverage> &coverage,
+                                      ObservationWindow requested,
+                                      std::uint64_t exact_revision) {
+        if (!requested.valid() || exact_revision == 0)
+            return false;
+        std::vector<ObservationWindow> candidates;
+        for (const auto &entry : coverage) {
+            if (entry.revision != exact_revision || !entry.window.valid() ||
+                entry.window.to_msc < requested.from_msc ||
                 entry.window.from_msc > requested.to_msc)
                 continue;
             candidates.push_back(entry.window);

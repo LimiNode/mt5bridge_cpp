@@ -40,8 +40,9 @@ public:
     /// \brief Returns the cumulative managed quantity from verified facts.
     /// \return Positive logical units.
     std::uint64_t managed_logical_units() const { return managed_logical_units_; }
-    /// \brief Returns the canonical source-chain digest.
-    /// \return Non-zero digest over journal, history, and durable facts.
+    /// \brief Returns the canonical source-chain fingerprint.
+    /// \return Non-zero deterministic FNV-64 fingerprint over journal,
+    /// history, and durable facts; this is not authority by itself.
     std::uint64_t evidence_digest() const { return evidence_digest_; }
 
     /// \brief Tests the sealed source proof shape.

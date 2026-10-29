@@ -27,6 +27,15 @@ No caller-supplied identity, digest, quantity, or authority flag is promoted to
 proof. The existing `UnavailableManagedOpeningProvenanceSource` remains the
 production allocation-provenance source until B3C supplies an allocation record.
 
+The binding trust boundary is the private dispatch path: `validate_result()`
+validates one broker result, `extract_bindings()` derives at most one
+`fields.deal` anchor for an `order_send` result, and
+`OneShotDispatchBackend::persist_result_with_bindings()` commits the raw result
+and bindings atomically. B3B trusts only that committed binding contract; it
+does not claim to independently parse or authenticate an opaque result payload.
+An order-only result (`order != 0`, `deal == 0`) cannot satisfy this OPEN source
+contract and remains unsupported/fail-closed.
+
 ## Ownership matrix
 
 | Invariant | Owner | Not owned by this slice |
@@ -49,17 +58,23 @@ For a valid `ManagedOpeningProvenanceRequest`, the verifier:
 2. reloads the exact journal key and revision, requiring a committed OPEN with
    a persisted result, a valid descriptor, and at least one result-derived
    `history_deal_present` binding;
-3. requires one complete, common history window and verifies its coverage at
-   the graph's current history-deal revision;
+3. requires a pre-dispatch `ReconciliationBaseline` from the same account and
+   graph provenance. On the original graph instance every admitted deal must
+   have evidence newer than that baseline and an exact complete-window
+   coverage entry at the same revision. After restart numeric graph revisions
+   are not compared across instances; the durable baseline/receipt provenance
+   is retained and the re-observed graph must independently provide exact
+   complete-window coverage;
 4. reloads every bound deal and every deal for the bound order, requiring exact
    account/order/position identity, `DEAL_ENTRY_IN`, one direction, complete
    fields, and complete coverage;
 5. scans durable B3A facts, requiring one exact fact for every authoritative
    deal, exact operation revision and position, unchanged admission window,
    exact timestamp/direction, and canonical quantity equality;
-6. builds the deterministic deal-ticket-sorted execution frontier and computes
-   a domain-tagged digest over journal identity, history fields, and canonical
-   fact bytes; and
+6. builds the deterministic deal-ticket-sorted execution frontier, rejects an
+   unknown requested volume or cumulative managed volume above it, and computes
+   a domain-tagged FNV-64 fingerprint over the immutable journal payload,
+   descriptor/bindings, history fields, and canonical fact bytes; and
 7. returns the sealed source fact only after every comparison succeeds.
 
 Missing journal records remain `unavailable`; malformed records, missing facts,
@@ -70,11 +85,16 @@ the saved fact or a position snapshot.
 
 ## Restart and contradiction boundary
 
-The verifier accepts a fresh graph instance after restart when it independently
-re-observes the same complete history window. The graph instance identifier in
-the original B3A admission receipt is retained for provenance but is never used
-as a global ordering relation. A changed history payload, missing coverage,
-foreign same-position execution, or unavailable durable fact fails closed.
+The verifier accepts a fresh graph instance after restart only when the durable
+descriptor and first-admission receipts identify the original graph/account and
+the new graph independently re-observes the same complete history window. The
+graph instance identifier is provenance, never a cross-restart ordering
+relation. A changed history payload, old coverage reused for a later uncovered
+deal, missing causal evidence, foreign same-position execution, or unavailable
+durable fact fails closed. The current journal store retains only its latest
+revision, so B3B intentionally rejects records already advanced into the
+`reconciling` lifecycle until a separate durable immutable source-anchor field
+is introduced.
 
 The verifier does not infer that an OPEN is terminal, does not publish an
 opening allocation, and does not modify `ManagedTradeOwner`, exposure, the C ABI,
@@ -82,8 +102,10 @@ or Trade Event Observation.
 
 ## Regression boundary
 
-The B3B test suite covers one and multiple partial fills, exact quantity and
-identity joins, missing and rewritten facts, foreign same-position executions,
-stale journal revisions, graph restart, revoked fencing, invalid requests, and
-durable-store I/O failure. B3C remains responsible for durable opening-allocation
-publication and its crash matrix.
+The B3B test suite covers one result-derived anchor plus history-discovered
+partial fills, exact quantity and identity joins, pre-dispatch baseline
+causality, stale-coverage rejection, missing and rewritten facts, foreign
+same-position executions, stale journal revisions, graph restart, revoked
+fencing, requested-volume bounds, invalid requests, and durable-store I/O
+failure. B3C remains responsible for durable opening-allocation publication and
+its crash matrix.

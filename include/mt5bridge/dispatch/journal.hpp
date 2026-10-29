@@ -603,6 +603,7 @@ private:
         candidate.result_payload = std::move(result_payload);
         candidate.reconciliation_bindings.clear();
         candidate.revision += 1;
+        candidate.result_source_revision = candidate.revision;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};
         const auto commit_status = store_.commit(candidate, it->second.revision);
@@ -643,6 +644,9 @@ private:
         candidate.result_payload = std::move(result_payload);
         candidate.reconciliation_bindings = std::move(bindings);
         candidate.revision += 1;
+        // This revision is the immutable result-source anchor. Later
+        // lifecycle transitions must preserve it while advancing `revision`.
+        candidate.result_source_revision = candidate.revision;
         if (!candidate.valid())
             return {JournalMutationStatus::invalid_record, std::nullopt};
         const auto commit_status = store_.commit(candidate, it->second.revision);

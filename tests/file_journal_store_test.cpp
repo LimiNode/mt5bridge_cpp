@@ -525,6 +525,9 @@ int main() {
         const auto result_record = result_store.load(operation_key);
         require(result_record.found() && result_record.record->operation_state ==
                                        mt5bridge::OperationState::accepted &&
+                    result_record.record->result_source_revision != 0 &&
+                    result_record.record->result_source_revision <
+                        result_record.record->revision &&
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
@@ -534,6 +537,13 @@ int main() {
         require(result_store.commit(rewritten_kind, result_record.record->revision) ==
                     mt5bridge::StoreCommitStatus::conflict,
                 "durable operation kind was rewritten after creation");
+        auto rewritten_anchor = *result_record.record;
+        ++rewritten_anchor.result_source_revision;
+        ++rewritten_anchor.revision;
+        require(rewritten_anchor.valid() &&
+                    result_store.commit(rewritten_anchor, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "durable result source anchor was rewritten after persistence");
         const auto settled_reconciling = owner_a.transition_operation(
             operation_key, mt5bridge::OperationState::reconciling);
         require(settled_reconciling.accepted(),

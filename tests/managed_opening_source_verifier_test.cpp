@@ -2,8 +2,10 @@
 /// \brief Verifies independent durable OPEN source attribution.
 
 #include "managed_opening_source_verifier.hpp"
+#include "one_shot_backend.hpp"
 
 #include "support/memory_journal_store.hpp"
+#include "support/fake_observation_provider.hpp"
 
 #include <mt5bridge/dispatch/file_journal_store.hpp>
 
@@ -74,6 +76,23 @@ public:
 
     bool held = true;
     std::uint64_t token = 17;
+};
+
+class TestAccountProbe final : public runtime::CurrentAccountProbe {
+public:
+    std::optional<AccountKey> current_account() override { return account(); }
+};
+
+class TestTransport final : public runtime::DispatchTransport {
+public:
+    runtime::BackendCallResult submit_once(const OperationRecord &) override {
+        ++calls;
+        return {runtime::BackendCallStatus::broker_result,
+                runtime::BrokerResultDisposition::reconciling, 10009, {0xA0, 0x01},
+                {{70, 5001}}};
+    }
+
+    std::size_t calls = 0;
 };
 
 Mt5DealSnapshot deal(std::uint64_t ticket, double volume,
@@ -147,10 +166,6 @@ OperationRecord journal_record(const ReconciliationBaseline &baseline,
                 ReconciliationTransition::absent_to_present, correlation,
                 source_window()));
             bindings.push_back({correlation++, ticket});
-        } else {
-            predicates.push_back(expect_reconciliation_transition(
-                ReconciliationPredicateKind::history_deal_present, ticket, false,
-                ReconciliationTransition::absent_to_present, 0, source_window()));
         }
     }
     OperationRecord record;
@@ -161,6 +176,7 @@ OperationRecord journal_record(const ReconciliationBaseline &baseline,
     record.operation_state = OperationState::accepted;
     record.journal_state = JournalState::result_persisted;
     record.revision = operation_revision;
+    record.result_source_revision = operation_revision == 1 ? 1 : operation_revision - 1;
     record.fencing_token = 17;
     record.reconciliation_descriptor = ReconciliationDescriptor{
         account(), baseline, std::move(predicates), OperationState::filled,
@@ -180,9 +196,9 @@ void accepts_only_independent_source_chain() {
         auto record = journal_record(baseline, {5001, 5002});
         require(record.reconciliation_bindings.size() == 1 &&
                     record.reconciliation_descriptor &&
-                    record.reconciliation_descriptor->predicates.size() == 2 &&
-                    record.reconciliation_descriptor->predicates[1].ticket == 5002,
-                "multiple-fill fixture fabricated more than one result binding");
+                    record.reconciliation_descriptor->predicates.size() == 1 &&
+                    record.reconciliation_descriptor->predicates[0].ticket == 0,
+                "multiple-fill fixture fabricated a future ticket");
         journal.records.emplace(operation(), std::move(record));
         TestLease lease;
         ManagedOpeningSourceVerifier verifier(
@@ -194,7 +210,7 @@ void accepts_only_independent_source_chain() {
                 "source proof did not retain the canonical deal set");
         require(result.proof->managed_logical_units() == 8,
                 "source proof cumulative quantity was not exact");
-        require(result.proof->evidence_digest() == 2489286731664523904ULL,
+        require(result.proof->evidence_digest() == 14084310942890406028ULL,
                 "source fingerprint golden vector changed unexpectedly");
     });
 }
@@ -303,13 +319,151 @@ void survives_graph_restart_but_not_lease_revocation() {
         ManagedOpeningSourceVerifier verifier(
             journal, facts, restarted_graph,
             ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
-        require(verifier.verify({operation(), OperationKind::open, 3, 88001}).found(),
+        const auto restarted_result =
+            verifier.verify({operation(), OperationKind::open, 3, 88001});
+        require(restarted_result.found(),
                 "durable source proof did not survive graph restart re-observation");
         lease.held = false;
         require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
                     ManagedOpeningSourceVerificationStatus::lease_not_held,
                 "revoked fencing capability was accepted");
     });
+}
+
+void accepts_idempotent_repoll_without_rewriting_receipt() {
+    ObservationGraph graph(account());
+    ObservationBatch baseline_batch;
+    baseline_batch.account = account();
+    baseline_batch.observed_domains = ObservationDomain::history_deals;
+    baseline_batch.history_deals_window = source_window();
+    require(graph.apply(baseline_batch).accepted(), "repoll baseline was rejected");
+    const auto baseline = capture_reconciliation_baseline(graph);
+    ObservationBatch post_dispatch = baseline_batch;
+    post_dispatch.history_deals = {deal(5001, 0.05)};
+    require(graph.apply(post_dispatch).accepted(), "repoll history was rejected");
+
+    MemoryOpeningFactStore facts;
+    facts.facts = {fact_for(graph, 5001, 0.05)};
+    const auto original_receipt = facts.facts.front().admission_receipt();
+    mt5bridge_test_support::MemoryJournalStore journal;
+    journal.records.emplace(operation(), journal_record(baseline, {5001}));
+    TestLease lease;
+    ManagedOpeningSourceVerifier verifier(
+        journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+    require(verifier.verify({operation(), OperationKind::open, 3, 88001}).found(),
+            "first complete poll was not admitted");
+
+    // The same deal observed again gets a newer graph evidence revision. The
+    // durable B3A receipt remains the first admission and must not be replaced.
+    require(graph.apply(post_dispatch).accepted(), "repoll refresh was rejected");
+    require(verifier.verify({operation(), OperationKind::open, 3, 88001}).found(),
+            "unchanged complete repoll invalidated source proof");
+    require(facts.facts.front().admission_receipt() == original_receipt,
+            "repoll changed the immutable admission receipt");
+}
+
+void accepts_production_reachable_one_shot_result() {
+    using mt5bridge_test_support::FakeObservationProvider;
+    ObservationBatch baseline_batch;
+    baseline_batch.account = account();
+    baseline_batch.observed_domains = ObservationDomain::active_orders |
+                                      ObservationDomain::positions |
+                                      ObservationDomain::history_orders |
+                                      ObservationDomain::history_deals;
+    baseline_batch.history_orders_window = source_window();
+    baseline_batch.history_deals_window = source_window();
+    baseline_batch.position_history_order =
+        PositionHistoryOrder::positions_before_history_deals;
+    Mt5PositionSnapshot position{};
+    position.ticket = 7001;
+    position.identifier = 88001;
+    position.type = 0;
+    position.known_fields = MT5BRIDGE_POSITION_KNOWN_TICKET |
+                            MT5BRIDGE_POSITION_KNOWN_IDENTIFIER |
+                            MT5BRIDGE_POSITION_KNOWN_TYPE;
+    baseline_batch.positions = {position};
+    Mt5HistoryOrderSnapshot history_order{};
+    history_order.ticket = 3001;
+    history_order.position_id = 88001;
+    history_order.time_done_msc = 1500;
+    history_order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                                 MT5BRIDGE_ORDER_KNOWN_POSITION_ID |
+                                 MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
+    baseline_batch.history_orders = {history_order};
+    ObservationBatch post_dispatch = baseline_batch;
+    post_dispatch.history_deals = {deal(5001, 0.05)};
+    FakeObservationProvider provider(
+        {baseline_batch, baseline_batch, baseline_batch, post_dispatch});
+    ObservationCoordinator coordinator(provider, account());
+    ObservationCollectionRequest collection;
+    collection.history_deals_window = source_window();
+    collection.history_orders_window = source_window();
+    collection.position_history_order = PositionHistoryOrder::positions_before_history_deals;
+    const auto baseline_sample = coordinator.refresh(collection);
+    require(baseline_sample.sample.has_value(), "production baseline observation failed");
+    const auto first = coordinator.refresh(collection);
+    const auto second = coordinator.refresh(collection);
+    require(first.sample && second.sample, "production history observations failed");
+    EnvironmentConsistencyRequest consistency_request;
+    consistency_request.history_deals_window = source_window();
+    consistency_request.history_orders_window = source_window();
+    const auto consistency = EnvironmentConsistencyPolicy::evaluate(
+        {*first.sample, *second.sample}, consistency_request);
+    require(consistency.consistent() && consistency.proof,
+            "production consistency proof was not admitted");
+    const auto baseline = coordinator.capture_baseline();
+
+    const auto descriptor = ReconciliationDescriptor{
+        account(), baseline,
+        {expect_reconciliation_transition(
+            ReconciliationPredicateKind::history_deal_present, std::nullopt, false,
+            ReconciliationTransition::absent_to_present, 70, source_window())},
+        OperationState::filled, operation().trade_id, operation().operation_id, 5};
+    mt5bridge_test_support::MemoryJournalStore journal_store;
+    OperationJournal journal(journal_store);
+    require(journal.create(operation(), {0x01}, OperationKind::open).accepted(),
+            "production journal create failed");
+    require(journal.transition_operation(operation(), OperationState::prechecking).accepted(),
+            "production prechecking failed");
+    require(journal.transition_journal(operation(), JournalState::prechecked).accepted(),
+            "production prechecked failed");
+    require(journal.transition_journal(operation(), JournalState::dispatch_intent_persisted)
+                .accepted(),
+            "production dispatch-intent transition failed");
+    require(journal.persist_reconciliation_descriptor(operation(), descriptor).accepted(),
+            "production descriptor persistence failed");
+    TestLease lease;
+    DispatchAdmissionBarrier admission(journal, coordinator.graph(),
+                                       EnvironmentConsistencyRequest{});
+    DispatchAdmissionRequest admission_request;
+    admission_request.current_account = account();
+    admission_request.environment_proof = consistency.proof;
+    auto admitted = admission.admit(operation(), admission_request, lease);
+    require(admitted.admitted(), "production dispatch barrier did not admit");
+    runtime::OneShotDispatchBackend backend;
+    TestTransport transport;
+    TestAccountProbe account_probe;
+    const auto executed = backend.execute(journal, operation(), std::move(*admitted.permit),
+                                          account_probe, lease, transport);
+    require(executed.completed() && executed.record && transport.calls == 1,
+            "production one-shot dispatch did not complete");
+    require(executed.record->journal_state == JournalState::result_persisted &&
+                executed.record->operation_state == OperationState::reconciling &&
+                executed.record->result_source_revision != 0,
+                "result-source anchor was not retained across lifecycle transition");
+
+    const auto post_dispatch_sample = coordinator.refresh(collection);
+    require(post_dispatch_sample.sample.has_value(),
+            "production post-dispatch history observation failed");
+
+    MemoryOpeningFactStore facts;
+    facts.facts = {fact_for(coordinator.graph(), 5001, 0.05, executed.record->revision)};
+    ManagedOpeningSourceVerifier verifier(
+        journal_store, facts, coordinator.graph(),
+        ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+    require(verifier.verify({operation(), OperationKind::open, executed.record->revision, 88001})
+                .found(),
+            "production-reachable result did not pass source verifier");
 }
 
 void rejects_invalid_requests_and_store_failures() {
@@ -347,6 +501,24 @@ void rejects_invalid_requests_and_store_failures() {
                     ManagedOpeningSourceVerificationStatus::invalid_evidence,
                 "caller-known history ticket was treated as result authority");
     });
+    with_graph({deal(5001, 0.05)}, [](const auto &graph, const auto &baseline) {
+        MemoryOpeningFactStore facts;
+        facts.facts = {fact_for(graph, 5001, 0.05)};
+        mt5bridge_test_support::MemoryJournalStore journal;
+        auto record = journal_record(baseline, {5001});
+        record.reconciliation_descriptor->predicates.push_back(
+            expect_reconciliation_transition(
+                ReconciliationPredicateKind::history_deal_present, 5002, false,
+                ReconciliationTransition::absent_to_present, 0, source_window()));
+        require(record.valid(), "fabricated future-ticket fixture is invalid");
+        journal.records.emplace(operation(), std::move(record));
+        TestLease lease;
+        ManagedOpeningSourceVerifier verifier(
+            journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+        require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
+                    ManagedOpeningSourceVerificationStatus::invalid_evidence,
+                "fabricated future history ticket was accepted");
+    });
 }
 
 void rejects_non_causal_or_stale_history_evidence() {
@@ -372,6 +544,12 @@ void rejects_non_causal_or_stale_history_evidence() {
     require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
                 ManagedOpeningSourceVerificationStatus::invalid_evidence,
             "deal existing before baseline was accepted");
+    require(preexisting_graph.apply(existing).accepted(),
+            "preexisting-deal repoll was rejected");
+    facts.facts = {fact_for(preexisting_graph, 5001, 0.05)};
+    require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
+                ManagedOpeningSourceVerificationStatus::invalid_evidence,
+            "repoll of a preexisting deal was accepted as a new admission");
 
     // A later deal batch without a complete window must not inherit an old
     // complete-window coverage entry.
@@ -480,6 +658,8 @@ int main() {
         rejects_missing_or_rewritten_sources();
         rejects_identity_and_history_contradictions();
         survives_graph_restart_but_not_lease_revocation();
+        accepts_idempotent_repoll_without_rewriting_receipt();
+        accepts_production_reachable_one_shot_result();
         rejects_invalid_requests_and_store_failures();
         rejects_non_causal_or_stale_history_evidence();
         rejects_unreconstructable_lifecycle_and_volume_states();

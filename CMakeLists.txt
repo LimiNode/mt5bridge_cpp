@@ -241,7 +241,7 @@ if(BUILD_TESTING)
                                ${PROJECT_SOURCE_DIR}/src/dispatch
                                ${PROJECT_SOURCE_DIR}/tests)
     target_link_libraries(mt5bridge_managed_opening_source_verifier_test PRIVATE
-                          mt5bridge::journal)
+                          mt5bridge::journal mt5bridge::one_shot_backend)
     add_test(NAME mt5bridge_managed_opening_source_verifier
              COMMAND mt5bridge_managed_opening_source_verifier_test)
     add_executable(mt5bridge_managed_allocation_store_test

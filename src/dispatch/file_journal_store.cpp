@@ -30,7 +30,9 @@ constexpr std::uint32_t kLegacyFormatVersion = 1;
 constexpr std::uint32_t kCausalFormatVersion = 2;
 constexpr std::uint32_t kManagedVolumeFormatVersion = 3;
 constexpr std::uint32_t kOperationKindFormatVersion = 4;
-constexpr std::uint32_t kFormatVersion = 5;
+constexpr std::uint32_t kSettlementModeFormatVersion = 5;
+constexpr std::uint32_t kResultSourceAnchorFormatVersion = 6;
+constexpr std::uint32_t kFormatVersion = kResultSourceAnchorFormatVersion;
 constexpr std::array<char, 8> kEpochMagic{{'M', 'T', '5', 'E', 'P', 'C', '0', '1'}};
 constexpr std::uint32_t kEpochFormatVersion = 1;
 constexpr std::uint32_t kMaxReconciliationPredicates = 1U << 20;
@@ -227,6 +229,7 @@ std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &r
     append_u32(body, static_cast<std::uint32_t>(record.operation_state));
     append_u32(body, static_cast<std::uint32_t>(record.journal_state));
     append_u64(body, record.revision);
+    append_u64(body, record.result_source_revision);
     append_u64(body, record.fencing_token);
     append_u64(body, record.settled_volume);
     append_u32(body, static_cast<std::uint32_t>(record.operation_kind));
@@ -265,7 +268,8 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     std::uint64_t expected_checksum = 0;
     if (!read_u32(bytes, offset, version) || !read_u64(bytes, offset, body_size) ||
         !read_u64(bytes, offset, expected_checksum) ||
-        (version != kFormatVersion && version != kOperationKindFormatVersion &&
+        (version != kFormatVersion && version != kSettlementModeFormatVersion &&
+         version != kOperationKindFormatVersion &&
          version != kManagedVolumeFormatVersion &&
          version != kCausalFormatVersion && version != kLegacyFormatVersion) ||
         body_size > kMaxBodyBytes || body_size != bytes.size() - offset)
@@ -293,12 +297,14 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     if (!read_u32(body, body_offset, operation_state) ||
         !read_u32(body, body_offset, journal_state) ||
         !read_u64(body, body_offset, record.revision) ||
+        (version >= kResultSourceAnchorFormatVersion &&
+         !read_u64(body, body_offset, record.result_source_revision)) ||
         !read_u64(body, body_offset, record.fencing_token) ||
         (version >= kManagedVolumeFormatVersion &&
          !read_u64(body, body_offset, record.settled_volume)) ||
         (version >= kOperationKindFormatVersion &&
          !read_u32(body, body_offset, operation_kind)) ||
-        (version >= kFormatVersion &&
+        (version >= kSettlementModeFormatVersion &&
          !read_u32(body, body_offset, settlement_mode)) ||
         !read_reconciliation_descriptor(body, body_offset,
                                         record.reconciliation_descriptor,
@@ -326,7 +332,7 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     record.journal_state = static_cast<JournalState>(journal_state);
     if (version >= kOperationKindFormatVersion)
         record.operation_kind = static_cast<OperationKind>(operation_kind);
-    if (version >= kFormatVersion)
+    if (version >= kSettlementModeFormatVersion)
         record.settlement_mode = static_cast<ManagedSettlementMode>(settlement_mode);
     if (version == kManagedVolumeFormatVersion &&
         record.reconciliation_descriptor &&
@@ -826,8 +832,11 @@ StoreCommitStatus WindowsFileJournalStore::commit(
     }
     if (status == ReadStatus::valid && existing &&
         (existing->operation_kind != record.operation_kind ||
-         existing->settlement_mode != record.settlement_mode)) {
-        set_error(last_error_, "operation kind and settlement mode are immutable");
+         existing->settlement_mode != record.settlement_mode ||
+         (existing->result_source_revision != 0 &&
+          existing->result_source_revision != record.result_source_revision))) {
+        set_error(last_error_,
+                  "operation kind, settlement mode, and result source anchor are immutable");
         return StoreCommitStatus::conflict;
     }
 

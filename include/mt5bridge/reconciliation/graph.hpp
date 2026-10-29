@@ -289,10 +289,13 @@ public:
 
         std::map<std::uint64_t, Mt5DealSnapshot> next_history_deals;
         std::map<std::uint64_t, std::uint64_t> next_history_deal_evidence_revisions;
+        std::map<std::uint64_t, std::uint64_t> next_history_deal_first_evidence_revisions;
         std::vector<ObservationCoverage> next_history_deal_coverage;
         if (observe_history_deals) {
             next_history_deals = history_deals_;
             next_history_deal_evidence_revisions = history_deal_evidence_revisions_;
+            next_history_deal_first_evidence_revisions =
+                history_deal_first_evidence_revisions_;
             next_history_deal_coverage = history_deal_coverage_;
             const auto required_fields = kDealGraphFields |
                 (batch.history_deals_window ? MT5BRIDGE_DEAL_KNOWN_TIME : 0);
@@ -300,6 +303,8 @@ public:
                 return {ObservationApplyStatus::invalid_evidence, revision_};
             mark_evidence_revision(batch.history_deals, next_revision,
                                    &next_history_deal_evidence_revisions);
+            mark_first_evidence_revision(batch.history_deals, next_revision,
+                                         &next_history_deal_first_evidence_revisions);
             if (batch.history_deals_window)
                 add_coverage(&next_history_deal_coverage,
                              {*batch.history_deals_window, next_revision});
@@ -321,6 +326,8 @@ public:
         if (observe_history_deals) {
             history_deals_.swap(next_history_deals);
             history_deal_evidence_revisions_.swap(next_history_deal_evidence_revisions);
+            history_deal_first_evidence_revisions_.swap(
+                next_history_deal_first_evidence_revisions);
             history_deal_coverage_.swap(next_history_deal_coverage);
         }
         if (replace_active_orders)
@@ -346,6 +353,7 @@ public:
         history_deals_.clear();
         history_order_evidence_revisions_.clear();
         history_deal_evidence_revisions_.clear();
+        history_deal_first_evidence_revisions_.clear();
         history_order_coverage_.clear();
         history_deal_coverage_.clear();
         active_orders_revision_ = 0;
@@ -388,6 +396,13 @@ public:
     /// \return Evidence revision, or zero when the ticket is absent.
     std::uint64_t history_deal_evidence_revision(std::uint64_t ticket) const {
         return evidence_revision(history_deal_evidence_revisions_, ticket);
+    }
+
+    /// \brief Returns the first accepted revision for one history deal ticket.
+    /// \param ticket MT5 history deal ticket.
+    /// \return First evidence revision, or zero when the ticket is absent.
+    std::uint64_t history_deal_first_evidence_revision(std::uint64_t ticket) const {
+        return evidence_revision(history_deal_first_evidence_revisions_, ticket);
     }
 
     /// \brief Returns revision-tagged history-order coverage windows.
@@ -573,6 +588,14 @@ private:
             (*revisions)[value.ticket] = revision;
     }
 
+    template <typename T>
+    static void mark_first_evidence_revision(
+        const std::vector<T> &source, std::uint64_t revision,
+        std::map<std::uint64_t, std::uint64_t> *revisions) {
+        for (const auto &value : source)
+            revisions->emplace(value.ticket, revision);
+    }
+
     static std::uint64_t evidence_revision(
         const std::map<std::uint64_t, std::uint64_t> &revisions,
         std::uint64_t ticket) {
@@ -693,44 +716,25 @@ private:
     static bool coverage_covers_at(const std::vector<ObservationCoverage> &coverage,
                                    ObservationWindow requested,
                                    std::uint64_t through_revision) {
-        if (!requested.valid() || through_revision == 0)
-            return false;
-        std::vector<ObservationWindow> candidates;
-        for (const auto &entry : coverage) {
-            if (entry.revision == 0 || entry.revision > through_revision ||
-                !entry.window.valid() || entry.window.to_msc < requested.from_msc ||
-                entry.window.from_msc > requested.to_msc)
-                continue;
-            candidates.push_back(entry.window);
-        }
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const ObservationWindow &left, const ObservationWindow &right) {
-                      if (left.from_msc != right.from_msc)
-                          return left.from_msc < right.from_msc;
-                      return left.to_msc < right.to_msc;
-                  });
-        std::int64_t cursor = requested.from_msc;
-        for (const auto &candidate : candidates) {
-            if (candidate.to_msc < cursor)
-                continue;
-            if (candidate.from_msc > cursor)
-                return false;
-            if (candidate.to_msc >= requested.to_msc ||
-                candidate.to_msc == (std::numeric_limits<std::int64_t>::max)())
-                return true;
-            cursor = candidate.to_msc + 1;
-        }
-        return false;
+        return coverage_covers_revision(coverage, requested, through_revision, false);
     }
 
     static bool coverage_covers_exact(const std::vector<ObservationCoverage> &coverage,
                                       ObservationWindow requested,
                                       std::uint64_t exact_revision) {
-        if (!requested.valid() || exact_revision == 0)
+        return coverage_covers_revision(coverage, requested, exact_revision, true);
+    }
+
+    static bool coverage_covers_revision(const std::vector<ObservationCoverage> &coverage,
+                                         ObservationWindow requested,
+                                         std::uint64_t revision, bool exact) {
+        if (!requested.valid() || revision == 0)
             return false;
         std::vector<ObservationWindow> candidates;
         for (const auto &entry : coverage) {
-            if (entry.revision != exact_revision || !entry.window.valid() ||
+            if (entry.revision == 0 ||
+                (exact ? entry.revision != revision : entry.revision > revision) ||
+                !entry.window.valid() ||
                 entry.window.to_msc < requested.from_msc ||
                 entry.window.from_msc > requested.to_msc)
                 continue;
@@ -776,6 +780,7 @@ private:
     std::map<std::uint64_t, Mt5DealSnapshot> history_deals_;
     std::map<std::uint64_t, std::uint64_t> history_order_evidence_revisions_;
     std::map<std::uint64_t, std::uint64_t> history_deal_evidence_revisions_;
+    std::map<std::uint64_t, std::uint64_t> history_deal_first_evidence_revisions_;
     std::uint64_t active_orders_revision_ = 0;
     std::uint64_t positions_revision_ = 0;
     std::uint64_t history_orders_revision_ = 0;

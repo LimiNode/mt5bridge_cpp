@@ -109,11 +109,11 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         record.revision != request.operation_revision ||
         !journal_at_least_result_persisted(record.journal_state) ||
         record.result_payload.empty() ||
-        // The current journal contract persists only the latest revision. A
-        // later reconciliation transition would hide the immutable result
-        // source anchor, so B3B fails closed until that durable seam exists.
         record.journal_state != JournalState::result_persisted ||
-        record.operation_state != OperationState::accepted ||
+        record.result_source_revision == 0 ||
+        record.result_source_revision > record.revision ||
+        (record.operation_state != OperationState::accepted &&
+         record.operation_state != OperationState::reconciling) ||
         !record.reconciliation_descriptor)
         return invalid_evidence();
     const auto &descriptor = *record.reconciliation_descriptor;
@@ -201,6 +201,9 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             (same_graph_instance &&
              graph.history_deal_evidence_revision(ticket) <=
                  descriptor.baseline.history_deals_revision()) ||
+            (same_graph_instance &&
+             graph.history_deal_first_evidence_revision(ticket) <=
+                 descriptor.baseline.history_deals_revision()) ||
             !graph.history_deals_covered_at_exact(
                 *declared_window, graph.history_deal_evidence_revision(ticket)))
             return invalid_evidence();
@@ -232,6 +235,9 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             graph.history_deal_evidence_revision(deal.ticket) == 0 ||
             (same_graph_instance &&
              graph.history_deal_evidence_revision(deal.ticket) <=
+                 descriptor.baseline.history_deals_revision()) ||
+            (same_graph_instance &&
+             graph.history_deal_first_evidence_revision(deal.ticket) <=
                  descriptor.baseline.history_deals_revision()) ||
             !graph.history_deals_covered_at_exact(
                 *declared_window, graph.history_deal_evidence_revision(deal.ticket)) ||
@@ -282,14 +288,16 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             return invalid_evidence();
         const auto &deal = *deal_it->second;
         const auto &receipt = fact.admission_receipt();
+        const auto current_evidence_revision =
+            graph.history_deal_evidence_revision(fact.deal_ticket());
         if (receipt.graph_instance_id != descriptor.baseline.graph_instance_id() ||
             receipt.history_coverage_revision != receipt.source_revision ||
             (same_graph_instance && receipt.graph_instance_id != graph.instance_id()) ||
             (same_graph_instance &&
-             receipt.source_revision != graph.history_deal_evidence_revision(fact.deal_ticket())) ||
+             current_evidence_revision < receipt.source_revision) ||
             !graph.history_deals_covered_at_exact(
                 {receipt.history_window_from_msc, receipt.history_window_to_msc},
-                graph.history_deal_evidence_revision(fact.deal_ticket())))
+                current_evidence_revision))
             return invalid_evidence();
         const auto deal_direction = direction_for_type(deal.type);
         const auto &quantity = fact.quantity();
@@ -332,6 +340,7 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
     digest.add_u64(static_cast<std::uint64_t>(record.operation_kind));
     digest.add_u64(static_cast<std::uint64_t>(record.operation_state));
     digest.add_u64(static_cast<std::uint64_t>(record.journal_state));
+    digest.add_u64(record.result_source_revision);
     digest.add_bytes(record.request_payload);
     digest.add_bytes(record.result_payload);
     digest.add_u64(descriptor.baseline.graph_instance_id());

@@ -36,6 +36,14 @@ does not claim to independently parse or authenticate an opaque result payload.
 An order-only result (`order != 0`, `deal == 0`) cannot satisfy this OPEN source
 contract and remains unsupported/fail-closed.
 
+The journal also stores `result_source_revision` in format v6. The field is set
+only by the trusted result-persistence mutation and is preserved by later
+lifecycle transitions. B3B requires this immutable anchor for both
+`accepted` and `reconciling` records; legacy v1--v5 records decode with no
+anchor but remain fail-closed for this verifier. The request revision still
+identifies the current durable record, while the anchor identifies the exact
+revision at which the broker result and binding first became durable.
+
 ## Ownership matrix
 
 | Invariant | Owner | Not owned by this slice |
@@ -56,15 +64,18 @@ For a valid `ManagedOpeningProvenanceRequest`, the verifier:
 1. obtains the account lease and performs all reads inside its fencing
    capability;
 2. reloads the exact journal key and revision, requiring a committed OPEN with
-   a persisted result, a valid descriptor, and at least one result-derived
+   a persisted result, a valid immutable result-source anchor, a lifecycle
+   state of `accepted` or `reconciling`, and at least one result-derived
    `history_deal_present` binding;
 3. requires a pre-dispatch `ReconciliationBaseline` from the same account and
    graph provenance. On the original graph instance every admitted deal must
-   have evidence newer than that baseline and an exact complete-window
-   coverage entry at the same revision. After restart numeric graph revisions
-   are not compared across instances; the durable baseline/receipt provenance
-   is retained and the re-observed graph must independently provide exact
-   complete-window coverage;
+   have first evidence newer than that baseline (the graph retains both first
+   and latest observation revisions), and an exact complete-window coverage
+   entry at the same revision. A repeated complete poll may advance latest
+   evidence without changing the immutable first-admission receipt. After
+   restart numeric graph revisions are not compared across instances; the
+   durable baseline/receipt provenance is retained and the re-observed graph
+   must independently provide exact complete-window coverage;
 4. reloads every bound deal and every deal for the bound order, requiring exact
    account/order/position identity, `DEAL_ENTRY_IN`, one direction, complete
    fields, and complete coverage;
@@ -92,9 +103,9 @@ graph instance identifier is provenance, never a cross-restart ordering
 relation. A changed history payload, old coverage reused for a later uncovered
 deal, missing causal evidence, foreign same-position execution, or unavailable
 durable fact fails closed. The current journal store retains only its latest
-revision, so B3B intentionally rejects records already advanced into the
-`reconciling` lifecycle until a separate durable immutable source-anchor field
-is introduced.
+revision, so B3B accepts a record already advanced into the `reconciling`
+lifecycle only when the v6 immutable result-source anchor is present. A legacy
+record without that anchor remains fail-closed.
 
 The verifier does not infer that an OPEN is terminal, does not publish an
 opening allocation, and does not modify `ManagedTradeOwner`, exposure, the C ABI,
@@ -106,6 +117,8 @@ The B3B test suite covers one result-derived anchor plus history-discovered
 partial fills, exact quantity and identity joins, pre-dispatch baseline
 causality, stale-coverage rejection, missing and rewritten facts, foreign
 same-position executions, stale journal revisions, graph restart, revoked
-fencing, requested-volume bounds, invalid requests, and durable-store I/O
-failure. B3C remains responsible for durable opening-allocation publication and
-its crash matrix.
+fencing, requested-volume bounds, invalid requests, durable-store I/O failure,
+idempotent repeated polling, rejection of fabricated future tickets, and a
+production-shaped `OperationJournal` → `DispatchAdmissionBarrier` →
+`OneShotDispatchBackend` → verifier path. B3C remains responsible for durable
+opening-allocation publication and its crash matrix.

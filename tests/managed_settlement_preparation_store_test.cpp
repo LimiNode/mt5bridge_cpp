@@ -604,6 +604,10 @@ std::vector<std::uint8_t> legacy_preparation_fixture(
     const std::vector<std::uint8_t> &v2_bytes) {
     const auto mode = target_mode_offset(v2_bytes);
     auto legacy = v2_bytes;
+    // The current fixture is v3: remove the immutable result anchor before
+    // converting it to the historical v1 layout.
+    legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(mode + 20),
+                 legacy.begin() + static_cast<std::ptrdiff_t>(mode + 28));
     legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(mode),
                  legacy.begin() + static_cast<std::ptrdiff_t>(mode + 4));
     rewrite_preparation_header(legacy, 1);
@@ -613,7 +617,12 @@ std::vector<std::uint8_t> legacy_preparation_fixture(
 std::vector<std::uint8_t> corrupt_preparation_mode(
     const std::vector<std::uint8_t> &v2_bytes) {
     auto corrupt = v2_bytes;
-    write_u32_fixture(corrupt, target_mode_offset(corrupt), 99);
+    // Preserve the historical v2 mode field while removing only the v3
+    // result anchor from the operation payload.
+    const auto mode = target_mode_offset(corrupt);
+    corrupt.erase(corrupt.begin() + static_cast<std::ptrdiff_t>(mode + 20),
+                  corrupt.begin() + static_cast<std::ptrdiff_t>(mode + 28));
+    write_u32_fixture(corrupt, mode, 99);
     rewrite_preparation_header(corrupt, 2);
     return corrupt;
 }

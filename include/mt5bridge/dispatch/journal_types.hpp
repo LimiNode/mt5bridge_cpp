@@ -345,6 +345,9 @@ struct OperationRecord {
     OperationState operation_state = OperationState::queued; ///< Managed lifecycle state.
     JournalState journal_state = JournalState::created; ///< Write-ahead state.
     std::uint64_t revision = 0; ///< Monotonic journal revision for this record.
+    /// Immutable revision at which the trusted broker result was persisted.
+    /// Zero is retained only for legacy records written before this field.
+    std::uint64_t result_source_revision = 0;
     std::uint64_t fencing_token = 0; ///< Writer token committed at dispatching.
     std::optional<ReconciliationDescriptor>
         reconciliation_descriptor; ///< Durable post-dispatch evidence contract.
@@ -410,6 +413,10 @@ struct OperationRecord {
         if (!journal_at_least_result_persisted(journal_state) && !result_payload.empty())
             return false;
         if (journal_state == JournalState::result_persisted && result_payload.empty())
+            return false;
+        if (result_source_revision != 0 &&
+            (!journal_at_least_result_persisted(journal_state) ||
+             result_source_revision > revision))
             return false;
         if (operation_state == OperationState::accepted && result_payload.empty())
             return false;

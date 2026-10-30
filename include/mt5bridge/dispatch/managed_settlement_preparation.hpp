@@ -60,6 +60,7 @@ inline bool same_operation(const OperationRecord &left, const OperationRecord &r
            left.result_payload == right.result_payload &&
            left.operation_state == right.operation_state &&
            left.journal_state == right.journal_state && left.revision == right.revision &&
+           left.result_source_revision == right.result_source_revision &&
            left.fencing_token == right.fencing_token &&
            left.settled_volume == right.settled_volume &&
            same_descriptor(left.reconciliation_descriptor, right.reconciliation_descriptor) &&

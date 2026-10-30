@@ -474,4 +474,16 @@ inline std::optional<ManagedOpeningQuantity> derive_managed_opening_quantity(
                           : std::nullopt;
 }
 
+/// \brief Compares one raw broker volume with a sealed canonical quantity.
+/// \param raw_quantity Fresh broker binary64 volume.
+/// \param quantity Previously admitted canonical quantity.
+/// \return True only when the raw value has the exact canonical numerator.
+/// \note This deliberately avoids reconstructing a decimal step as a double.
+inline bool matches_managed_opening_quantity(
+    double raw_quantity, const ManagedOpeningQuantity &quantity) {
+    return quantity.valid() &&
+           detail::opening_quantity_decimal_is_unique(
+               raw_quantity, quantity.broker_units(), quantity.canonical_scale());
+}
+
 } // namespace mt5bridge::dispatch

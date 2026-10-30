@@ -30,7 +30,9 @@ constexpr std::uint32_t kLegacyFormatVersion = 1;
 constexpr std::uint32_t kCausalFormatVersion = 2;
 constexpr std::uint32_t kManagedVolumeFormatVersion = 3;
 constexpr std::uint32_t kOperationKindFormatVersion = 4;
-constexpr std::uint32_t kFormatVersion = 5;
+constexpr std::uint32_t kSettlementModeFormatVersion = 5;
+constexpr std::uint32_t kResultSourceAnchorFormatVersion = 6;
+constexpr std::uint32_t kFormatVersion = kResultSourceAnchorFormatVersion;
 constexpr std::array<char, 8> kEpochMagic{{'M', 'T', '5', 'E', 'P', 'C', '0', '1'}};
 constexpr std::uint32_t kEpochFormatVersion = 1;
 constexpr std::uint32_t kMaxReconciliationPredicates = 1U << 20;
@@ -50,6 +52,65 @@ constexpr std::size_t kEpochEnvelopeBytes = kEpochMagic.size() + sizeof(std::uin
 constexpr std::size_t kMaxEpochRecordBytes = kEpochEnvelopeBytes + kMaxStringBytes +
                                               sizeof(std::uint32_t) +
                                               2U * sizeof(std::uint64_t);
+
+/// \brief Compares the durable reconciliation descriptor field-by-field.
+bool same_reconciliation_descriptor(
+    const std::optional<ReconciliationDescriptor> &left,
+    const std::optional<ReconciliationDescriptor> &right) {
+    if (left.has_value() != right.has_value())
+        return false;
+    if (!left)
+        return true;
+    if (left->account != right->account || left->trade_id != right->trade_id ||
+        left->operation_id != right->operation_id ||
+        left->requested_volume != right->requested_volume ||
+        left->settled_state != right->settled_state ||
+        left->baseline.account() != right->baseline.account() ||
+        left->baseline.graph_instance_id() != right->baseline.graph_instance_id() ||
+        left->baseline.graph_revision() != right->baseline.graph_revision() ||
+        left->baseline.active_orders_revision() !=
+            right->baseline.active_orders_revision() ||
+        left->baseline.positions_revision() != right->baseline.positions_revision() ||
+        left->baseline.history_orders_revision() !=
+            right->baseline.history_orders_revision() ||
+        left->baseline.history_deals_revision() !=
+            right->baseline.history_deals_revision() ||
+        left->predicates.size() != right->predicates.size())
+        return false;
+    for (std::size_t index = 0; index != left->predicates.size(); ++index) {
+        const auto &left_predicate = left->predicates[index];
+        const auto &right_predicate = right->predicates[index];
+        if (left_predicate.kind != right_predicate.kind ||
+            left_predicate.ticket != right_predicate.ticket ||
+            left_predicate.baseline_present != right_predicate.baseline_present ||
+            left_predicate.correlation_id != right_predicate.correlation_id ||
+            left_predicate.expected_transition != right_predicate.expected_transition ||
+            left_predicate.history_window.has_value() !=
+                right_predicate.history_window.has_value() ||
+            (left_predicate.history_window &&
+             (left_predicate.history_window->from_msc !=
+                  right_predicate.history_window->from_msc ||
+              left_predicate.history_window->to_msc !=
+                  right_predicate.history_window->to_msc)))
+            return false;
+    }
+    return true;
+}
+
+/// \brief Compares fields that become immutable when a result is persisted.
+bool same_result_source_tuple(const OperationRecord &left,
+                              const OperationRecord &right) {
+    return left.key == right.key &&
+           left.operation_kind == right.operation_kind &&
+           left.settlement_mode == right.settlement_mode &&
+           left.request_payload == right.request_payload &&
+           left.result_payload == right.result_payload &&
+           same_reconciliation_descriptor(left.reconciliation_descriptor,
+                                          right.reconciliation_descriptor) &&
+           left.reconciliation_bindings == right.reconciliation_bindings &&
+           left.result_source_revision == right.result_source_revision &&
+           left.fencing_token == right.fencing_token;
+}
 
 bool append_reconciliation_descriptor(
     std::vector<std::uint8_t> &bytes,
@@ -227,6 +288,7 @@ std::optional<std::vector<std::uint8_t>> serialize_body(const OperationRecord &r
     append_u32(body, static_cast<std::uint32_t>(record.operation_state));
     append_u32(body, static_cast<std::uint32_t>(record.journal_state));
     append_u64(body, record.revision);
+    append_u64(body, record.result_source_revision);
     append_u64(body, record.fencing_token);
     append_u64(body, record.settled_volume);
     append_u32(body, static_cast<std::uint32_t>(record.operation_kind));
@@ -265,7 +327,8 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     std::uint64_t expected_checksum = 0;
     if (!read_u32(bytes, offset, version) || !read_u64(bytes, offset, body_size) ||
         !read_u64(bytes, offset, expected_checksum) ||
-        (version != kFormatVersion && version != kOperationKindFormatVersion &&
+        (version != kFormatVersion && version != kSettlementModeFormatVersion &&
+         version != kOperationKindFormatVersion &&
          version != kManagedVolumeFormatVersion &&
          version != kCausalFormatVersion && version != kLegacyFormatVersion) ||
         body_size > kMaxBodyBytes || body_size != bytes.size() - offset)
@@ -293,12 +356,14 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     if (!read_u32(body, body_offset, operation_state) ||
         !read_u32(body, body_offset, journal_state) ||
         !read_u64(body, body_offset, record.revision) ||
+        (version >= kResultSourceAnchorFormatVersion &&
+         !read_u64(body, body_offset, record.result_source_revision)) ||
         !read_u64(body, body_offset, record.fencing_token) ||
         (version >= kManagedVolumeFormatVersion &&
          !read_u64(body, body_offset, record.settled_volume)) ||
         (version >= kOperationKindFormatVersion &&
          !read_u32(body, body_offset, operation_kind)) ||
-        (version >= kFormatVersion &&
+        (version >= kSettlementModeFormatVersion &&
          !read_u32(body, body_offset, settlement_mode)) ||
         !read_reconciliation_descriptor(body, body_offset,
                                         record.reconciliation_descriptor,
@@ -326,7 +391,7 @@ std::optional<OperationRecord> deserialize_record(const std::vector<std::uint8_t
     record.journal_state = static_cast<JournalState>(journal_state);
     if (version >= kOperationKindFormatVersion)
         record.operation_kind = static_cast<OperationKind>(operation_kind);
-    if (version >= kFormatVersion)
+    if (version >= kSettlementModeFormatVersion)
         record.settlement_mode = static_cast<ManagedSettlementMode>(settlement_mode);
     if (version == kManagedVolumeFormatVersion &&
         record.reconciliation_descriptor &&
@@ -824,11 +889,34 @@ StoreCommitStatus WindowsFileJournalStore::commit(
                existing->revision != *expected_revision) {
         return StoreCommitStatus::conflict;
     }
-    if (status == ReadStatus::valid && existing &&
-        (existing->operation_kind != record.operation_kind ||
-         existing->settlement_mode != record.settlement_mode)) {
-        set_error(last_error_, "operation kind and settlement mode are immutable");
-        return StoreCommitStatus::conflict;
+    if (status == ReadStatus::valid && existing) {
+        if (existing->operation_kind != record.operation_kind ||
+            existing->settlement_mode != record.settlement_mode) {
+            set_error(last_error_, "operation kind and settlement mode are immutable");
+            return StoreCommitStatus::conflict;
+        }
+
+        if (journal_at_least_result_persisted(existing->journal_state)) {
+            if (!same_result_source_tuple(*existing, record)) {
+                set_error(last_error_,
+                          "result source tuple is immutable after result persistence");
+                return StoreCommitStatus::conflict;
+            }
+        } else if (existing->result_source_revision != record.result_source_revision) {
+            const bool trusted_result_anchor =
+                existing->result_source_revision == 0 &&
+                record.result_source_revision != 0 &&
+                existing->journal_state == JournalState::dispatching &&
+                record.journal_state == JournalState::result_persisted &&
+                existing->revision != (std::numeric_limits<std::uint64_t>::max)() &&
+                record.revision == existing->revision + 1 &&
+                record.result_source_revision == record.revision &&
+                existing->result_payload.empty() && !record.result_payload.empty();
+            if (!trusted_result_anchor) {
+                set_error(last_error_, "result source anchor is immutable");
+                return StoreCommitStatus::conflict;
+            }
+        }
     }
 
     const auto temp = target.wstring() + L".tmp";

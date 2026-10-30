@@ -58,6 +58,15 @@ enums, invalid quantity fields, identity mismatch, and non-canonical payloads.
 `encode(decode(canonical_bytes)) == canonical_bytes` is required for the fact
 payload. The store never reconstructs quantity from floating-point values.
 
+`ManagedOpeningDealFact::operation_revision` is the immutable journal
+`result_source_revision`: the revision at which the broker result and its
+result-derived binding became durable. It is not the current lifecycle
+revision at the time the fact is admitted. This lets later fills extend one
+cumulative frontier and lets `accepted -> reconciling` advance the journal
+without rewriting earlier facts. The version-1 byte layout is unchanged; an
+older fact whose ambiguous revision does not match the durable result-source
+anchor fails closed rather than being migrated by inference.
+
 Temporary `.tmp` files are not records. A crash before the atomic rename leaves
 such a file ignored by `load()` and `scan()`. A crash after rename leaves a
 complete durable record; a later commit returns `already_committed` when the

@@ -23,7 +23,9 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{{'M', 'T', '5', 'P', 'R', 'P', '0', '1'}};
 constexpr std::uint32_t kLegacyFormatVersion = 1;
-constexpr std::uint32_t kFormatVersion = 2;
+constexpr std::uint32_t kSettlementModeFormatVersion = 2;
+constexpr std::uint32_t kResultSourceAnchorFormatVersion = 3;
+constexpr std::uint32_t kFormatVersion = kResultSourceAnchorFormatVersion;
 constexpr std::size_t kMaxEntries = 4096;
 constexpr std::size_t kMaxBodyBytes = 2U << 20;
 constexpr std::size_t kEnvelopeBytes = kMagic.size() + sizeof(std::uint32_t) +
@@ -47,6 +49,7 @@ bool valid_managed_settlement_transition(const OperationRecord &base,
         base.settlement_mode != target.settlement_mode ||
         base.request_payload != target.request_payload ||
         base.result_payload != target.result_payload ||
+        base.result_source_revision != target.result_source_revision ||
         base.journal_state != target.journal_state ||
         base.fencing_token != target.fencing_token ||
         !managed_settlement_preparation_detail::same_descriptor(
@@ -254,6 +257,7 @@ bool append_operation(std::vector<std::uint8_t> &bytes, const OperationRecord &r
     append_u32(bytes, static_cast<std::uint32_t>(record.operation_state));
     append_u32(bytes, static_cast<std::uint32_t>(record.journal_state));
     append_u64(bytes, record.revision);
+    append_u64(bytes, record.result_source_revision);
     append_u64(bytes, record.fencing_token);
     append_u64(bytes, record.settled_volume);
     if (!append_descriptor(bytes, record.reconciliation_descriptor) ||
@@ -272,7 +276,7 @@ bool append_operation(std::vector<std::uint8_t> &bytes, const OperationRecord &r
 }
 
 bool read_operation(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
-                    OperationRecord &record, bool read_mode) {
+                    OperationRecord &record, bool read_mode, bool read_anchor) {
     if (!read_string(bytes, offset, record.key.account.server) ||
         !read_payload(bytes, offset, record.request_payload) ||
         !read_payload(bytes, offset, record.result_payload) ||
@@ -289,6 +293,7 @@ bool read_operation(const std::vector<std::uint8_t> &bytes, std::size_t &offset,
         (read_mode && !read_u32(bytes, offset, mode)) ||
         !read_u32(bytes, offset, state) ||
         !read_u32(bytes, offset, journal) || !read_u64(bytes, offset, record.revision) ||
+        (read_anchor && !read_u64(bytes, offset, record.result_source_revision)) ||
         !read_u64(bytes, offset, record.fencing_token) ||
         !read_u64(bytes, offset, record.settled_volume) ||
         !read_descriptor(bytes, offset, record.reconciliation_descriptor) ||
@@ -460,7 +465,8 @@ std::optional<ManagedSettlementPreparation> deserialize_preparation(
     if (!read_u32(bytes, envelope_offset, version) ||
         !read_u64(bytes, envelope_offset, body_size) ||
         !read_u64(bytes, envelope_offset, expected_checksum) ||
-        (version != kLegacyFormatVersion && version != kFormatVersion) ||
+        (version != kLegacyFormatVersion &&
+         version != kSettlementModeFormatVersion && version != kFormatVersion) ||
         body_size != bytes.size() - envelope_offset || body_size > kMaxBodyBytes)
         return std::nullopt;
     const std::vector<std::uint8_t> body(
@@ -482,7 +488,8 @@ std::optional<ManagedSettlementPreparation> deserialize_preparation(
         return std::nullopt;
     }
     if (!read_operation(body, offset, preparation.target_operation,
-                         version >= kFormatVersion)) {
+                         version >= kSettlementModeFormatVersion,
+                         version >= kResultSourceAnchorFormatVersion)) {
         return std::nullopt;
     }
     if (offset != body.size()) {
@@ -608,6 +615,7 @@ bool valid_historical_journal_progression(const OperationRecord &target,
         current.settlement_mode != target.settlement_mode ||
         current.request_payload != target.request_payload ||
         current.result_payload != target.result_payload ||
+        current.result_source_revision != target.result_source_revision ||
         current.journal_state != target.journal_state ||
         current.fencing_token != target.fencing_token ||
         !managed_settlement_preparation_detail::same_descriptor(

@@ -27,7 +27,8 @@ inline constexpr std::size_t kManagedOpeningMaxCanonicalBytes = 1U << 20;
 struct ManagedOpeningExecutionRequest {
     OperationKey operation_key; ///< Expected account-scoped OPEN operation.
     OperationKind operation_kind = OperationKind::open; ///< Expected operation kind.
-    std::uint64_t operation_revision = 0; ///< Exact committed journal revision.
+    /// Immutable revision at which the OPEN broker result became durable.
+    std::uint64_t operation_revision = 0;
     std::uint64_t order_ticket = 0; ///< Result-derived OPEN order ticket.
     std::uint64_t position_identifier = 0; ///< Expected broker position identity.
 
@@ -47,7 +48,8 @@ struct ManagedOpeningExecutionRequest {
 /// from the account-scoped journal and observation graph under the lease.
 struct ManagedOpeningDealObservation {
     OperationKey operation_key; ///< Operation associated with the observed order.
-    std::uint64_t operation_revision = 0; ///< Journal revision used for the join.
+    /// Immutable result-source revision used for the journal join.
+    std::uint64_t operation_revision = 0;
     std::uint64_t order_ticket = 0; ///< DEAL_ORDER identity.
     std::uint64_t deal_ticket = 0; ///< DEAL_TICKET identity.
     std::uint64_t position_identifier = 0; ///< DEAL_POSITION_ID identity.
@@ -347,8 +349,8 @@ public:
     /// \brief Returns the operation identity.
     /// \return Account-scoped OPEN key.
     const OperationKey &operation_key() const { return operation_key_; }
-    /// \brief Returns the exact journal source revision.
-    /// \return Non-zero committed revision.
+    /// \brief Returns the immutable broker-result source revision.
+    /// \return Non-zero `OperationRecord::result_source_revision`.
     std::uint64_t operation_revision() const { return operation_revision_; }
     /// \brief Returns the OPEN order identity.
     /// \return Non-zero DEAL_ORDER ticket.
@@ -362,6 +364,12 @@ public:
     /// \brief Returns the deal direction.
     /// \return Buy or sell.
     BrokerPositionDirection direction() const { return direction_; }
+    /// \brief Returns the immutable broker entry classification.
+    /// \return The admitted OPEN entry value.
+    BrokerDealEntry entry() const { return entry_; }
+    /// \brief Returns the broker execution timestamp.
+    /// \return DEAL_TIME in milliseconds.
+    std::int64_t deal_time_msc() const { return deal_time_msc_; }
     /// \brief Returns the exact normalized deal quantity.
     /// \return B2 quantity-domain result.
     const ManagedOpeningQuantity &quantity() const { return quantity_; }

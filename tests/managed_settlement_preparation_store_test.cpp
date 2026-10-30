@@ -601,19 +601,38 @@ void rewrite_preparation_header(std::vector<std::uint8_t> &bytes,
 }
 
 std::vector<std::uint8_t> legacy_preparation_fixture(
-    const std::vector<std::uint8_t> &v2_bytes) {
-    const auto mode = target_mode_offset(v2_bytes);
-    auto legacy = v2_bytes;
+    const std::vector<std::uint8_t> &v3_bytes) {
+    const auto mode = target_mode_offset(v3_bytes);
+    auto legacy = v3_bytes;
+    // The current fixture is v3: remove the immutable result anchor before
+    // converting it to the historical v1 layout.
+    legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(mode + 20),
+                 legacy.begin() + static_cast<std::ptrdiff_t>(mode + 28));
     legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(mode),
                  legacy.begin() + static_cast<std::ptrdiff_t>(mode + 4));
     rewrite_preparation_header(legacy, 1);
     return legacy;
 }
 
+std::vector<std::uint8_t> v2_preparation_fixture(
+    const std::vector<std::uint8_t> &v3_bytes) {
+    auto legacy = v3_bytes;
+    const auto mode = target_mode_offset(legacy);
+    legacy.erase(legacy.begin() + static_cast<std::ptrdiff_t>(mode + 20),
+                 legacy.begin() + static_cast<std::ptrdiff_t>(mode + 28));
+    rewrite_preparation_header(legacy, 2);
+    return legacy;
+}
+
 std::vector<std::uint8_t> corrupt_preparation_mode(
     const std::vector<std::uint8_t> &v2_bytes) {
     auto corrupt = v2_bytes;
-    write_u32_fixture(corrupt, target_mode_offset(corrupt), 99);
+    // Preserve the historical v2 mode field while removing only the v3
+    // result anchor from the operation payload.
+    const auto mode = target_mode_offset(corrupt);
+    corrupt.erase(corrupt.begin() + static_cast<std::ptrdiff_t>(mode + 20),
+                  corrupt.begin() + static_cast<std::ptrdiff_t>(mode + 28));
+    write_u32_fixture(corrupt, mode, 99);
     rewrite_preparation_header(corrupt, 2);
     return corrupt;
 }
@@ -672,8 +691,12 @@ private:
         batch.history_deals_window = mt5bridge::ObservationWindow{1000, 2000};
         require(graph.apply(batch).accepted(), "baseline observation failed");
         const auto baseline = mt5bridge::capture_reconciliation_baseline(graph);
-        const auto base_operation = operation(baseline, 8, 0);
-        const auto target_operation = operation(baseline, 9, 2);
+        auto base_operation = operation(baseline, 8, 0);
+        auto target_operation = operation(baseline, 9, 2);
+        base_operation.result_source_revision = 7;
+        target_operation.result_source_revision = 7;
+        require(base_operation.valid() && target_operation.valid(),
+                "source-anchored operation fixtures are invalid");
         mt5bridge::ObservationBatch deal_batch;
         deal_batch.account = account();
         deal_batch.observed_domains = mt5bridge::ObservationDomain::history_deals;
@@ -781,8 +804,34 @@ void run_restart_regression() {
                 compatibility_fixture.data.proof.frontier(),
                 compatibility_fixture.data.target_operation, 8,
                 compatibility_fixture.staged});
-        const auto v2_bytes = read_fixture_bytes(path);
-        write_fixture_bytes(path, legacy_preparation_fixture(v2_bytes));
+        const auto v3_bytes = read_fixture_bytes(path);
+        const auto v3_loaded = writer.load(
+            compatibility_fixture.data.target_operation.key,
+            compatibility_fixture.data.target_operation.revision,
+            compatibility_fixture.data.proof.fact().key.deal_ticket);
+        require(v3_loaded.status ==
+                    mt5bridge::ManagedSettlementPreparationLoadStatus::found &&
+                    v3_loaded.record &&
+                    v3_loaded.record->target_operation.result_source_revision == 7,
+                "preparation v3 lost its result-source anchor after reopen");
+
+        write_fixture_bytes(path, v2_preparation_fixture(v3_bytes));
+        mt5bridge::WindowsFileManagedSettlementPreparationStore v2_reader(
+            compatibility_root);
+        const auto v2_loaded = v2_reader.load(
+            compatibility_fixture.data.target_operation.key,
+            compatibility_fixture.data.target_operation.revision,
+            compatibility_fixture.data.proof.fact().key.deal_ticket);
+        require(v2_loaded.status ==
+                    mt5bridge::ManagedSettlementPreparationLoadStatus::found &&
+                    v2_loaded.record &&
+                    v2_loaded.record->target_operation.settlement_mode ==
+                        mt5bridge::ManagedSettlementMode::legacy &&
+                    v2_loaded.record->target_operation.result_source_revision == 0 &&
+                    v2_reader.scan().complete(),
+                "real v2 preparation fixture did not decode without a source anchor");
+
+        write_fixture_bytes(path, legacy_preparation_fixture(v3_bytes));
         mt5bridge::WindowsFileManagedSettlementPreparationStore legacy_reader(
             compatibility_root);
         const auto legacy_loaded = legacy_reader.load(
@@ -801,7 +850,7 @@ void run_restart_regression() {
                         mt5bridge::ManagedSettlementMode::legacy,
                 "real v1 preparation fixture failed restart scan");
 
-        write_fixture_bytes(path, corrupt_preparation_mode(v2_bytes));
+        write_fixture_bytes(path, corrupt_preparation_mode(v3_bytes));
         mt5bridge::WindowsFileManagedSettlementPreparationStore corrupt_reader(
             compatibility_root);
         require(corrupt_reader.load(
@@ -1063,8 +1112,11 @@ void run_restart_regression() {
         MemoryAllocationStore historical_allocation;
         historical_allocation.allocations.push_back(historical_fixture.allocation);
         mt5bridge_test_support::MemoryJournalStore historical_journal;
+        auto historical_current = operation(historical_fixture.data.baseline, 10, 3);
+        historical_current.result_source_revision = 7;
+        require(historical_current.valid(), "historical source-anchor fixture is malformed");
         historical_journal.records[historical_preparation.target_operation.key] =
-            operation(historical_fixture.data.baseline, 10, 3);
+            historical_current;
         require(historical_journal.records.at(historical_preparation.target_operation.key)
                     .valid(),
                 "historical replay journal fixture is malformed");

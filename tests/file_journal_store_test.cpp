@@ -310,6 +310,37 @@ void rewrite_v5_mode(const std::filesystem::path &path,
     require(output.good(), "journal mode fixture could not be written");
 }
 
+void rewrite_as_v5_without_result_anchor(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    require(input.good(), "journal v6 fixture could not be opened");
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+    require(bytes.size() >= 28, "journal v6 fixture is truncated");
+    std::size_t body = 28;
+    const auto skip_string = [&body, &bytes]() {
+        const auto size = read_u32(bytes, body);
+        body += sizeof(std::uint32_t) + size;
+        require(body <= bytes.size(), "journal v6 fixture string is truncated");
+    };
+    skip_string();
+    skip_string();
+    skip_string();
+    body += 3U * sizeof(std::uint64_t) + 2U * sizeof(std::uint32_t) +
+            sizeof(std::uint64_t);
+    require(body + sizeof(std::uint64_t) <= bytes.size(),
+            "journal v6 result anchor is truncated");
+    bytes.erase(bytes.begin() + static_cast<std::ptrdiff_t>(body),
+                bytes.begin() + static_cast<std::ptrdiff_t>(
+                    body + sizeof(std::uint64_t)));
+    write_u32(bytes, 8, 5);
+    write_u64(bytes, 12, static_cast<std::uint64_t>(bytes.size() - 28));
+    const std::vector<std::uint8_t> checksum_body(bytes.begin() + 28, bytes.end());
+    write_u64(bytes, 20, fixture_checksum(checksum_body));
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(output.good(), "journal v5 fixture could not be written");
+}
+
 } // namespace
 
 /// \brief Runs file-store durability and corruption checks.
@@ -321,11 +352,15 @@ int main() {
                                   "mt5bridge_file_journal_store_legacy_test";
     const auto mode_directory = std::filesystem::temp_directory_path() /
                                 "mt5bridge_file_journal_store_mode_test";
+    const auto anchor_compatibility_directory =
+        std::filesystem::temp_directory_path() /
+        "mt5bridge_file_journal_store_anchor_compatibility_test";
     const auto original_cwd = std::filesystem::current_path();
     std::error_code cleanup_error;
     std::filesystem::remove_all(directory, cleanup_error);
     std::filesystem::remove_all(legacy_directory, cleanup_error);
     std::filesystem::remove_all(mode_directory, cleanup_error);
+    std::filesystem::remove_all(anchor_compatibility_directory, cleanup_error);
 
     try {
         mt5bridge::WindowsFileJournalStore store(directory);
@@ -431,6 +466,48 @@ int main() {
         require(mode_store.load(gated_key).status == mt5bridge::StoreLoadStatus::invalid_record,
                 "journal decoder admitted an unknown settlement mode");
 
+        const auto v5_key = key(86, 87);
+        mt5bridge::WindowsFileJournalStore anchor_writer(
+            anchor_compatibility_directory);
+        mt5bridge::OperationJournal anchor_journal(anchor_writer);
+        require(anchor_journal
+                    .create(v5_key, {0x61}, mt5bridge::OperationKind::open)
+                    .accepted(),
+                "journal v6 anchor fixture was not created");
+        prepare(anchor_journal, v5_key);
+        require(anchor_journal
+                    .transition_journal(v5_key, mt5bridge::JournalState::dispatching, 91)
+                    .accepted() &&
+                    anchor_journal
+                        .transition_operation(v5_key, mt5bridge::OperationState::submitting)
+                        .accepted() &&
+                    anchor_journal.persist_result(v5_key, {0xA2}).accepted() &&
+                    anchor_journal
+                        .transition_operation(v5_key, mt5bridge::OperationState::accepted)
+                        .accepted(),
+                "journal v6 anchor fixture did not reach accepted state");
+        const auto v6_anchor = anchor_writer.load(v5_key);
+        require(v6_anchor.found() && v6_anchor.record &&
+                    v6_anchor.record->result_source_revision != 0,
+                "journal v6 source anchor did not survive reopen");
+        rewrite_as_v5_without_result_anchor(
+            fixture_path(anchor_compatibility_directory, v5_key));
+        mt5bridge::WindowsFileJournalStore v5_reader(
+            anchor_compatibility_directory);
+        const auto v5_record = v5_reader.load(v5_key);
+        require(v5_record.found() && v5_record.record &&
+                    v5_record.record->result_source_revision == 0 &&
+                    v5_record.record->operation_state ==
+                        mt5bridge::OperationState::accepted,
+                "real journal v5 fixture did not decode without a source anchor");
+        auto v5_anchor_rewrite = *v5_record.record;
+        v5_anchor_rewrite.result_source_revision = v5_anchor_rewrite.revision + 1;
+        ++v5_anchor_rewrite.revision;
+        require(v5_anchor_rewrite.valid() &&
+                    v5_reader.commit(v5_anchor_rewrite, v5_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "result-bearing v5 record acquired a fabricated source anchor");
+
         const auto operation_key = key();
         const auto lease_account = operation_key.account;
         std::uint64_t first_fencing_token = 0;
@@ -514,8 +591,11 @@ int main() {
                                              mt5bridge::OperationState::submitting)
                         .status == mt5bridge::JournalMutationStatus::conflict,
                 "stale owner overwrote the durable revision");
-        require(owner_a.persist_result(operation_key, {0xA0, 0x01}).accepted(),
-                "result payload was not atomically persisted");
+        const auto persisted_result = owner_a.persist_result(operation_key, {0xA0, 0x01});
+        require(persisted_result.accepted() && persisted_result.record &&
+                    persisted_result.record->result_source_revision ==
+                        persisted_result.record->revision,
+                "result payload was not atomically persisted with its exact source anchor");
         require(owner_a.transition_operation(operation_key,
                                              mt5bridge::OperationState::accepted)
                     .accepted(),
@@ -525,19 +605,64 @@ int main() {
         const auto result_record = result_store.load(operation_key);
         require(result_record.found() && result_record.record->operation_state ==
                                        mt5bridge::OperationState::accepted &&
+                    result_record.record->result_source_revision != 0 &&
+                    result_record.record->result_source_revision <
+                        result_record.record->revision &&
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        auto rewritten_request = *result_record.record;
+        rewritten_request.request_payload = {0xB0, 0x02};
+        ++rewritten_request.revision;
+        require(rewritten_request.valid() &&
+                    result_store.commit(rewritten_request, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "request payload was rewritten after result persistence");
+        auto rewritten_result = *result_record.record;
+        rewritten_result.result_payload = {0xB1, 0x03};
+        ++rewritten_result.revision;
+        require(rewritten_result.valid() &&
+                    result_store.commit(rewritten_result, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "result payload was rewritten after result persistence");
+        auto rewritten_descriptor = *result_record.record;
+        require(rewritten_descriptor.reconciliation_descriptor.has_value(),
+                "result-bearing record lost its reconciliation descriptor");
+        ++rewritten_descriptor.reconciliation_descriptor->requested_volume;
+        ++rewritten_descriptor.revision;
+        require(rewritten_descriptor.valid() &&
+                    result_store.commit(rewritten_descriptor,
+                                        result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "reconciliation descriptor was rewritten after result persistence");
+        auto rewritten_fencing = *result_record.record;
+        ++rewritten_fencing.fencing_token;
+        ++rewritten_fencing.revision;
+        require(rewritten_fencing.valid() &&
+                    result_store.commit(rewritten_fencing, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "fencing token was rewritten after result persistence");
         auto rewritten_kind = *result_record.record;
         rewritten_kind.operation_kind = mt5bridge::OperationKind::close;
         ++rewritten_kind.revision;
         require(result_store.commit(rewritten_kind, result_record.record->revision) ==
                     mt5bridge::StoreCommitStatus::conflict,
                 "durable operation kind was rewritten after creation");
+        auto rewritten_anchor = *result_record.record;
+        ++rewritten_anchor.result_source_revision;
+        ++rewritten_anchor.revision;
+        require(rewritten_anchor.valid() &&
+                    result_store.commit(rewritten_anchor, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "durable result source anchor was rewritten after persistence");
         const auto settled_reconciling = owner_a.transition_operation(
             operation_key, mt5bridge::OperationState::reconciling);
         require(settled_reconciling.accepted(),
                 "managed operation did not enter reconciliation");
+        require(settled_reconciling.record &&
+                    settled_reconciling.record->result_source_revision ==
+                        result_record.record->result_source_revision,
+                "reconciling transition changed the result source anchor");
         require(owner_a.transition_journal(operation_key,
                                            mt5bridge::JournalState::reconciling)
                     .accepted(),
@@ -557,9 +682,21 @@ int main() {
         require(settled_record.found() && settled_record.record->operation_state ==
                                        mt5bridge::OperationState::filled &&
                     settled_record.record->settled_volume == 5 &&
+                    settled_record.record->result_source_revision ==
+                        result_record.record->result_source_revision &&
+                    settled_record.record->result_payload ==
+                        result_record.record->result_payload &&
                     settled_record.record->reconciliation_descriptor &&
                     settled_record.record->reconciliation_descriptor->requested_volume == 5,
                 "settled managed volume did not survive store reopen");
+
+        auto rewritten_binding = *legacy_v2.record;
+        ++rewritten_binding.reconciliation_bindings.front().broker_ticket;
+        ++rewritten_binding.revision;
+        require(rewritten_binding.valid() &&
+                    legacy_store.commit(rewritten_binding, legacy_v2.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "reconciliation binding was rewritten after result persistence");
         require(result_store.load(key(99, 100)).status ==
                     mt5bridge::StoreLoadStatus::not_found,
                 "missing operation was not distinguished from storage failure");
@@ -704,6 +841,7 @@ int main() {
         std::filesystem::remove_all(directory, cleanup_error);
         std::filesystem::remove_all(legacy_directory, cleanup_error);
         std::filesystem::remove_all(mode_directory, cleanup_error);
+        std::filesystem::remove_all(anchor_compatibility_directory, cleanup_error);
         std::cout << "file journal store checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
@@ -711,6 +849,7 @@ int main() {
         std::filesystem::remove_all(directory, cleanup_error);
         std::filesystem::remove_all(legacy_directory, cleanup_error);
         std::filesystem::remove_all(mode_directory, cleanup_error);
+        std::filesystem::remove_all(anchor_compatibility_directory, cleanup_error);
         std::cerr << "file journal store checks failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }

@@ -35,6 +35,7 @@ extern "C" int mt5bridge_probe_file_journal_store_header();
 extern "C" int mt5bridge_probe_file_managed_deal_settlement_store_header();
 extern "C" int mt5bridge_probe_file_managed_allocation_store_header();
 extern "C" int mt5bridge_probe_file_managed_settlement_preparation_store_header();
+extern "C" int mt5bridge_probe_managed_opening_allocation_header();
 
 int main() {
     return mt5bridge_probe_market_common_header() |
@@ -70,5 +71,6 @@ int main() {
            mt5bridge_probe_file_journal_store_header() |
            mt5bridge_probe_file_managed_deal_settlement_store_header() |
            mt5bridge_probe_file_managed_allocation_store_header() |
-           mt5bridge_probe_file_managed_settlement_preparation_store_header();
+           mt5bridge_probe_file_managed_settlement_preparation_store_header() |
+           mt5bridge_probe_managed_opening_allocation_header();
 }

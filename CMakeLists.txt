@@ -38,10 +38,13 @@ add_library(mt5bridge_journal STATIC
             src/dispatch/file_managed_settlement_preparation_store.cpp
             src/dispatch/file_managed_allocation_store.cpp
             src/dispatch/file_managed_opening_fact_store.cpp
+            src/dispatch/file_managed_opening_allocation_store.cpp
             src/dispatch/managed_opening_source_verifier.cpp)
 target_include_directories(mt5bridge_journal PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
+target_include_directories(mt5bridge_journal PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/dispatch)
 add_library(mt5bridge::journal ALIAS mt5bridge_journal)
 set_target_properties(mt5bridge_journal PROPERTIES EXPORT_NAME journal)
 
@@ -244,6 +247,16 @@ if(BUILD_TESTING)
                           mt5bridge::journal mt5bridge::one_shot_backend)
     add_test(NAME mt5bridge_managed_opening_source_verifier
              COMMAND mt5bridge_managed_opening_source_verifier_test)
+    add_executable(mt5bridge_managed_opening_allocation_store_test
+                   tests/managed_opening_allocation_store_test.cpp)
+    target_include_directories(mt5bridge_managed_opening_allocation_store_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/include
+                               ${PROJECT_SOURCE_DIR}/src/dispatch
+                               ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(mt5bridge_managed_opening_allocation_store_test PRIVATE
+                          mt5bridge::journal)
+    add_test(NAME mt5bridge_managed_opening_allocation_store
+             COMMAND mt5bridge_managed_opening_allocation_store_test)
     add_executable(mt5bridge_managed_allocation_store_test
                    tests/managed_allocation_store_test.cpp)
     target_link_libraries(mt5bridge_managed_allocation_store_test PRIVATE
@@ -299,9 +312,12 @@ if(BUILD_TESTING)
                    tests/header_self_containment_dispatch_journal.cpp
                    tests/header_self_containment_file_journal_store.cpp
                    tests/header_self_containment_file_managed_deal_settlement_store.cpp
-                   tests/header_self_containment_file_managed_settlement_preparation_store.cpp)
+                   tests/header_self_containment_file_managed_settlement_preparation_store.cpp
+                   tests/header_self_containment_dispatch_managed_opening_allocation.cpp)
     target_link_libraries(mt5bridge_header_self_containment_test PRIVATE
                           mt5bridge::client)
+    target_include_directories(mt5bridge_header_self_containment_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
     add_test(NAME mt5bridge_header_self_containment
              COMMAND mt5bridge_header_self_containment_test)
     add_executable(mt5bridge_one_shot_backend_test

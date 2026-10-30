@@ -80,6 +80,21 @@ ManagedOpeningSourceVerificationResult invalid_evidence() {
     return {ManagedOpeningSourceVerificationStatus::invalid_evidence, std::nullopt};
 }
 
+/// \brief Tests whether the newest complete sample covering a deal timestamp
+/// still contains that exact ticket.
+/// \param graph Current accumulated observation graph.
+/// \param deal Broker deal whose current presence must be confirmed.
+/// \return True when the deal evidence and latest relevant coverage revisions
+/// are identical.
+bool latest_complete_sample_contains(const ObservationGraph &graph,
+                                     const Mt5DealSnapshot &deal) {
+    const auto evidence_revision =
+        graph.history_deal_evidence_revision(deal.ticket);
+    return evidence_revision != 0 &&
+           evidence_revision ==
+               graph.history_deal_latest_coverage_revision_at(deal.time_msc);
+}
+
 } // namespace
 
 ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_locked(
@@ -197,7 +212,7 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             deal->position_id != request.position_identifier ||
             deal->time_msc < declared_window->from_msc ||
             deal->time_msc > declared_window->to_msc ||
-            graph.history_deal_evidence_revision(ticket) == 0 ||
+            !latest_complete_sample_contains(graph, *deal) ||
             (same_graph_instance &&
              graph.history_deal_evidence_revision(ticket) <=
                  descriptor.baseline.history_deals_revision()) ||
@@ -232,7 +247,7 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
             deal.time_msc < declared_window->from_msc ||
             deal.time_msc > declared_window->to_msc ||
             direction_for_type(deal.type) != direction ||
-            graph.history_deal_evidence_revision(deal.ticket) == 0 ||
+            !latest_complete_sample_contains(graph, deal) ||
             (same_graph_instance &&
              graph.history_deal_evidence_revision(deal.ticket) <=
                  descriptor.baseline.history_deals_revision()) ||
@@ -274,7 +289,8 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
     for (const auto &fact : facts_scan.facts) {
         if (fact.operation_key() != request.operation_key)
             continue;
-        if (!fact.valid() || fact.operation_revision() != request.operation_revision ||
+        if (!fact.valid() ||
+            fact.operation_revision() != record.result_source_revision ||
             fact.position_identifier() != request.position_identifier ||
             fact.order_ticket() != order_ticket ||
             !same_window(
@@ -329,17 +345,14 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         return invalid_evidence();
 
     SourceDigest digest;
-    digest.add_text("mt5bridge-managed-opening-source-v1");
+    digest.add_text("mt5bridge-managed-opening-source-v2");
     digest.add_text(request.operation_key.account.server);
     digest.add_u64(request.operation_key.account.login);
     digest.add_u64(request.operation_key.trade_id);
     digest.add_u64(request.operation_key.operation_id);
-    digest.add_u64(request.operation_revision);
     digest.add_u64(request.position_identifier);
     digest.add_u64(order_ticket);
     digest.add_u64(static_cast<std::uint64_t>(record.operation_kind));
-    digest.add_u64(static_cast<std::uint64_t>(record.operation_state));
-    digest.add_u64(static_cast<std::uint64_t>(record.journal_state));
     digest.add_u64(record.result_source_revision);
     digest.add_bytes(record.request_payload);
     digest.add_bytes(record.result_payload);
@@ -390,7 +403,7 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         deal_tickets.push_back(fact.deal_ticket());
     }
     VerifiedManagedOpeningSourceFact proof(
-        request.operation_key, request.operation_revision,
+        request.operation_key, record.result_source_revision,
         request.position_identifier, std::move(deal_tickets),
         frontier->cumulative_managed_logical_units(), digest.value());
     return proof.valid()

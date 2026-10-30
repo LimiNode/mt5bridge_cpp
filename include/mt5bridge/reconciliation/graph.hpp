@@ -405,6 +405,16 @@ public:
         return evidence_revision(history_deal_first_evidence_revisions_, ticket);
     }
 
+    /// \brief Returns the newest complete history-deal observation covering
+    /// one broker timestamp.
+    /// \param time_msc Inclusive broker deal timestamp to test.
+    /// \return Latest covering revision, or zero when no complete observation
+    /// covers the timestamp.
+    std::uint64_t history_deal_latest_coverage_revision_at(
+        std::int64_t time_msc) const {
+        return latest_coverage_revision_at(history_deal_coverage_, time_msc);
+    }
+
     /// \brief Returns revision-tagged history-order coverage windows.
     /// \return Copy of inclusive ranges and the revisions that observed them.
     std::vector<ObservationCoverage> history_orders_coverage() const {
@@ -758,6 +768,20 @@ private:
             cursor = candidate.to_msc + 1;
         }
         return false;
+    }
+
+    static std::uint64_t latest_coverage_revision_at(
+        const std::vector<ObservationCoverage> &coverage,
+        std::int64_t time_msc) {
+        if (time_msc < 0)
+            return 0;
+        std::uint64_t latest = 0;
+        for (const auto &entry : coverage) {
+            if (entry.valid() && entry.window.from_msc <= time_msc &&
+                time_msc <= entry.window.to_msc && entry.revision > latest)
+                latest = entry.revision;
+        }
+        return latest;
     }
 
     template <typename Predicate>

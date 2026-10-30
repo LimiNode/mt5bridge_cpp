@@ -28,8 +28,8 @@ public:
     /// \brief Returns the committed OPEN operation identity.
     /// \return Account-scoped operation key.
     const OperationKey &operation_key() const { return operation_key_; }
-    /// \brief Returns the exact journal revision verified against the source.
-    /// \return Non-zero durable operation revision.
+    /// \brief Returns the immutable journal result-source revision.
+    /// \return Non-zero revision at which the broker result became durable.
     std::uint64_t operation_revision() const { return operation_revision_; }
     /// \brief Returns the broker position identifier from history deals.
     /// \return Non-zero POSITION_IDENTIFIER.

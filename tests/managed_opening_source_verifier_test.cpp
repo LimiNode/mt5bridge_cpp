@@ -88,7 +88,7 @@ public:
     runtime::BackendCallResult submit_once(const OperationRecord &) override {
         ++calls;
         return {runtime::BackendCallStatus::broker_result,
-                runtime::BrokerResultDisposition::reconciling, 10009, {0xA0, 0x01},
+                runtime::BrokerResultDisposition::accepted, 10009, {0xA0, 0x01},
                 {{70, 5001}}};
     }
 
@@ -133,9 +133,9 @@ void with_graph(const std::vector<Mt5DealSnapshot> &deals, Callback callback) {
 
 ManagedOpeningDealFact fact_for(const ObservationGraph &graph,
                                 std::uint64_t deal_ticket, double volume,
-                                std::uint64_t operation_revision = 3) {
+                                std::uint64_t result_source_revision = 2) {
     ManagedOpeningDealObservation observation{
-        operation(), operation_revision, 3001, deal_ticket, 88001,
+        operation(), result_source_revision, 3001, deal_ticket, 88001,
         kManagedOpeningRequiredDealFields, BrokerPositionDirection::buy,
         BrokerDealEntry::in, 1500, volume, 0.01,
         ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000},
@@ -143,7 +143,7 @@ ManagedOpeningDealFact fact_for(const ObservationGraph &graph,
         graph.instance_id(), graph.domain_revision(ObservationDomain::history_deals),
         source_window().from_msc, source_window().to_msc};
     const ManagedOpeningExecutionRequest request{
-        operation(), OperationKind::open, operation_revision, 3001, 88001};
+        operation(), OperationKind::open, result_source_revision, 3001, 88001};
     const auto result = ManagedOpeningDealFact::from_observation(request, observation);
     require(result.has_value(), "valid source fact was rejected");
     return *result;
@@ -210,7 +210,7 @@ void accepts_only_independent_source_chain() {
                 "source proof did not retain the canonical deal set");
         require(result.proof->managed_logical_units() == 8,
                 "source proof cumulative quantity was not exact");
-        require(result.proof->evidence_digest() == 14084310942890406028ULL,
+        require(result.proof->evidence_digest() == 7677184271478785231ULL,
                 "source fingerprint golden vector changed unexpectedly");
     });
 }
@@ -360,6 +360,101 @@ void accepts_idempotent_repoll_without_rewriting_receipt() {
             "unchanged complete repoll invalidated source proof");
     require(facts.facts.front().admission_receipt() == original_receipt,
             "repoll changed the immutable admission receipt");
+
+    ObservationBatch unrelated = baseline_batch;
+    unrelated.history_deals_window = ObservationWindow{2100, 2200};
+    require(graph.apply(unrelated).accepted(), "unrelated history poll was rejected");
+    require(verifier.verify({operation(), OperationKind::open, 3, 88001}).found(),
+            "non-overlapping complete poll invalidated source proof");
+}
+
+void rejects_newer_complete_history_contradictions() {
+    const auto run = [](ObservationWindow contradiction_window,
+                        std::vector<Mt5DealSnapshot> contradiction_deals,
+                        const char *message) {
+        ObservationGraph graph(account());
+        ObservationBatch baseline_batch;
+        baseline_batch.account = account();
+        baseline_batch.observed_domains = ObservationDomain::history_deals;
+        baseline_batch.history_deals_window = source_window();
+        require(graph.apply(baseline_batch).accepted(),
+                "contradiction baseline was rejected");
+        const auto baseline = capture_reconciliation_baseline(graph);
+        ObservationBatch observed = baseline_batch;
+        observed.history_deals = {deal(5001, 0.05)};
+        require(graph.apply(observed).accepted(),
+                "contradiction source sample was rejected");
+
+        MemoryOpeningFactStore facts;
+        facts.facts = {fact_for(graph, 5001, 0.05)};
+        mt5bridge_test_support::MemoryJournalStore journal;
+        journal.records.emplace(operation(), journal_record(baseline, {5001}));
+        TestLease lease;
+        ManagedOpeningSourceVerifier verifier(
+            journal, facts, graph,
+            ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+        require(verifier.verify({operation(), OperationKind::open, 3, 88001}).found(),
+                "contradiction source fixture was not initially admitted");
+
+        ObservationBatch contradiction = baseline_batch;
+        contradiction.history_deals_window = contradiction_window;
+        contradiction.history_deals = std::move(contradiction_deals);
+        require(graph.apply(contradiction).accepted(),
+                "newer contradiction sample was rejected by the graph");
+        require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
+                    ManagedOpeningSourceVerificationStatus::invalid_evidence,
+                message);
+    };
+
+    run(source_window(), {},
+        "deal missing from a newer complete history sample was accepted");
+    run(ObservationWindow{1400, 1600}, {},
+        "deal missing from a newer narrow covering sample was accepted");
+    run(source_window(), {deal(5001, 0.04)},
+        "rewritten deal in a newer complete history sample was accepted");
+}
+
+void accepts_later_partial_fill_at_stable_source_revision() {
+    ObservationGraph graph(account());
+    ObservationBatch baseline_batch;
+    baseline_batch.account = account();
+    baseline_batch.observed_domains = ObservationDomain::history_deals;
+    baseline_batch.history_deals_window = source_window();
+    require(graph.apply(baseline_batch).accepted(),
+            "later-fill baseline was rejected");
+    const auto baseline = capture_reconciliation_baseline(graph);
+
+    ObservationBatch first_fill = baseline_batch;
+    first_fill.history_deals = {deal(5001, 0.05)};
+    require(graph.apply(first_fill).accepted(), "first fill was rejected");
+    const auto retained_first = fact_for(graph, 5001, 0.05);
+
+    ObservationBatch second_fill = baseline_batch;
+    second_fill.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
+    require(graph.apply(second_fill).accepted(), "second fill was rejected");
+    MemoryOpeningFactStore facts;
+    facts.facts = {retained_first, fact_for(graph, 5002, 0.03)};
+    require(facts.facts.front().admission_receipt().source_revision <
+                facts.facts.back().admission_receipt().source_revision,
+            "later fill did not retain a later admission receipt");
+
+    mt5bridge_test_support::MemoryJournalStore journal;
+    auto record = journal_record(baseline, {5001, 5002});
+    record.operation_state = OperationState::reconciling;
+    ++record.revision;
+    require(record.valid() && record.result_source_revision == 2,
+            "later-fill journal fixture is invalid");
+    // Both immutable facts identify the same broker-result source revision;
+    // the first receipt is not rewritten by the later poll or lifecycle step.
+    journal.records.emplace(operation(), record);
+    TestLease lease;
+    ManagedOpeningSourceVerifier verifier(
+        journal, facts, graph,
+        ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+    const auto result = verifier.verify({operation(), OperationKind::open, 4, 88001});
+    require(result.found() &&
+                result.proof->operation_revision() == record.result_source_revision,
+            "later partial fill required rewriting the immutable source revision");
 }
 
 void accepts_production_reachable_one_shot_result() {
@@ -448,7 +543,7 @@ void accepts_production_reachable_one_shot_result() {
     require(executed.completed() && executed.record && transport.calls == 1,
             "production one-shot dispatch did not complete");
     require(executed.record->journal_state == JournalState::result_persisted &&
-                executed.record->operation_state == OperationState::reconciling &&
+                executed.record->operation_state == OperationState::accepted &&
                 executed.record->result_source_revision != 0,
                 "result-source anchor was not retained across lifecycle transition");
 
@@ -457,13 +552,32 @@ void accepts_production_reachable_one_shot_result() {
             "production post-dispatch history observation failed");
 
     MemoryOpeningFactStore facts;
-    facts.facts = {fact_for(coordinator.graph(), 5001, 0.05, executed.record->revision)};
+    facts.facts = {fact_for(coordinator.graph(), 5001, 0.05,
+                           executed.record->result_source_revision)};
     ManagedOpeningSourceVerifier verifier(
         journal_store, facts, coordinator.graph(),
         ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
-    require(verifier.verify({operation(), OperationKind::open, executed.record->revision, 88001})
-                .found(),
+    const auto accepted = verifier.verify(
+        {operation(), OperationKind::open, executed.record->revision, 88001});
+    require(accepted.found() &&
+                accepted.proof->operation_revision() ==
+                    executed.record->result_source_revision,
             "production-reachable result did not pass source verifier");
+
+    const auto reconciling =
+        journal.transition_operation(operation(), OperationState::reconciling);
+    require(reconciling.accepted() && reconciling.record &&
+                reconciling.record->result_source_revision ==
+                    executed.record->result_source_revision,
+            "accepted result did not retain its source across reconciliation");
+    const auto after_transition = verifier.verify(
+        {operation(), OperationKind::open, reconciling.record->revision, 88001});
+    require(after_transition.found() &&
+                after_transition.proof->operation_revision() ==
+                    accepted.proof->operation_revision() &&
+                after_transition.proof->evidence_digest() ==
+                    accepted.proof->evidence_digest(),
+            "lifecycle transition changed immutable OPEN source identity");
 }
 
 void rejects_invalid_requests_and_store_failures() {
@@ -580,12 +694,20 @@ void rejects_unreconstructable_lifecycle_and_volume_states() {
         facts.facts = {fact_for(graph, 5001, 0.05)};
         mt5bridge_test_support::MemoryJournalStore journal;
         auto record = journal_record(baseline, {5001});
-        record.reconciliation_descriptor->requested_volume = 4;
-        require(record.valid(), "under-requested volume fixture is invalid");
-        journal.records.emplace(operation(), record);
+        auto legacy = record;
+        legacy.result_source_revision = 0;
+        require(legacy.valid(), "legacy source-anchor fixture is invalid");
+        journal.records.emplace(operation(), legacy);
         TestLease lease;
         ManagedOpeningSourceVerifier verifier(
             journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+        require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
+                    ManagedOpeningSourceVerificationStatus::invalid_evidence,
+                "legacy journal without a source anchor produced a proof");
+
+        record.reconciliation_descriptor->requested_volume = 4;
+        require(record.valid(), "under-requested volume fixture is invalid");
+        journal.records[operation()] = record;
         require(verifier.verify({operation(), OperationKind::open, 3, 88001}).status ==
                     ManagedOpeningSourceVerificationStatus::invalid_evidence,
                 "managed volume above requested quantity was accepted");
@@ -659,6 +781,8 @@ int main() {
         rejects_identity_and_history_contradictions();
         survives_graph_restart_but_not_lease_revocation();
         accepts_idempotent_repoll_without_rewriting_receipt();
+        rejects_newer_complete_history_contradictions();
+        accepts_later_partial_fill_at_stable_source_revision();
         accepts_production_reachable_one_shot_result();
         rejects_invalid_requests_and_store_failures();
         rejects_non_causal_or_stale_history_evidence();

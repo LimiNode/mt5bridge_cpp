@@ -43,6 +43,8 @@ lifecycle transitions. B3B requires this immutable anchor for both
 anchor but remain fail-closed for this verifier. The request revision still
 identifies the current durable record, while the anchor identifies the exact
 revision at which the broker result and binding first became durable.
+Every B3A fact for that OPEN stores this anchor as its `operation_revision`;
+the fact does not follow later lifecycle revisions.
 
 ## Ownership matrix
 
@@ -71,8 +73,12 @@ For a valid `ManagedOpeningProvenanceRequest`, the verifier:
    graph provenance. On the original graph instance every admitted deal must
    have first evidence newer than that baseline (the graph retains both first
    and latest observation revisions), and an exact complete-window coverage
-   entry at the same revision. A repeated complete poll may advance latest
-   evidence without changing the immutable first-admission receipt. After
+   entry at the same revision. The newest complete observation whose window
+   covers each deal timestamp must also contain that deal; a later covering
+   sample that omits it is a contradiction even though historical evidence is
+   retained in the graph. A repeated complete poll containing the unchanged
+   deal may advance latest evidence without changing the immutable
+   first-admission receipt. After
    restart numeric graph revisions are not compared across instances; the
    durable baseline/receipt provenance is retained and the re-observed graph
    must independently provide exact complete-window coverage;
@@ -80,11 +86,12 @@ For a valid `ManagedOpeningProvenanceRequest`, the verifier:
    account/order/position identity, `DEAL_ENTRY_IN`, one direction, complete
    fields, and complete coverage;
 5. scans durable B3A facts, requiring one exact fact for every authoritative
-   deal, exact operation revision and position, unchanged admission window,
+   deal, the immutable result-source revision and exact position, unchanged admission window,
    exact timestamp/direction, and canonical quantity equality;
 6. builds the deterministic deal-ticket-sorted execution frontier, rejects an
    unknown requested volume or cumulative managed volume above it, and computes
-   a domain-tagged FNV-64 fingerprint over the immutable journal payload,
+   a domain-tagged FNV-64 fingerprint over the immutable result-source anchor,
+   journal payload,
    descriptor/bindings, history fields, and canonical fact bytes; and
 7. returns the sealed source fact only after every comparison succeeds.
 
@@ -101,8 +108,10 @@ descriptor and first-admission receipts identify the original graph/account and
 the new graph independently re-observes the same complete history window. The
 graph instance identifier is provenance, never a cross-restart ordering
 relation. A changed history payload, old coverage reused for a later uncovered
-deal, missing causal evidence, foreign same-position execution, or unavailable
-durable fact fails closed. The current journal store retains only its latest
+deal, a newer complete covering sample that omits a previously admitted deal,
+missing causal evidence, foreign same-position execution, or unavailable
+durable fact fails closed. A complete observation of a non-overlapping window
+does not contradict the deal. The current journal store retains only its latest
 revision, so B3B accepts a record already advanced into the `reconciling`
 lifecycle only when the v6 immutable result-source anchor is present. A legacy
 record without that anchor remains fail-closed.
@@ -118,7 +127,9 @@ partial fills, exact quantity and identity joins, pre-dispatch baseline
 causality, stale-coverage rejection, missing and rewritten facts, foreign
 same-position executions, stale journal revisions, graph restart, revoked
 fencing, requested-volume bounds, invalid requests, durable-store I/O failure,
-idempotent repeated polling, rejection of fabricated future tickets, and a
+idempotent repeated polling, newer complete-history contradictions, stable
+source identity across lifecycle changes and later partial fills, rejection of
+fabricated future tickets, and a
 production-shaped `OperationJournal` → `DispatchAdmissionBarrier` →
 `OneShotDispatchBackend` → verifier path. B3C remains responsible for durable
 opening-allocation publication and its crash matrix.

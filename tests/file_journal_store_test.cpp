@@ -310,6 +310,37 @@ void rewrite_v5_mode(const std::filesystem::path &path,
     require(output.good(), "journal mode fixture could not be written");
 }
 
+void rewrite_as_v5_without_result_anchor(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    require(input.good(), "journal v6 fixture could not be opened");
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+    require(bytes.size() >= 28, "journal v6 fixture is truncated");
+    std::size_t body = 28;
+    const auto skip_string = [&body, &bytes]() {
+        const auto size = read_u32(bytes, body);
+        body += sizeof(std::uint32_t) + size;
+        require(body <= bytes.size(), "journal v6 fixture string is truncated");
+    };
+    skip_string();
+    skip_string();
+    skip_string();
+    body += 3U * sizeof(std::uint64_t) + 2U * sizeof(std::uint32_t) +
+            sizeof(std::uint64_t);
+    require(body + sizeof(std::uint64_t) <= bytes.size(),
+            "journal v6 result anchor is truncated");
+    bytes.erase(bytes.begin() + static_cast<std::ptrdiff_t>(body),
+                bytes.begin() + static_cast<std::ptrdiff_t>(
+                    body + sizeof(std::uint64_t)));
+    write_u32(bytes, 8, 5);
+    write_u64(bytes, 12, static_cast<std::uint64_t>(bytes.size() - 28));
+    const std::vector<std::uint8_t> checksum_body(bytes.begin() + 28, bytes.end());
+    write_u64(bytes, 20, fixture_checksum(checksum_body));
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char *>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    require(output.good(), "journal v5 fixture could not be written");
+}
+
 } // namespace
 
 /// \brief Runs file-store durability and corruption checks.
@@ -321,11 +352,15 @@ int main() {
                                   "mt5bridge_file_journal_store_legacy_test";
     const auto mode_directory = std::filesystem::temp_directory_path() /
                                 "mt5bridge_file_journal_store_mode_test";
+    const auto anchor_compatibility_directory =
+        std::filesystem::temp_directory_path() /
+        "mt5bridge_file_journal_store_anchor_compatibility_test";
     const auto original_cwd = std::filesystem::current_path();
     std::error_code cleanup_error;
     std::filesystem::remove_all(directory, cleanup_error);
     std::filesystem::remove_all(legacy_directory, cleanup_error);
     std::filesystem::remove_all(mode_directory, cleanup_error);
+    std::filesystem::remove_all(anchor_compatibility_directory, cleanup_error);
 
     try {
         mt5bridge::WindowsFileJournalStore store(directory);
@@ -430,6 +465,41 @@ int main() {
         rewrite_v5_mode(fixture_path(mode_store.directory(), gated_key), 99);
         require(mode_store.load(gated_key).status == mt5bridge::StoreLoadStatus::invalid_record,
                 "journal decoder admitted an unknown settlement mode");
+
+        const auto v5_key = key(86, 87);
+        mt5bridge::WindowsFileJournalStore anchor_writer(
+            anchor_compatibility_directory);
+        mt5bridge::OperationJournal anchor_journal(anchor_writer);
+        require(anchor_journal
+                    .create(v5_key, {0x61}, mt5bridge::OperationKind::open)
+                    .accepted(),
+                "journal v6 anchor fixture was not created");
+        prepare(anchor_journal, v5_key);
+        require(anchor_journal
+                    .transition_journal(v5_key, mt5bridge::JournalState::dispatching, 91)
+                    .accepted() &&
+                    anchor_journal
+                        .transition_operation(v5_key, mt5bridge::OperationState::submitting)
+                        .accepted() &&
+                    anchor_journal.persist_result(v5_key, {0xA2}).accepted() &&
+                    anchor_journal
+                        .transition_operation(v5_key, mt5bridge::OperationState::accepted)
+                        .accepted(),
+                "journal v6 anchor fixture did not reach accepted state");
+        const auto v6_anchor = anchor_writer.load(v5_key);
+        require(v6_anchor.found() && v6_anchor.record &&
+                    v6_anchor.record->result_source_revision != 0,
+                "journal v6 source anchor did not survive reopen");
+        rewrite_as_v5_without_result_anchor(
+            fixture_path(anchor_compatibility_directory, v5_key));
+        mt5bridge::WindowsFileJournalStore v5_reader(
+            anchor_compatibility_directory);
+        const auto v5_record = v5_reader.load(v5_key);
+        require(v5_record.found() && v5_record.record &&
+                    v5_record.record->result_source_revision == 0 &&
+                    v5_record.record->operation_state ==
+                        mt5bridge::OperationState::accepted,
+                "real journal v5 fixture did not decode without a source anchor");
 
         const auto operation_key = key();
         const auto lease_account = operation_key.account;
@@ -714,6 +784,7 @@ int main() {
         std::filesystem::remove_all(directory, cleanup_error);
         std::filesystem::remove_all(legacy_directory, cleanup_error);
         std::filesystem::remove_all(mode_directory, cleanup_error);
+        std::filesystem::remove_all(anchor_compatibility_directory, cleanup_error);
         std::cout << "file journal store checks passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
@@ -721,6 +792,7 @@ int main() {
         std::filesystem::remove_all(directory, cleanup_error);
         std::filesystem::remove_all(legacy_directory, cleanup_error);
         std::filesystem::remove_all(mode_directory, cleanup_error);
+        std::filesystem::remove_all(anchor_compatibility_directory, cleanup_error);
         std::cerr << "file journal store checks failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }

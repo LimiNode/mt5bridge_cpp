@@ -500,6 +500,13 @@ int main() {
                     v5_record.record->operation_state ==
                         mt5bridge::OperationState::accepted,
                 "real journal v5 fixture did not decode without a source anchor");
+        auto v5_anchor_rewrite = *v5_record.record;
+        v5_anchor_rewrite.result_source_revision = v5_anchor_rewrite.revision + 1;
+        ++v5_anchor_rewrite.revision;
+        require(v5_anchor_rewrite.valid() &&
+                    v5_reader.commit(v5_anchor_rewrite, v5_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "result-bearing v5 record acquired a fabricated source anchor");
 
         const auto operation_key = key();
         const auto lease_account = operation_key.account;
@@ -584,8 +591,11 @@ int main() {
                                              mt5bridge::OperationState::submitting)
                         .status == mt5bridge::JournalMutationStatus::conflict,
                 "stale owner overwrote the durable revision");
-        require(owner_a.persist_result(operation_key, {0xA0, 0x01}).accepted(),
-                "result payload was not atomically persisted");
+        const auto persisted_result = owner_a.persist_result(operation_key, {0xA0, 0x01});
+        require(persisted_result.accepted() && persisted_result.record &&
+                    persisted_result.record->result_source_revision ==
+                        persisted_result.record->revision,
+                "result payload was not atomically persisted with its exact source anchor");
         require(owner_a.transition_operation(operation_key,
                                              mt5bridge::OperationState::accepted)
                     .accepted(),
@@ -601,6 +611,37 @@ int main() {
                     result_record.record->result_payload ==
                         std::vector<std::uint8_t>({0xA0, 0x01}),
                 "result payload did not survive reopen");
+        auto rewritten_request = *result_record.record;
+        rewritten_request.request_payload = {0xB0, 0x02};
+        ++rewritten_request.revision;
+        require(rewritten_request.valid() &&
+                    result_store.commit(rewritten_request, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "request payload was rewritten after result persistence");
+        auto rewritten_result = *result_record.record;
+        rewritten_result.result_payload = {0xB1, 0x03};
+        ++rewritten_result.revision;
+        require(rewritten_result.valid() &&
+                    result_store.commit(rewritten_result, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "result payload was rewritten after result persistence");
+        auto rewritten_descriptor = *result_record.record;
+        require(rewritten_descriptor.reconciliation_descriptor.has_value(),
+                "result-bearing record lost its reconciliation descriptor");
+        ++rewritten_descriptor.reconciliation_descriptor->requested_volume;
+        ++rewritten_descriptor.revision;
+        require(rewritten_descriptor.valid() &&
+                    result_store.commit(rewritten_descriptor,
+                                        result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "reconciliation descriptor was rewritten after result persistence");
+        auto rewritten_fencing = *result_record.record;
+        ++rewritten_fencing.fencing_token;
+        ++rewritten_fencing.revision;
+        require(rewritten_fencing.valid() &&
+                    result_store.commit(rewritten_fencing, result_record.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "fencing token was rewritten after result persistence");
         auto rewritten_kind = *result_record.record;
         rewritten_kind.operation_kind = mt5bridge::OperationKind::close;
         ++rewritten_kind.revision;
@@ -618,6 +659,10 @@ int main() {
             operation_key, mt5bridge::OperationState::reconciling);
         require(settled_reconciling.accepted(),
                 "managed operation did not enter reconciliation");
+        require(settled_reconciling.record &&
+                    settled_reconciling.record->result_source_revision ==
+                        result_record.record->result_source_revision,
+                "reconciling transition changed the result source anchor");
         require(owner_a.transition_journal(operation_key,
                                            mt5bridge::JournalState::reconciling)
                     .accepted(),
@@ -637,9 +682,21 @@ int main() {
         require(settled_record.found() && settled_record.record->operation_state ==
                                        mt5bridge::OperationState::filled &&
                     settled_record.record->settled_volume == 5 &&
+                    settled_record.record->result_source_revision ==
+                        result_record.record->result_source_revision &&
+                    settled_record.record->result_payload ==
+                        result_record.record->result_payload &&
                     settled_record.record->reconciliation_descriptor &&
                     settled_record.record->reconciliation_descriptor->requested_volume == 5,
                 "settled managed volume did not survive store reopen");
+
+        auto rewritten_binding = *legacy_v2.record;
+        ++rewritten_binding.reconciliation_bindings.front().broker_ticket;
+        ++rewritten_binding.revision;
+        require(rewritten_binding.valid() &&
+                    legacy_store.commit(rewritten_binding, legacy_v2.record->revision) ==
+                        mt5bridge::StoreCommitStatus::conflict,
+                "reconciliation binding was rewritten after result persistence");
         require(result_store.load(key(99, 100)).status ==
                     mt5bridge::StoreLoadStatus::not_found,
                 "missing operation was not distinguished from storage failure");

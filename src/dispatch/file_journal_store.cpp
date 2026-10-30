@@ -53,6 +53,65 @@ constexpr std::size_t kMaxEpochRecordBytes = kEpochEnvelopeBytes + kMaxStringByt
                                               sizeof(std::uint32_t) +
                                               2U * sizeof(std::uint64_t);
 
+/// \brief Compares the durable reconciliation descriptor field-by-field.
+bool same_reconciliation_descriptor(
+    const std::optional<ReconciliationDescriptor> &left,
+    const std::optional<ReconciliationDescriptor> &right) {
+    if (left.has_value() != right.has_value())
+        return false;
+    if (!left)
+        return true;
+    if (left->account != right->account || left->trade_id != right->trade_id ||
+        left->operation_id != right->operation_id ||
+        left->requested_volume != right->requested_volume ||
+        left->settled_state != right->settled_state ||
+        left->baseline.account() != right->baseline.account() ||
+        left->baseline.graph_instance_id() != right->baseline.graph_instance_id() ||
+        left->baseline.graph_revision() != right->baseline.graph_revision() ||
+        left->baseline.active_orders_revision() !=
+            right->baseline.active_orders_revision() ||
+        left->baseline.positions_revision() != right->baseline.positions_revision() ||
+        left->baseline.history_orders_revision() !=
+            right->baseline.history_orders_revision() ||
+        left->baseline.history_deals_revision() !=
+            right->baseline.history_deals_revision() ||
+        left->predicates.size() != right->predicates.size())
+        return false;
+    for (std::size_t index = 0; index != left->predicates.size(); ++index) {
+        const auto &left_predicate = left->predicates[index];
+        const auto &right_predicate = right->predicates[index];
+        if (left_predicate.kind != right_predicate.kind ||
+            left_predicate.ticket != right_predicate.ticket ||
+            left_predicate.baseline_present != right_predicate.baseline_present ||
+            left_predicate.correlation_id != right_predicate.correlation_id ||
+            left_predicate.expected_transition != right_predicate.expected_transition ||
+            left_predicate.history_window.has_value() !=
+                right_predicate.history_window.has_value() ||
+            (left_predicate.history_window &&
+             (left_predicate.history_window->from_msc !=
+                  right_predicate.history_window->from_msc ||
+              left_predicate.history_window->to_msc !=
+                  right_predicate.history_window->to_msc)))
+            return false;
+    }
+    return true;
+}
+
+/// \brief Compares fields that become immutable when a result is persisted.
+bool same_result_source_tuple(const OperationRecord &left,
+                              const OperationRecord &right) {
+    return left.key == right.key &&
+           left.operation_kind == right.operation_kind &&
+           left.settlement_mode == right.settlement_mode &&
+           left.request_payload == right.request_payload &&
+           left.result_payload == right.result_payload &&
+           same_reconciliation_descriptor(left.reconciliation_descriptor,
+                                          right.reconciliation_descriptor) &&
+           left.reconciliation_bindings == right.reconciliation_bindings &&
+           left.result_source_revision == right.result_source_revision &&
+           left.fencing_token == right.fencing_token;
+}
+
 bool append_reconciliation_descriptor(
     std::vector<std::uint8_t> &bytes,
     const std::optional<ReconciliationDescriptor> &descriptor) {
@@ -830,14 +889,34 @@ StoreCommitStatus WindowsFileJournalStore::commit(
                existing->revision != *expected_revision) {
         return StoreCommitStatus::conflict;
     }
-    if (status == ReadStatus::valid && existing &&
-        (existing->operation_kind != record.operation_kind ||
-         existing->settlement_mode != record.settlement_mode ||
-         (existing->result_source_revision != 0 &&
-          existing->result_source_revision != record.result_source_revision))) {
-        set_error(last_error_,
-                  "operation kind, settlement mode, and result source anchor are immutable");
-        return StoreCommitStatus::conflict;
+    if (status == ReadStatus::valid && existing) {
+        if (existing->operation_kind != record.operation_kind ||
+            existing->settlement_mode != record.settlement_mode) {
+            set_error(last_error_, "operation kind and settlement mode are immutable");
+            return StoreCommitStatus::conflict;
+        }
+
+        if (journal_at_least_result_persisted(existing->journal_state)) {
+            if (!same_result_source_tuple(*existing, record)) {
+                set_error(last_error_,
+                          "result source tuple is immutable after result persistence");
+                return StoreCommitStatus::conflict;
+            }
+        } else if (existing->result_source_revision != record.result_source_revision) {
+            const bool trusted_result_anchor =
+                existing->result_source_revision == 0 &&
+                record.result_source_revision != 0 &&
+                existing->journal_state == JournalState::dispatching &&
+                record.journal_state == JournalState::result_persisted &&
+                existing->revision != (std::numeric_limits<std::uint64_t>::max)() &&
+                record.revision == existing->revision + 1 &&
+                record.result_source_revision == record.revision &&
+                existing->result_payload.empty() && !record.result_payload.empty();
+            if (!trusted_result_anchor) {
+                set_error(last_error_, "result source anchor is immutable");
+                return StoreCommitStatus::conflict;
+            }
+        }
     }
 
     const auto temp = target.wstring() + L".tmp";

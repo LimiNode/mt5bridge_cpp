@@ -155,8 +155,7 @@ ReadStatus read_entry(const std::filesystem::path &path,
     entry.reset();
 #if defined(_WIN32)
     std::vector<std::uint8_t> bytes;
-    const auto status = read_bytes_file(path, kMaxRecordBytes, bytes, error,
-                                        file_store_support::ReadStatus::malformed);
+    const auto status = read_bytes_file(path, kMaxRecordBytes, bytes, error);
     if (status == file_store_support::ReadStatus::absent)
         return ReadStatus::absent;
     if (status == file_store_support::ReadStatus::io_error)
@@ -235,6 +234,25 @@ ManagedOpeningAllocationCommitStatus map_validation_status(SourceValidation stat
         return ManagedOpeningAllocationCommitStatus::missing_source;
     if (status == SourceValidation::io_error)
         return ManagedOpeningAllocationCommitStatus::io_error;
+    return ManagedOpeningAllocationCommitStatus::invalid_source;
+}
+
+ManagedOpeningAllocationCommitStatus map_verifier_commit_status(
+    ManagedOpeningSourceVerificationStatus status) {
+    switch (status) {
+    case ManagedOpeningSourceVerificationStatus::found:
+        return ManagedOpeningAllocationCommitStatus::committed;
+    case ManagedOpeningSourceVerificationStatus::io_error:
+        return ManagedOpeningAllocationCommitStatus::io_error;
+    case ManagedOpeningSourceVerificationStatus::unavailable:
+        return ManagedOpeningAllocationCommitStatus::missing_source;
+    case ManagedOpeningSourceVerificationStatus::invalid_request:
+    case ManagedOpeningSourceVerificationStatus::invalid_evidence:
+    case ManagedOpeningSourceVerificationStatus::lease_not_held:
+        return status == ManagedOpeningSourceVerificationStatus::lease_not_held
+                   ? ManagedOpeningAllocationCommitStatus::lease_not_held
+                   : ManagedOpeningAllocationCommitStatus::invalid_source;
+    }
     return ManagedOpeningAllocationCommitStatus::invalid_source;
 }
 
@@ -576,8 +594,8 @@ ManagedOpeningAllocationPublicationResult ManagedOpeningAllocationPublisher::pub
                 return;
             }
             result = map_commit_result(
-                allocation_store_.publish(*preparation.record, *verified.proof, journal_store_,
-                                           fact_store_, lease_),
+                allocation_store_.publish(*preparation.record, journal_store_,
+                                           fact_store_, lease_, verifier_, current_request),
                 entry, false);
         });
     return fenced ? result
@@ -710,13 +728,15 @@ WindowsFileManagedOpeningAllocationStore::load_preparation(
 
 ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::publish(
     const ManagedOpeningAllocationPreparation &preparation,
-    const VerifiedManagedOpeningSourceFact &proof,
     const DurableJournalStore &journal_store,
     const DurableManagedOpeningFactStore &fact_store,
-    const SingleWriterLease &lease) {
+    const SingleWriterLease &lease,
+    const ManagedOpeningSourceVerifier &verifier,
+    const ManagedOpeningProvenanceRequest &request) {
 #if defined(_WIN32)
     last_error_.clear();
-    if (!ready_ || !preparation.valid())
+    if (!ready_ || !preparation.valid() || !request.valid() ||
+        request.operation_key != preparation.entry.key.operation_key)
         return ManagedOpeningAllocationCommitStatus::invalid_record;
     const auto token = lease.held_fencing_token(preparation.entry.account);
     if (!token)
@@ -750,8 +770,19 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 return;
             }
             const bool replay_without_preparation = durable_status == ReadStatus::absent;
+            // The caller-supplied proof is only a consistency hint.  Final
+            // publication has one authoritative boundary: reload the current
+            // journal/history/facts through the verifier while the same
+            // account fence is held, then validate the durable entry against
+            // that fresh result.
+            const auto fresh = verifier.verify(request);
+            if (!fresh.found()) {
+                result = map_verifier_commit_status(fresh.status);
+                last_error_ = "managed opening allocation source verification failed";
+                return;
+            }
             const auto validation = validate_entry_sources(
-                preparation.entry, &proof, journal_store, fact_store, last_error_);
+                preparation.entry, &*fresh.proof, journal_store, fact_store, last_error_);
             if (validation != SourceValidation::valid) {
                 result = map_validation_status(validation);
                 return;
@@ -791,7 +822,6 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
     return fenced ? result : ManagedOpeningAllocationCommitStatus::lease_not_held;
 #else
     (void)preparation;
-    (void)proof;
     (void)journal_store;
     (void)fact_store;
     (void)lease;
@@ -842,8 +872,12 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
     const auto account_path = account_directory(directory_, account);
     std::error_code status_error;
     const auto status = std::filesystem::symlink_status(account_path, status_error);
-    if (status.type() == std::filesystem::file_type::not_found ||
-        status_error == std::make_error_code(std::errc::no_such_file_or_directory))
+    const bool no_such_account =
+        status_error == std::make_error_code(std::errc::no_such_file_or_directory) ||
+        status_error.value() == ERROR_FILE_NOT_FOUND ||
+        status_error.value() == ERROR_PATH_NOT_FOUND;
+    if ((status.type() == std::filesystem::file_type::not_found && !status_error) ||
+        no_such_account)
         return {ManagedOpeningAllocationScanStatus::complete, {}, {}};
     if (status_error) {
         last_error_ = status_error.message();
@@ -851,15 +885,30 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
     }
     if (std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status))
         return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+    const auto account_attributes = GetFileAttributesW(account_path.c_str());
+    if (account_attributes == INVALID_FILE_ATTRIBUTES) {
+        last_error_ = win32_error("GetFileAttributesW(managed opening allocation account)");
+        return {ManagedOpeningAllocationScanStatus::io_error, {}, {}};
+    }
+    if ((account_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        last_error_ = "managed opening allocation account path is a reparse point";
+        return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+    }
     std::vector<ManagedOpeningAllocationEntry> records;
     std::vector<ManagedOpeningAllocationPreparation> preparations;
+    std::set<std::string> allocation_identities;
+    std::set<std::string> preparation_identities;
     try {
         for (const auto &item : std::filesystem::directory_iterator(account_path)) {
             const auto filename = item.path().filename().wstring();
             const bool allocation = filename.rfind(L"alloc-", 0) == 0;
             const bool preparation = filename.rfind(L"prep-", 0) == 0;
-            if ((!allocation && !preparation) || item.path().extension() != L".bin")
+            if (!allocation && !preparation)
                 continue;
+            if (item.path().extension() != L".bin") {
+                last_error_ = "managed opening allocation reserved path has an invalid name";
+                return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+            }
             std::error_code item_status_error;
             const auto item_status = std::filesystem::symlink_status(item.path(), item_status_error);
             if (item_status_error) {
@@ -871,15 +920,37 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
                 last_error_ = "managed opening allocation record is not a regular file";
                 return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
             }
+            const auto item_attributes = GetFileAttributesW(item.path().c_str());
+            if (item_attributes == INVALID_FILE_ATTRIBUTES) {
+                last_error_ = win32_error("GetFileAttributesW(managed opening allocation record)");
+                return {ManagedOpeningAllocationScanStatus::io_error, {}, {}};
+            }
+            if ((item_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                last_error_ = "managed opening allocation record is a reparse point";
+                return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+            }
             std::optional<ManagedOpeningAllocationEntry> entry;
             std::string error;
-            if (read_entry(item.path(), entry, error) != ReadStatus::valid || !entry ||
-                entry->account != account) {
+            const auto read_status = read_entry(item.path(), entry, error);
+            if (read_status != ReadStatus::valid || !entry || entry->account != account) {
                 last_error_ = error.empty() ? "managed opening allocation record is invalid"
                                             : error;
+                return {read_status == ReadStatus::io_error
+                            ? ManagedOpeningAllocationScanStatus::io_error
+                            : ManagedOpeningAllocationScanStatus::invalid_record,
+                        {}, {}};
+            }
+            const auto expected_path = record_path(
+                directory_, entry->key, allocation ? "alloc-" : "prep-");
+            if (expected_path.filename() != item.path().filename()) {
+                last_error_ = "managed opening allocation record filename is not canonical";
                 return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
             }
             if (allocation) {
+                if (!allocation_identities.insert(allocation_key_bytes(entry->key)).second) {
+                    last_error_ = "duplicate managed opening allocation identity";
+                    return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+                }
                 const auto validation = validate_entry_sources(
                     *entry, nullptr, journal_store, fact_store, error);
                 if (validation != SourceValidation::valid) {
@@ -892,6 +963,20 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
                 }
                 records.push_back(std::move(*entry));
             } else {
+                if (!preparation_identities.insert(allocation_key_bytes(entry->key)).second) {
+                    last_error_ = "duplicate managed opening preparation identity";
+                    return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+                }
+                const auto validation = validate_entry_sources(
+                    *entry, nullptr, journal_store, fact_store, error);
+                if (validation != SourceValidation::valid) {
+                    last_error_ = error.empty() ? "managed opening preparation source is invalid"
+                                                : error;
+                    return {validation == SourceValidation::io_error
+                                ? ManagedOpeningAllocationScanStatus::io_error
+                                : ManagedOpeningAllocationScanStatus::invalid_record,
+                            {}, {}};
+                }
                 preparations.push_back({std::move(*entry)});
             }
         }

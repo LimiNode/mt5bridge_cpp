@@ -235,13 +235,17 @@ public:
     virtual ManagedOpeningAllocationPreparationLoadResult load_preparation(
         const ManagedOpeningAllocationKey &key) const = 0;
 
-    /// \brief Publishes or replays an allocation after revalidating its manifest.
+    /// \brief Publishes or replays an allocation at the authoritative B3B boundary.
+    /// \note Implementations must invoke the supplied verifier while the
+    ///       account fence is held; the caller proof is never sufficient by
+    ///       itself for durable allocation publication.
     virtual ManagedOpeningAllocationCommitStatus publish(
         const ManagedOpeningAllocationPreparation &preparation,
-        const VerifiedManagedOpeningSourceFact &proof,
         const DurableJournalStore &journal_store,
         const DurableManagedOpeningFactStore &fact_store,
-        const SingleWriterLease &lease) = 0;
+        const SingleWriterLease &lease,
+        const ManagedOpeningSourceVerifier &verifier,
+        const ManagedOpeningProvenanceRequest &request) = 0;
 
     /// \brief Loads one immutable allocation by exact frontier identity.
     virtual ManagedOpeningAllocationLoadResult load(
@@ -338,10 +342,11 @@ public:
         const ManagedOpeningAllocationKey &key) const override;
     ManagedOpeningAllocationCommitStatus publish(
         const ManagedOpeningAllocationPreparation &preparation,
-        const VerifiedManagedOpeningSourceFact &proof,
         const DurableJournalStore &journal_store,
         const DurableManagedOpeningFactStore &fact_store,
-        const SingleWriterLease &lease) override;
+        const SingleWriterLease &lease,
+        const ManagedOpeningSourceVerifier &verifier,
+        const ManagedOpeningProvenanceRequest &request) override;
     ManagedOpeningAllocationLoadResult load(
         const ManagedOpeningAllocationKey &key) const override;
     ManagedOpeningAllocationScanResult scan(

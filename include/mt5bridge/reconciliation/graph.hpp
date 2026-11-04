@@ -26,14 +26,42 @@ namespace mt5bridge {
 
 namespace detail {
 
+/// \brief Returns the process-wide observation graph identity allocator.
+/// \return Atomic counter shared by normal and restored graph construction.
+inline std::atomic<std::uint64_t> &observation_graph_instance_counter() {
+    static std::atomic<std::uint64_t> next_id{1};
+    return next_id;
+}
+
 /// \brief Allocates a process-local identity for one observation graph.
 /// \return Non-zero identity unique within the current process.
 inline std::uint64_t allocate_observation_graph_instance_id() {
-    static std::atomic<std::uint64_t> next_id{1};
-    const std::uint64_t id = next_id.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t id =
+        observation_graph_instance_counter().fetch_add(1, std::memory_order_relaxed);
     if (id == 0)
         throw std::overflow_error("observation graph instance id exhausted");
     return id;
+}
+
+/// \brief Reserves a durable graph identity for a restored causal epoch.
+/// \param requested Previously persisted observation graph identity.
+/// \return The requested identity after advancing the process allocator.
+/// \warning Zero and the maximum identity cannot be restored because they
+///          cannot participate in a non-wrapping allocation sequence.
+inline std::uint64_t reserve_observation_graph_instance_id(std::uint64_t requested) {
+    if (requested == 0)
+        throw std::invalid_argument("observation graph instance id is zero");
+    if (requested == (std::numeric_limits<std::uint64_t>::max)())
+        throw std::overflow_error("observation graph instance id exhausted");
+    const auto required_next = requested + 1;
+    auto &counter = observation_graph_instance_counter();
+    auto observed = counter.load(std::memory_order_relaxed);
+    while (observed < required_next &&
+           !counter.compare_exchange_weak(observed, required_next,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+    }
+    return requested;
 }
 
 } // namespace detail
@@ -192,13 +220,24 @@ public:
           account_(account.valid() ? std::move(account) : AccountKey{}),
           bound_(account_.valid()) {}
 
+    /// \brief Restores a graph in the durable causal epoch of one journal.
+    /// \param account Immutable account identity to enforce.
+    /// \param restored_instance_id Persisted graph identity from the journal
+    ///        reconciliation descriptor.
+    /// \note The process allocator is advanced beyond the restored identity so
+    ///       subsequently-created graphs cannot collide with it.
+    ObservationGraph(AccountKey account, std::uint64_t restored_instance_id)
+        : instance_id_(detail::reserve_observation_graph_instance_id(restored_instance_id)),
+          account_(account.valid() ? std::move(account) : AccountKey{}),
+          bound_(account_.valid()) {}
+
     ObservationGraph(const ObservationGraph &) = delete;
     ObservationGraph &operator=(const ObservationGraph &) = delete;
     ObservationGraph(ObservationGraph &&) = delete;
     ObservationGraph &operator=(ObservationGraph &&) = delete;
 
-    /// \brief Returns this graph's process-local provenance identity.
-    /// \return Non-zero identity that is not reusable after process restart.
+    /// \brief Returns this graph's causal provenance identity.
+    /// \return Non-zero identity, durable when this graph was restored.
     std::uint64_t instance_id() const { return instance_id_; }
 
     /// \brief Returns whether the graph has an account scope.

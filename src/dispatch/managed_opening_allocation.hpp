@@ -156,6 +156,7 @@ enum class ManagedOpeningAllocationCommitStatus : std::uint8_t {
     invalid_source = 5,
     lease_not_held = 6,
     io_error = 7,
+    superseded = 8,
 };
 
 /// \enum ManagedOpeningAllocationLoadStatus
@@ -270,6 +271,7 @@ enum class ManagedOpeningAllocationPublicationStatus : std::uint8_t {
     conflict = 7,
     lease_not_held = 8,
     io_error = 9,
+    superseded = 10,
 };
 
 /// \struct ManagedOpeningAllocationPublicationResult

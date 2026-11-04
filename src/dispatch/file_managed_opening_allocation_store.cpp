@@ -229,6 +229,39 @@ ReadStatus read_entry(const std::filesystem::path &path,
 
 enum class SourceValidation { valid, missing_source, invalid_source, io_error };
 
+enum class ProofRelation { exact, extended, contradiction };
+
+/// \brief Classifies a fresh B3B proof against one immutable historical entry.
+/// \param entry Previously committed or prepared frontier.
+/// \param proof Fresh verifier result for the same OPEN operation.
+/// \return Whether the proof exactly replays, safely extends, or contradicts
+///         the historical ticket set and immutable source identity.
+ProofRelation classify_proof_relation(
+    const ManagedOpeningAllocationEntry &entry,
+    const VerifiedManagedOpeningSourceFact &proof) {
+    if (!proof.valid() || proof.operation_key() != entry.key.operation_key ||
+        proof.operation_revision() != entry.key.operation_revision ||
+        proof.position_identifier() != entry.position_identifier)
+        return ProofRelation::contradiction;
+
+    for (const auto ticket : entry.fact_references)
+        if (!std::binary_search(proof.deal_tickets().begin(), proof.deal_tickets().end(),
+                                ticket.deal_ticket))
+            return ProofRelation::contradiction;
+
+    const bool exact_ticket_set =
+        proof.deal_tickets().size() == entry.fact_references.size();
+    if (exact_ticket_set && proof.managed_logical_units() ==
+                                entry.cumulative_managed_logical_units &&
+        proof.evidence_digest() == entry.evidence_digest)
+        return ProofRelation::exact;
+
+    if (!exact_ticket_set &&
+        proof.managed_logical_units() > entry.cumulative_managed_logical_units)
+        return ProofRelation::extended;
+    return ProofRelation::contradiction;
+}
+
 ManagedOpeningAllocationCommitStatus map_validation_status(SourceValidation status) {
     if (status == SourceValidation::missing_source)
         return ManagedOpeningAllocationCommitStatus::missing_source;
@@ -413,6 +446,19 @@ bool write_entry_file(const std::filesystem::path &target,
 #endif
 }
 
+bool remove_preparation_file(const std::filesystem::path &target, std::string &error) {
+#if defined(_WIN32)
+    if (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND)
+        return true;
+    error = win32_error("DeleteFileW(managed opening preparation)");
+    return false;
+#else
+    (void)target;
+    error = "WindowsFileManagedOpeningAllocationStore requires Windows";
+    return false;
+#endif
+}
+
 ManagedOpeningAllocationPublicationStatus map_verifier_status(
     ManagedOpeningSourceVerificationStatus status) {
     switch (status) {
@@ -504,6 +550,8 @@ ManagedOpeningAllocationPublicationResult map_commit_result(
         return {ManagedOpeningAllocationPublicationStatus::lease_not_held, std::nullopt};
     case ManagedOpeningAllocationCommitStatus::io_error:
         return {ManagedOpeningAllocationPublicationStatus::io_error, std::nullopt};
+    case ManagedOpeningAllocationCommitStatus::superseded:
+        return {ManagedOpeningAllocationPublicationStatus::superseded, std::nullopt};
     case ManagedOpeningAllocationCommitStatus::missing_source:
     case ManagedOpeningAllocationCommitStatus::invalid_source:
     case ManagedOpeningAllocationCommitStatus::invalid_record:
@@ -567,41 +615,17 @@ ManagedOpeningAllocationPublicationResult ManagedOpeningAllocationPublisher::pub
         preparation = {ManagedOpeningAllocationLoadStatus::found,
                        ManagedOpeningAllocationPreparation{*committed.record}};
     }
-    const auto token = lease_.held_fencing_token(request.operation_key.account);
-    if (!token)
-        return {ManagedOpeningAllocationPublicationStatus::lease_not_held, std::nullopt};
-    ManagedOpeningAllocationPublicationResult result;
-    const bool fenced = lease_.with_fencing_capability(
-        request.operation_key.account, *token, [&] {
-            auto current = journal_store_.load(request.operation_key);
-            if (current.status != StoreLoadStatus::found || !current.record) {
-                result.status = current.status == StoreLoadStatus::io_error
-                                    ? ManagedOpeningAllocationPublicationStatus::io_error
-                                    : ManagedOpeningAllocationPublicationStatus::unavailable;
-                return;
-            }
-            auto current_request = request;
-            current_request.operation_revision = current.record->revision;
-            const auto verified = verifier_.verify(current_request);
-            if (!verified.found()) {
-                result.status = map_verifier_status(verified.status);
-                return;
-            }
-            const auto facts = fact_store_.scan(request.operation_key.account);
-            const auto entry = build_entry(*verified.proof, facts);
-            if (!entry || !(*entry == preparation.record->entry)) {
-                result.status = ManagedOpeningAllocationPublicationStatus::conflict;
-                return;
-            }
-            result = map_commit_result(
-                allocation_store_.publish(*preparation.record, journal_store_,
-                                           fact_store_, lease_, verifier_, current_request),
-                entry, false);
-        });
-    return fenced ? result
-                  : ManagedOpeningAllocationPublicationResult{
-                        ManagedOpeningAllocationPublicationStatus::lease_not_held,
-                        std::nullopt};
+    const auto current = journal_store_.load(request.operation_key);
+    if (current.status != StoreLoadStatus::found || !current.record)
+        return {current.status == StoreLoadStatus::io_error
+                    ? ManagedOpeningAllocationPublicationStatus::io_error
+                    : ManagedOpeningAllocationPublicationStatus::unavailable,
+                std::nullopt};
+    auto current_request = request;
+    current_request.operation_revision = current.record->revision;
+    const auto status = allocation_store_.publish(
+        *preparation.record, journal_store_, fact_store_, lease_, verifier_, current_request);
+    return map_commit_result(status, preparation.record->entry, false);
 }
 
 WindowsFileManagedOpeningAllocationStore::WindowsFileManagedOpeningAllocationStore(
@@ -750,10 +774,10 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 last_error_ = lock.error();
                 return;
             }
-            std::optional<ManagedOpeningAllocationEntry> durable_entry;
+            std::optional<ManagedOpeningAllocationEntry> durable_preparation;
             std::string durable_error;
             const auto durable_status = read_entry(
-                record_path(directory_, preparation.entry.key, "prep-"), durable_entry,
+                record_path(directory_, preparation.entry.key, "prep-"), durable_preparation,
                 durable_error);
             if (durable_status == ReadStatus::malformed ||
                 durable_status == ReadStatus::io_error) {
@@ -763,8 +787,8 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 last_error_ = durable_error;
                 return;
             }
-            if (durable_status == ReadStatus::valid && durable_entry &&
-                !(*durable_entry == preparation.entry)) {
+            if (durable_status == ReadStatus::valid && durable_preparation &&
+                !(*durable_preparation == preparation.entry)) {
                 result = ManagedOpeningAllocationCommitStatus::conflict;
                 last_error_ = "managed opening allocation preparation conflicts";
                 return;
@@ -781,19 +805,36 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 last_error_ = "managed opening allocation source verification failed";
                 return;
             }
-            const auto validation = validate_entry_sources(
-                preparation.entry, &*fresh.proof, journal_store, fact_store, last_error_);
-            if (validation != SourceValidation::valid) {
-                result = map_validation_status(validation);
-                return;
-            }
             const auto target = record_path(directory_, preparation.entry.key, "alloc-");
             std::optional<ManagedOpeningAllocationEntry> existing;
             const auto read_status = read_entry(target, existing, last_error_);
             if (read_status == ReadStatus::valid) {
-                result = *existing == preparation.entry
-                             ? ManagedOpeningAllocationCommitStatus::already_committed
-                             : ManagedOpeningAllocationCommitStatus::conflict;
+                if (!existing || !(*existing == preparation.entry)) {
+                    result = ManagedOpeningAllocationCommitStatus::conflict;
+                    return;
+                }
+                const auto historical_validation = validate_entry_sources(
+                    *existing, nullptr, journal_store, fact_store, last_error_);
+                if (historical_validation != SourceValidation::valid) {
+                    result = map_validation_status(historical_validation);
+                    return;
+                }
+                switch (classify_proof_relation(*existing, *fresh.proof)) {
+                case ProofRelation::exact:
+                case ProofRelation::extended:
+                    if (!remove_preparation_file(
+                            record_path(directory_, preparation.entry.key, "prep-"),
+                            last_error_)) {
+                        result = ManagedOpeningAllocationCommitStatus::io_error;
+                        return;
+                    }
+                    result = ManagedOpeningAllocationCommitStatus::already_committed;
+                    return;
+                case ProofRelation::contradiction:
+                    result = ManagedOpeningAllocationCommitStatus::invalid_source;
+                    last_error_ = "managed opening allocation source contradicts history";
+                    return;
+                }
                 return;
             }
             if (read_status == ReadStatus::malformed) {
@@ -809,15 +850,36 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 last_error_ = "managed opening allocation preparation is missing";
                 return;
             }
+            switch (classify_proof_relation(preparation.entry, *fresh.proof)) {
+            case ProofRelation::exact:
+                break;
+            case ProofRelation::extended:
+                if (!remove_preparation_file(
+                        record_path(directory_, preparation.entry.key, "prep-"),
+                        last_error_)) {
+                    result = ManagedOpeningAllocationCommitStatus::io_error;
+                    return;
+                }
+                result = ManagedOpeningAllocationCommitStatus::superseded;
+                return;
+            case ProofRelation::contradiction:
+                result = ManagedOpeningAllocationCommitStatus::invalid_source;
+                last_error_ = "managed opening allocation source contradicts preparation";
+                return;
+            }
+            const auto validation = validate_entry_sources(
+                preparation.entry, &*fresh.proof, journal_store, fact_store, last_error_);
+            if (validation != SourceValidation::valid) {
+                result = map_validation_status(validation);
+                return;
+            }
             result = write_entry_file(target, preparation.entry, last_error_)
                          ? ManagedOpeningAllocationCommitStatus::committed
                          : ManagedOpeningAllocationCommitStatus::io_error;
-            if (result == ManagedOpeningAllocationCommitStatus::committed ||
-                result == ManagedOpeningAllocationCommitStatus::already_committed)
-                if (!DeleteFileW(record_path(directory_, preparation.entry.key, "prep-").c_str()) &&
-                    GetLastError() != ERROR_FILE_NOT_FOUND) {
-                    last_error_ = win32_error("DeleteFileW(managed opening preparation)");
-                }
+            if (result == ManagedOpeningAllocationCommitStatus::committed &&
+                !remove_preparation_file(
+                    record_path(directory_, preparation.entry.key, "prep-"), last_error_))
+                result = ManagedOpeningAllocationCommitStatus::io_error;
         });
     return fenced ? result : ManagedOpeningAllocationCommitStatus::lease_not_held;
 #else

@@ -600,9 +600,81 @@ void preserves_historical_frontiers_when_a_partial_fill_arrives() {
                     ManagedOpeningAllocationCommitStatus::committed,
                 "second opening frontier was not published");
 
+        require(store.publish(ManagedOpeningAllocationPreparation{entry_a}, journal, facts,
+                              lease, verifier,
+                              {operation(), OperationKind::open, 3, 88001}) ==
+                    ManagedOpeningAllocationCommitStatus::already_committed,
+                "historical opening frontier direct replay was not idempotent");
+        ManagedOpeningAllocationPublisher publisher(
+            verifier, facts, store, journal, lease);
+        const auto replayed = publisher.publish(
+            entry_a.key, {operation(), OperationKind::open, 3, 88001});
+        require(replayed.status ==
+                    ManagedOpeningAllocationPublicationStatus::already_published,
+                "historical opening frontier publisher replay was not idempotent");
+
+        ObservationBatch contradiction = baseline_batch;
+        contradiction.history_deals = {deal(5002, 0.03)};
+        require(graph.apply(contradiction).accepted(),
+                "historical source contradiction was not accepted by the graph");
+        require(store.publish(ManagedOpeningAllocationPreparation{entry_a}, journal, facts,
+                              lease, verifier,
+                              {operation(), OperationKind::open, 3, 88001}) ==
+                    ManagedOpeningAllocationCommitStatus::invalid_source,
+                "historical source rewrite was accepted during replay");
+
         const auto scan = store.scan(account(), journal, facts);
         require(scan.complete() && scan.records.size() == 2,
                 "historical opening frontier was rewritten or rejected");
+    } catch (...) {
+        std::filesystem::remove_all(directory);
+        throw;
+    }
+    std::filesystem::remove_all(directory);
+}
+
+void discards_superseded_pending_frontiers() {
+    ObservationGraph graph(account());
+    ObservationBatch baseline_batch;
+    baseline_batch.account = account();
+    baseline_batch.observed_domains = ObservationDomain::history_deals;
+    baseline_batch.history_deals_window = source_window();
+    require(graph.apply(baseline_batch).accepted(), "superseded baseline was not accepted");
+    const auto baseline = capture_reconciliation_baseline(graph);
+    ObservationBatch first_fill = baseline_batch;
+    first_fill.history_deals = {deal(5001, 0.05)};
+    require(graph.apply(first_fill).accepted(), "superseded first fill was not accepted");
+    MemoryOpeningFactStore facts;
+    facts.facts.push_back(fact_for(graph, 5001, 0.05));
+    mt5bridge_test_support::MemoryJournalStore journal;
+    journal.records.emplace(operation(), journal_record(baseline, 8));
+    TestLease lease;
+    ManagedOpeningSourceVerifier verifier(
+        journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+    const auto proof_a = verifier.verify({operation(), OperationKind::open, 3, 88001});
+    require(proof_a.found(), "superseded first frontier was not verified");
+    const auto entry_a = make_entry(*proof_a.proof, facts.facts);
+    const auto directory = test_directory();
+    std::filesystem::remove_all(directory);
+    try {
+        WindowsFileManagedOpeningAllocationStore store(directory);
+        require(store.prepare(entry_a, *proof_a.proof, journal, facts, lease) ==
+                    ManagedOpeningAllocationCommitStatus::committed,
+                "superseded preparation was not committed");
+        const auto preparation = store.load_preparation(entry_a.key);
+        require(preparation.found(), "superseded preparation was not durable");
+
+        ObservationBatch second_fill = baseline_batch;
+        second_fill.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
+        require(graph.apply(second_fill).accepted(), "superseded second fill was not accepted");
+        facts.facts.push_back(fact_for(graph, 5002, 0.03));
+        require(store.publish(*preparation.record, journal, facts, lease, verifier,
+                              {operation(), OperationKind::open, 3, 88001}) ==
+                    ManagedOpeningAllocationCommitStatus::superseded,
+                "stale pending frontier was published instead of superseded");
+        const auto scan = store.scan(account(), journal, facts);
+        require(scan.complete() && scan.records.empty() && scan.preparations.empty(),
+                "superseded preparation was not removed durably");
     } catch (...) {
         std::filesystem::remove_all(directory);
         throw;
@@ -619,5 +691,6 @@ int main() {
     rejects_noncanonical_reserved_paths_and_keeps_pending_separate();
     recovers_through_real_filesystem_sources();
     preserves_historical_frontiers_when_a_partial_fill_arrives();
+    discards_superseded_pending_frontiers();
     return 0;
 }

@@ -28,7 +28,13 @@ conflict. A later partial fill creates a new frontier record and never rewrites
 the previous one. Recovery of an older frontier remains valid when the fact
 store also contains later compatible facts: omitted facts must come from a
 strictly newer admission revision, otherwise the historical snapshot is
-incomplete and fails closed.
+incomplete and fails closed. A fresh proof that contains the complete historical
+ticket set and the same immutable quantities/digest is an `exact` replay. A
+proof that preserves that ticket set and adds only later compatible fills is an
+`extended` observation: an existing historical allocation returns
+`already_committed`, while an uncommitted stale preparation is removed and
+returns `superseded`. Any missing historical ticket, changed immutable source
+identity, or rewritten quantity is a contradiction and fails closed.
 
 ## Source boundary
 
@@ -47,6 +53,9 @@ The scan path is fail-closed for malformed records, missing facts, foreign
 operation identities, invalid journal sources, reparse points, and I/O errors.
 An absent account directory is an empty complete scan. A pending preparation is
 retained across restart and is finalized only after a fresh B3B verification.
+If a later compatible frontier is already visible, the older pending
+preparation is explicitly superseded under the same fence; a failure to remove
+it is an I/O error rather than silent success.
 
 The durable `ManagedOpeningAllocationEntry` remains a storage record, not a
 `VerifiedManagedOpeningAllocation`. No trusted producer exists in B3C. A future
@@ -61,13 +70,17 @@ The durable order is:
 
 ```text
 verify sources -> write and flush prep-* -> verify again -> write and flush alloc-*
-                                      \-> remove prep-* (best effort)
+                                       \-> remove prep-* (durable decision)
 ```
 
 A crash before final publication leaves `prep-*` and permits retry. A crash
-after `alloc-*` but before removing `prep-*` is harmless: replay compares the
-complete manifest and returns `already_committed`. A restart after successful
-publication can replay from `alloc-*` even when the preparation file is gone.
+after `alloc-*` but before removing `prep-*` is harmless: replay validates the
+immutable allocation, re-runs the fenced verifier, and returns
+`already_committed`; removal is retried and an actual deletion failure is
+reported. A restart after successful publication can replay from `alloc-*` even
+when the preparation file is gone. A stale `prep-*` observed after a compatible
+later fill is removed as `superseded` and is never published as a smaller
+frontier.
 
 The account lease remains held across each publication callback. Loss of the
 lease returns `lease_not_held`; no stale writer is allowed to publish.
@@ -79,13 +92,20 @@ checksum failures, duplicate or unsorted deal references, and quantity
 overflow are rejected. No legacy allocation record is migrated automatically.
 The CLOSE allocation ledger and all production exposure paths remain unchanged.
 
+Observation graph provenance is a durable causal epoch. Recovery restores the
+graph instance ID from the journal reconciliation descriptor and advances the
+process allocator beyond it. The owner loop must replay the baseline and prior
+observations in order before admitting a new fill; graph IDs and local
+revisions are never mixed across unrelated epochs.
+
 ## Regression boundary
 
 The focused Windows test covers prepare/publish, exact replay, restart
 recovery, missing-source rejection, unknown-account empty scans, stale lease
 behavior, stale-proof rejection at the low-level store boundary, canonical
 reserved-path and pending-manifest handling, a real journal/fact/allocation
-filesystem restart, and preservation of an earlier frontier after a second
-partial fill.
+filesystem restart, production-reachable journal admission and one-shot result
+publication, restored graph causal-epoch replay, explicit superseded pending
+cleanup, and preservation of an earlier frontier after a second partial fill.
 Additional B3C tests must retain the same fail-closed source and fencing
 boundary when later owner-loop slices are implemented.

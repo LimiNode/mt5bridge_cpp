@@ -10,13 +10,17 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
+#include <random>
 #include <string>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,11 +30,51 @@ namespace mt5bridge {
 
 namespace detail {
 
+/// \brief Mixes a process nonce with one local graph sequence.
+/// \param value Input value.
+/// \return Avalanche-mixed non-zero candidate.
+inline std::uint64_t mix_observation_graph_identity(std::uint64_t value) {
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    value ^= value >> 31;
+    return value;
+}
+
+/// \brief Allocates one unpredictable causal epoch for this process.
+/// \return Non-zero process nonce shared by this process's graph instances.
+inline std::uint64_t observation_graph_process_nonce() {
+    static const std::uint64_t nonce = [] {
+        const auto now = static_cast<std::uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        const auto address = reinterpret_cast<std::uintptr_t>(&now);
+        const auto thread = static_cast<std::uint64_t>(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        std::uint64_t value = now ^ static_cast<std::uint64_t>(address) ^ thread;
+        try {
+            std::random_device random;
+            value ^= static_cast<std::uint64_t>(random()) << 32;
+            value ^= static_cast<std::uint64_t>(random());
+        } catch (...) {
+            // The clock/address/thread mix remains process-specific when a
+            // platform does not provide a random device.
+        }
+        value = mix_observation_graph_identity(value);
+        return value == 0 ? UINT64_C(0x9e3779b97f4a7c15) : value;
+    }();
+    return nonce;
+}
+
 /// \brief Allocates a process-local identity for one observation graph.
-/// \return Non-zero identity unique within the current process.
+/// \return Non-zero identity carrying a process-specific causal epoch.
 inline std::uint64_t allocate_observation_graph_instance_id() {
     static std::atomic<std::uint64_t> next_id{1};
-    const std::uint64_t id = next_id.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t sequence = next_id.fetch_add(1, std::memory_order_relaxed);
+    if (sequence == 0)
+        throw std::overflow_error("observation graph instance id exhausted");
+    const std::uint64_t id = mix_observation_graph_identity(
+        observation_graph_process_nonce() ^ sequence);
     if (id == 0)
         throw std::overflow_error("observation graph instance id exhausted");
     return id;

@@ -100,8 +100,9 @@ checksum failures, duplicate or unsorted deal references, and quantity
 overflow are rejected. No legacy allocation record is migrated automatically.
 The CLOSE allocation ledger and all production exposure paths remain unchanged.
 
-Observation graph identities remain process-local and are never restored or
-caller-selected. After restart, B3B uses a bounded cross-instance contract:
+Observation graph identities carry a process-start nonce and remain process-local;
+they are never restored or caller-selected. After restart, B3B uses a bounded
+cross-instance contract:
 the immutable journal result-source anchor and original B3A receipts preserve
 the old frontier, while a new receipt is accepted only when the current graph
 proves that ticket's first complete observation and the current full history
@@ -115,8 +116,9 @@ recovery, missing-source rejection, unknown-account empty scans, stale lease
 behavior, stale-proof rejection at the low-level store boundary, canonical
 reserved-path and pending-manifest handling, a real journal/fact/allocation
 filesystem restart, production-reachable journal admission and one-shot result
-publication, bounded cross-instance history attribution, explicit superseded
-pending cleanup, and preservation of an earlier frontier after a second partial
-fill.
+publication, bounded two-process cross-instance history attribution, canonical
+successor-key rejection, prepare-after-publish idempotence, explicit
+superseded pending cleanup, and preservation of an earlier frontier after a
+second partial fill.
 Additional B3C tests must retain the same fail-closed source and fencing
 boundary when later owner-loop slices are implemented.

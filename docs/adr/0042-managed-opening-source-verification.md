@@ -108,7 +108,9 @@ The verifier accepts a fresh graph instance after restart only when the durable
 descriptor/result-source anchor and original B3A receipts identify the old
 frontier, the current graph independently observes one complete history window,
 and every newly admitted receipt has first evidence plus exact coverage in that
-current graph. The graph instance identifier is provenance, never a
+current graph. Each graph identifier carries a process-start nonce as well as a
+local sequence, so independent processes cannot restart the counter into the
+same causal epoch in ordinary operation. The identifier is provenance, never a
 cross-restart ordering relation; it is never restored or selected by a caller.
 A changed history payload, an old receipt missing from current history, a newer
 complete covering sample that omits a previously admitted deal, a receipt from
@@ -135,5 +137,6 @@ source identity across lifecycle changes and later partial fills, rejection of
 fabricated future tickets, and a
 production-shaped OperationJournal → DispatchAdmissionBarrier →
 OneShotDispatchBackend → verifier path, cross-instance current-history
-attribution, and rejection of incomplete post-restart history. B3C remains
-responsible for durable opening-allocation publication and its crash matrix.
+attribution, a two-process durable recovery regression, and rejection of
+incomplete post-restart history. B3C remains responsible for durable
+opening-allocation publication and its crash matrix.

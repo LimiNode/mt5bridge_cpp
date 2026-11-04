@@ -646,14 +646,19 @@ ManagedOpeningAllocationCommitStatus ensure_durable_successor(
         bool conflict = false;
         for (const auto *prefix : {"alloc-", "prep-"}) {
             std::optional<ManagedOpeningAllocationEntry> existing;
-            const auto status = read_entry(
-                record_path(directory, successor->key, prefix), existing, error);
+            const auto target = record_path(directory, successor->key, prefix);
+            const auto status = read_entry(target, existing, error);
             if (status == ReadStatus::io_error)
                 return ManagedOpeningAllocationCommitStatus::io_error;
             if (status == ReadStatus::malformed)
                 return ManagedOpeningAllocationCommitStatus::invalid_record;
             if (status == ReadStatus::valid) {
-                if (!existing || !same_entry_payload(*successor, *existing)) {
+                if (!existing || !(existing->key == successor->key) ||
+                    record_path(directory, existing->key, prefix) != target) {
+                    error = "managed opening allocation successor has a non-canonical key";
+                    return ManagedOpeningAllocationCommitStatus::invalid_record;
+                }
+                if (!same_entry_payload(*successor, *existing)) {
                     conflict = true;
                     break;
                 }
@@ -849,21 +854,42 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
             result = map_validation_status(validation);
             return;
         }
+        const auto allocation_target = record_path(directory_, entry.key, "alloc-");
+        std::optional<ManagedOpeningAllocationEntry> committed;
+        const auto allocation_status = read_entry(
+            allocation_target, committed, last_error_);
+        if (allocation_status == ReadStatus::malformed) {
+            result = ManagedOpeningAllocationCommitStatus::invalid_record;
+            return;
+        }
+        if (allocation_status == ReadStatus::io_error) {
+            result = ManagedOpeningAllocationCommitStatus::io_error;
+            return;
+        }
         const auto target = record_path(directory_, entry.key, "prep-");
         std::optional<ManagedOpeningAllocationEntry> existing;
         const auto read_status = read_entry(target, existing, last_error_);
-        if (read_status == ReadStatus::valid) {
-            result = *existing == entry
-                         ? ManagedOpeningAllocationCommitStatus::already_committed
-                         : ManagedOpeningAllocationCommitStatus::conflict;
-            return;
-        }
         if (read_status == ReadStatus::malformed) {
             result = ManagedOpeningAllocationCommitStatus::invalid_record;
             return;
         }
         if (read_status == ReadStatus::io_error) {
             result = ManagedOpeningAllocationCommitStatus::io_error;
+            return;
+        }
+        if (allocation_status == ReadStatus::valid) {
+            if (!committed || !(committed->key == entry.key) || !(*committed == entry) ||
+                (read_status == ReadStatus::valid && (!existing || !(*existing == entry)))) {
+                result = ManagedOpeningAllocationCommitStatus::conflict;
+                return;
+            }
+            result = ManagedOpeningAllocationCommitStatus::already_committed;
+            return;
+        }
+        if (read_status == ReadStatus::valid) {
+            result = *existing == entry
+                         ? ManagedOpeningAllocationCommitStatus::already_committed
+                         : ManagedOpeningAllocationCommitStatus::conflict;
             return;
         }
         result = write_entry_file(target, entry, last_error_)

@@ -256,6 +256,10 @@ void durable_prepare_publish_restart_and_replay() {
                                   {operation(), OperationKind::open, 3, 88001}) ==
                         ManagedOpeningAllocationCommitStatus::committed,
                     "opening allocation was not published");
+            require(store.prepare(entry, *proof_result.proof, journal, facts, lease) ==
+                        ManagedOpeningAllocationCommitStatus::already_committed &&
+                        !store.load_preparation(entry.key).found(),
+                    "preparing an already-published allocation created a pending manifest");
             require(store.publish(*preparation.record, journal, facts, lease, verifier,
                                   {operation(), OperationKind::open, 3, 88001}) ==
                         ManagedOpeningAllocationCommitStatus::already_committed,
@@ -311,6 +315,13 @@ void durable_prepare_publish_restart_and_replay() {
                 prepared.record->key, {operation(), OperationKind::open, 3, 88001});
             require(published.status == ManagedOpeningAllocationPublicationStatus::published,
                     "source-derived publisher did not publish an allocation");
+            const auto prepared_again = publisher.prepare(
+                {operation(), OperationKind::open, 3, 88001});
+            require(prepared_again.status ==
+                            ManagedOpeningAllocationPublicationStatus::already_prepared &&
+                        prepared_again.record &&
+                        !store.load_preparation(prepared.record->key).found(),
+                    "publisher re-prepared an already-published allocation");
             const auto replayed = publisher.publish(
                 prepared.record->key, {operation(), OperationKind::open, 3, 88001});
             require(replayed.status ==
@@ -642,11 +653,12 @@ void preserves_historical_frontiers_when_a_partial_fill_arrives() {
 void preserves_superseded_publication_intent() {
     enum class CrashPoint { before_successor, pending_successor, committed_successor,
                             successor_write_error, predecessor_cleanup_error,
-                            successor_cleanup_error };
+                            successor_cleanup_error, canonical_successor_mismatch };
     for (const auto point : {CrashPoint::before_successor, CrashPoint::pending_successor,
                              CrashPoint::committed_successor, CrashPoint::successor_write_error,
                              CrashPoint::predecessor_cleanup_error,
-                             CrashPoint::successor_cleanup_error}) {
+                             CrashPoint::successor_cleanup_error,
+                             CrashPoint::canonical_successor_mismatch}) {
         const auto root = test_directory();
         try {
             {
@@ -689,7 +701,8 @@ void preserves_superseded_publication_intent() {
                 require(facts.commit(fact_for(graph, 5002, 0.03, 1), lease) ==
                             ManagedOpeningFactCommitStatus::committed,
                         "second-fill fact was not durable");
-                require(verifier.verify(request).found(), "expanded source proof failed");
+                const auto expanded_proof = verifier.verify(request);
+                require(expanded_proof.found(), "expanded source proof failed");
                 const auto still_pending = store.scan(account(), journal, facts);
                 require(still_pending.complete() && still_pending.records.empty() &&
                             still_pending.preparations.size() == 1,
@@ -721,6 +734,25 @@ void preserves_superseded_publication_intent() {
                         require(publisher.publish(b->key, request).status ==
                                     ManagedOpeningAllocationPublicationStatus::published,
                                 "successor allocation was not committed");
+                    } else if (point == CrashPoint::canonical_successor_mismatch) {
+                        auto alias = *b;
+                        ++alias.key.frontier_revision;
+                        require(store.prepare(alias, *expanded_proof.proof, journal, facts, lease) ==
+                                    ManagedOpeningAllocationCommitStatus::committed,
+                                "canonical mismatch alias was not prepared");
+                        std::filesystem::path alias_path;
+                        for (const auto &item : std::filesystem::recursive_directory_iterator(
+                                 root / "allocations"))
+                            if (item.path().filename().wstring().rfind(L"prep-", 0) == 0 &&
+                                item.path() != path_a && item.path() != path_b)
+                                alias_path = item.path();
+                        require(!alias_path.empty(), "canonical mismatch alias path was not found");
+                        require(std::filesystem::copy_file(
+                                    alias_path, path_b,
+                                    std::filesystem::copy_options::overwrite_existing),
+                                "canonical mismatch fixture was not installed");
+                        require(std::filesystem::remove(alias_path),
+                                "canonical mismatch alias was not removed");
                     }
                 }
 
@@ -756,6 +788,11 @@ void preserves_superseded_publication_intent() {
                     const auto both = store.scan(account(), journal, facts);
                     require(both.complete() && both.preparations.size() == 2 && both.records.empty(),
                             "two pending frontiers were not recoverable");
+                } else if (point == CrashPoint::canonical_successor_mismatch) {
+                    const auto status = publisher.publish(a.record->key, request).status;
+                    require(status == ManagedOpeningAllocationPublicationStatus::invalid_evidence &&
+                                store.load_preparation(a.record->key).found(),
+                            "non-canonical successor was accepted");
                 } else {
                     const auto status = publisher.publish(a.record->key, request).status;
                     if (point == CrashPoint::successor_write_error) {
@@ -777,6 +814,10 @@ void preserves_superseded_publication_intent() {
                     }
                 }
             } // Drop all source objects as at a process interruption.
+            if (point == CrashPoint::canonical_successor_mismatch) {
+                std::filesystem::remove_all(root);
+                continue;
+            }
 
             WindowsFileJournalStore journal(root / "journal");
             WindowsFileManagedOpeningFactStore facts(root / "facts");

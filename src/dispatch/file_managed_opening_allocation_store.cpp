@@ -343,7 +343,11 @@ SourceValidation validate_entry_sources(
     }
     std::vector<ManagedOpeningDealFact> frontier_facts;
     frontier_facts.reserve(entry.fact_references.size());
-    std::uint64_t frontier_revision = 0;
+    // The key revision is a durable discriminator.  It may be advanced to
+    // avoid a collision after an observation-graph restart, so source
+    // completeness must use the actual source frontier instead.
+    std::uint64_t source_frontier_revision = 0;
+    std::set<std::uint64_t> source_graph_instances;
     for (std::size_t index = 0; index != entry.fact_references.size(); ++index) {
         const auto &reference = entry.fact_references[index];
         const auto fact_it = facts.find(reference.deal_ticket);
@@ -376,10 +380,11 @@ SourceValidation validate_entry_sources(
             error = "managed opening allocation fact does not match the entry";
             return SourceValidation::invalid_source;
         }
-        frontier_revision = (std::max)(frontier_revision, receipt.source_revision);
+        source_frontier_revision = (std::max)(source_frontier_revision, receipt.source_revision);
+        source_graph_instances.insert(receipt.graph_instance_id);
         frontier_facts.push_back(fact);
     }
-    if (frontier_revision != entry.key.frontier_revision) {
+    if (source_frontier_revision > entry.key.frontier_revision) {
         error = "managed opening allocation frontier revision mismatch";
         return SourceValidation::invalid_source;
     }
@@ -406,11 +411,15 @@ SourceValidation validate_entry_sources(
         const auto &fact = *fact_pair.second;
         if (referenced_tickets.find(fact.deal_ticket()) != referenced_tickets.end())
             continue;
-        // A later immutable frontier may add facts, but an omitted fact from
-        // the same or an earlier admitted revision would make this historical
-        // snapshot incomplete and is therefore rejected.
-        if (fact.admission_receipt().source_revision <= entry.key.frontier_revision ||
-            !frontier->accepts_identity(fact)) {
+        // A later immutable frontier may add facts. Within one graph epoch an
+        // omitted fact from the same or an earlier admitted revision makes
+        // this historical snapshot incomplete; cross-instance revisions are
+        // not ordered and are bounded by B3B current-history verification.
+        const auto &receipt = fact.admission_receipt();
+        if (!frontier->accepts_identity(fact) ||
+            (source_graph_instances.find(receipt.graph_instance_id) !=
+                 source_graph_instances.end() &&
+             receipt.source_revision <= source_frontier_revision)) {
             error = "managed opening allocation historical frontier is incomplete";
             return SourceValidation::invalid_source;
         }
@@ -531,6 +540,143 @@ std::optional<ManagedOpeningAllocationEntry> build_entry(
                          : std::nullopt;
 }
 
+bool same_entry_payload(const ManagedOpeningAllocationEntry &left,
+                        const ManagedOpeningAllocationEntry &right) {
+    if (left.account != right.account ||
+        left.key.operation_key != right.key.operation_key ||
+        left.key.operation_revision != right.key.operation_revision)
+        return false;
+    auto normalized_left = left;
+    auto normalized_right = right;
+    normalized_left.key.frontier_revision = 1;
+    normalized_right.key.frontier_revision = 1;
+    return normalized_left == normalized_right;
+}
+
+/// \brief Selects a durable frontier discriminator without changing source identity.
+/// \param candidate Fresh source-derived frontier candidate.
+/// \param existing Complete account scan under the allocation store fence.
+/// \param error Receives a diagnostic when no discriminator is available.
+/// \return Candidate with an idempotent or collision-free durable discriminator.
+std::optional<ManagedOpeningAllocationEntry> select_frontier_discriminator(
+    const ManagedOpeningAllocationEntry &candidate,
+    const ManagedOpeningAllocationScanResult &existing,
+    std::string &error) {
+    if (!existing.complete()) {
+        error = "managed opening allocation namespace could not be scanned";
+        return std::nullopt;
+    }
+    std::vector<const ManagedOpeningAllocationEntry *> entries;
+    entries.reserve(existing.records.size() + existing.preparations.size());
+    for (const auto &entry : existing.records)
+        entries.push_back(&entry);
+    for (const auto &preparation : existing.preparations)
+        entries.push_back(&preparation.entry);
+
+    const ManagedOpeningAllocationEntry *same_payload = nullptr;
+    for (const auto *entry : entries) {
+        if (same_entry_payload(candidate, *entry) &&
+            (!same_payload ||
+             entry->key.frontier_revision < same_payload->key.frontier_revision))
+            same_payload = entry;
+    }
+    if (same_payload) {
+        auto selected = candidate;
+        selected.key.frontier_revision = same_payload->key.frontier_revision;
+        return selected;
+    }
+
+    const auto occupied = [&](std::uint64_t frontier_revision) {
+        return std::any_of(entries.begin(), entries.end(), [&](const auto *entry) {
+            return entry->key.operation_key == candidate.key.operation_key &&
+                   entry->key.operation_revision == candidate.key.operation_revision &&
+                   entry->key.frontier_revision == frontier_revision;
+        });
+    };
+    if (!occupied(candidate.key.frontier_revision))
+        return candidate;
+
+    auto selected = candidate;
+    while (selected.key.frontier_revision != (std::numeric_limits<std::uint64_t>::max)()) {
+        ++selected.key.frontier_revision;
+        if (!occupied(selected.key.frontier_revision))
+            return selected;
+    }
+    error = "managed opening allocation frontier discriminator exhausted";
+    return std::nullopt;
+}
+
+/// \brief Preserves publication intent before retiring an extended preparation.
+/// \param directory Allocation namespace, already locked and account-fenced.
+/// \param predecessor Exact durable preparation whose sources must still agree.
+/// \param proof Fresh B3B proof for the cumulative successor.
+/// \param journal_store Durable journal authority.
+/// \param fact_store Durable B3A source facts.
+/// \param error Receives a fail-closed diagnostic.
+/// \return Committed only after the exact successor is durably represented.
+ManagedOpeningAllocationCommitStatus ensure_durable_successor(
+    const std::filesystem::path &directory,
+    const ManagedOpeningAllocationEntry &predecessor,
+    const VerifiedManagedOpeningSourceFact &proof,
+    const DurableJournalStore &journal_store,
+    const DurableManagedOpeningFactStore &fact_store,
+    std::string &error) {
+    const auto historical = validate_entry_sources(
+        predecessor, nullptr, journal_store, fact_store, error);
+    if (historical != SourceValidation::valid)
+        return map_validation_status(historical);
+    const auto facts = fact_store.scan(predecessor.account);
+    if (facts.status == ManagedOpeningFactScanStatus::io_error)
+        return ManagedOpeningAllocationCommitStatus::io_error;
+    auto successor = build_entry(proof, facts);
+    if (!successor || predecessor.key.frontier_revision ==
+                          (std::numeric_limits<std::uint64_t>::max)()) {
+        error = "managed opening allocation successor cannot be assigned a frontier";
+        return ManagedOpeningAllocationCommitStatus::invalid_source;
+    }
+    successor->key.frontier_revision = (std::max)(
+        successor->key.frontier_revision, predecessor.key.frontier_revision + 1);
+    for (;;) {
+        const auto validation = validate_entry_sources(
+            *successor, &proof, journal_store, fact_store, error);
+        if (validation != SourceValidation::valid)
+            return map_validation_status(validation);
+
+        bool durable = false;
+        bool conflict = false;
+        for (const auto *prefix : {"alloc-", "prep-"}) {
+            std::optional<ManagedOpeningAllocationEntry> existing;
+            const auto status = read_entry(
+                record_path(directory, successor->key, prefix), existing, error);
+            if (status == ReadStatus::io_error)
+                return ManagedOpeningAllocationCommitStatus::io_error;
+            if (status == ReadStatus::malformed)
+                return ManagedOpeningAllocationCommitStatus::invalid_record;
+            if (status == ReadStatus::valid) {
+                if (!existing || !same_entry_payload(*successor, *existing)) {
+                    conflict = true;
+                    break;
+                }
+                durable = true;
+            }
+        }
+        if (conflict) {
+            if (successor->key.frontier_revision ==
+                (std::numeric_limits<std::uint64_t>::max)())
+                break;
+            ++successor->key.frontier_revision;
+            continue;
+        }
+        if (!durable && !write_entry_file(
+                              record_path(directory, successor->key, "prep-"), *successor,
+                              error))
+            return ManagedOpeningAllocationCommitStatus::io_error;
+        return ManagedOpeningAllocationCommitStatus::committed;
+    }
+    error = "managed opening allocation successor discriminator exhausted";
+    return ManagedOpeningAllocationCommitStatus::invalid_source;
+}
+
 ManagedOpeningAllocationPublicationResult map_commit_result(
     ManagedOpeningAllocationCommitStatus status,
     const std::optional<ManagedOpeningAllocationEntry> &entry,
@@ -583,10 +729,25 @@ ManagedOpeningAllocationPublicationResult ManagedOpeningAllocationPublisher::pre
                 result.status = ManagedOpeningAllocationPublicationStatus::invalid_evidence;
                 return;
             }
+            const auto existing = allocation_store_.scan(
+                request.operation_key.account, journal_store_, fact_store_);
+            if (!existing.complete()) {
+                result.status = existing.status == ManagedOpeningAllocationScanStatus::io_error
+                                    ? ManagedOpeningAllocationPublicationStatus::io_error
+                                    : ManagedOpeningAllocationPublicationStatus::invalid_evidence;
+                return;
+            }
+            std::string selection_error;
+            const auto selected = select_frontier_discriminator(
+                *entry, existing, selection_error);
+            if (!selected) {
+                result.status = ManagedOpeningAllocationPublicationStatus::invalid_evidence;
+                return;
+            }
             result = map_commit_result(
-                allocation_store_.prepare(*entry, *verified.proof, journal_store_, fact_store_,
+                allocation_store_.prepare(*selected, *verified.proof, journal_store_, fact_store_,
                                            lease_),
-                entry, true);
+                selected, true);
         });
     return fenced ? result
                   : ManagedOpeningAllocationPublicationResult{
@@ -794,11 +955,8 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 return;
             }
             const bool replay_without_preparation = durable_status == ReadStatus::absent;
-            // The caller-supplied proof is only a consistency hint.  Final
-            // publication has one authoritative boundary: reload the current
-            // journal/history/facts through the verifier while the same
-            // account fence is held, then validate the durable entry against
-            // that fresh result.
+            // Publication has one authoritative boundary: reload current
+            // sources through the verifier while the account fence is held.
             const auto fresh = verifier.verify(request);
             if (!fresh.found()) {
                 result = map_verifier_commit_status(fresh.status);
@@ -811,6 +969,7 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
             if (read_status == ReadStatus::valid) {
                 if (!existing || !(*existing == preparation.entry)) {
                     result = ManagedOpeningAllocationCommitStatus::conflict;
+                    last_error_ = "managed opening allocation target conflicts with preparation";
                     return;
                 }
                 const auto historical_validation = validate_entry_sources(
@@ -853,7 +1012,14 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
             switch (classify_proof_relation(preparation.entry, *fresh.proof)) {
             case ProofRelation::exact:
                 break;
-            case ProofRelation::extended:
+            case ProofRelation::extended: {
+                const auto successor_status = ensure_durable_successor(
+                    directory_, preparation.entry, *fresh.proof,
+                    journal_store, fact_store, last_error_);
+                if (successor_status != ManagedOpeningAllocationCommitStatus::committed) {
+                    result = successor_status;
+                    return;
+                }
                 if (!remove_preparation_file(
                         record_path(directory_, preparation.entry.key, "prep-"),
                         last_error_)) {
@@ -862,6 +1028,7 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
                 }
                 result = ManagedOpeningAllocationCommitStatus::superseded;
                 return;
+            }
             case ProofRelation::contradiction:
                 result = ManagedOpeningAllocationCommitStatus::invalid_source;
                 last_error_ = "managed opening allocation source contradicts preparation";

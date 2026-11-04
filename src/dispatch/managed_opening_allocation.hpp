@@ -56,7 +56,8 @@ struct ManagedOpeningAllocationFactReference {
 struct ManagedOpeningAllocationKey {
     OperationKey operation_key; ///< Managed OPEN identity.
     std::uint64_t operation_revision = 0; ///< Immutable result-source revision.
-    std::uint64_t frontier_revision = 0; ///< Latest admitted history revision.
+    /// Durable frontier discriminator, never below the latest source revision.
+    std::uint64_t frontier_revision = 0;
 
     /// \brief Tests the account-scoped frontier identity.
     /// \return True only for a complete allocation key.

@@ -19,6 +19,7 @@
 #include <map>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -459,53 +460,61 @@ void accepts_later_partial_fill_at_stable_source_revision() {
             "later partial fill required rewriting the immutable source revision");
 }
 
-void accepts_new_fill_after_restoring_graph_causal_epoch() {
-    ObservationGraph original(account());
-    ObservationBatch baseline_batch;
-    baseline_batch.account = account();
-    baseline_batch.observed_domains = ObservationDomain::history_deals;
-    baseline_batch.history_deals_window = source_window();
-    require(original.apply(baseline_batch).accepted(),
-            "restored-epoch baseline was rejected");
-    const auto baseline = capture_reconciliation_baseline(original);
-    ObservationBatch first_fill = baseline_batch;
-    first_fill.history_deals = {deal(5001, 0.05)};
-    require(original.apply(first_fill).accepted(),
-            "restored-epoch first fill was rejected");
-    const auto retained_first = fact_for(original, 5001, 0.05);
-    const auto restored_instance_id = original.instance_id();
-
-    ObservationGraph restored(account(), restored_instance_id);
-    require(restored.instance_id() == restored_instance_id,
-            "restored graph did not retain its durable causal identity");
-    require(restored.apply(baseline_batch).accepted(),
-            "restored-epoch replay baseline was rejected");
-    require(capture_reconciliation_baseline(restored).graph_instance_id() ==
-                baseline.graph_instance_id(),
-            "restored baseline changed graph provenance");
-    require(restored.apply(first_fill).accepted(),
-            "restored-epoch replay first fill was rejected");
-    ObservationBatch second_fill = baseline_batch;
-    second_fill.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
-    require(restored.apply(second_fill).accepted(),
-            "restored-epoch second fill was rejected");
-
+void rejects_fabricated_graph_recovery() {
+    static_assert(!std::is_constructible_v<ObservationGraph, AccountKey, std::uint64_t>,
+                  "a caller must not select the identity of a new graph");
+    static_assert(!std::is_copy_constructible_v<ObservationGraph>,
+                  "copying a graph must not duplicate its identity");
     MemoryOpeningFactStore facts;
-    facts.facts = {retained_first, fact_for(restored, 5002, 0.03)};
     mt5bridge_test_support::MemoryJournalStore journal;
-    auto record = journal_record(baseline, {5001, 5002});
-    record.operation_state = OperationState::reconciling;
-    ++record.revision;
-    require(record.valid(), "restored-epoch journal fixture is invalid");
-    journal.records.emplace(operation(), std::move(record));
     TestLease lease;
+    with_graph({deal(5001, 0.05)}, [&](const auto &graph, const auto &baseline) {
+        facts.facts = {fact_for(graph, 5001, 0.05)};
+        journal.records.emplace(operation(), journal_record(baseline, {5001, 5002}));
+        ObservationGraph simultaneous(account());
+        require(simultaneous.instance_id() != graph.instance_id(),
+                "two live graphs acquired the same identity");
+    });
+
+    const auto retained = facts.facts;
+    ObservationBatch current;
+    current.account = account();
+    current.observed_domains = ObservationDomain::history_deals;
+    current.history_deals_window = source_window();
+    current.history_deals = {deal(5001, 0.05)};
+    ObservationGraph restarted(account());
     ManagedOpeningSourceVerifier verifier(
-        journal, facts, restored,
+        journal, facts, restarted, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+    const ManagedOpeningProvenanceRequest request{operation(), OperationKind::open, 3, 88001};
+    require(!verifier.verify(request).found(), "empty restart graph produced source proof");
+    // The broker supplies only current history, never the old empty baseline.
+    require(restarted.apply(current).accepted(), "current history was rejected");
+    require(restarted.revision() == 1 && verifier.verify(request).found(),
+            "current full history did not recheck the durable original fact");
+    facts.facts.clear();
+    require(!verifier.verify(request).found(), "current history alone manufactured a receipt");
+    facts.facts = retained;
+    current.history_deals.push_back(deal(5002, 0.03));
+    require(restarted.apply(current).accepted(), "late current fill was rejected by graph");
+    facts.facts.push_back(fact_for(restarted, 5002, 0.03));
+    const auto extended = verifier.verify(request);
+    require(extended.found() &&
+                extended.proof->deal_tickets() == std::vector<std::uint64_t>{5001, 5002},
+            "bounded cross-instance late fill was not verified");
+
+    // A graph with only the late ticket cannot establish the immutable older
+    // frontier, regardless of how its local revisions are padded.
+    ObservationGraph incomplete(account());
+    ObservationBatch only_late = current;
+    only_late.history_deals = {deal(5002, 0.03)};
+    require(incomplete.apply(only_late).accepted(), "incomplete current history failed");
+    facts.facts = retained;
+    facts.facts.push_back(fact_for(incomplete, 5002, 0.03));
+    ManagedOpeningSourceVerifier incomplete_verifier(
+        journal, facts, incomplete,
         ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
-    const auto result = verifier.verify({operation(), OperationKind::open, 4, 88001});
-    require(result.found() && result.proof->deal_tickets() ==
-                std::vector<std::uint64_t>{5001, 5002},
-            "new fill after graph restart was not verified");
+    require(!incomplete_verifier.verify(request).found(),
+            "missing historical ticket acquired cross-instance authority");
 }
 
 void accepts_production_reachable_one_shot_result() {
@@ -783,136 +792,126 @@ void accepts_production_reachable_filesystem_allocation() {
     std::error_code cleanup_error;
     std::filesystem::remove_all(root, cleanup_error);
     try {
-        ObservationBatch baseline_batch;
-        baseline_batch.account = account();
-        baseline_batch.observed_domains = ObservationDomain::active_orders |
-                                          ObservationDomain::positions |
-                                          ObservationDomain::history_orders |
-                                          ObservationDomain::history_deals;
-        baseline_batch.history_orders_window = source_window();
-        baseline_batch.history_deals_window = source_window();
-        baseline_batch.position_history_order =
-            PositionHistoryOrder::positions_before_history_deals;
-        Mt5PositionSnapshot position{};
-        position.ticket = 7001;
-        position.identifier = 88001;
-        position.type = 0;
-        position.known_fields = MT5BRIDGE_POSITION_KNOWN_TICKET |
-                                MT5BRIDGE_POSITION_KNOWN_IDENTIFIER |
-                                MT5BRIDGE_POSITION_KNOWN_TYPE;
-        baseline_batch.positions = {position};
-        Mt5HistoryOrderSnapshot history_order{};
-        history_order.ticket = 3001;
-        history_order.position_id = 88001;
-        history_order.time_done_msc = 1500;
-        history_order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
-                                     MT5BRIDGE_ORDER_KNOWN_POSITION_ID |
-                                     MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
-        baseline_batch.history_orders = {history_order};
-        ObservationBatch post_dispatch = baseline_batch;
-        post_dispatch.history_deals = {deal(5001, 0.05)};
-        FakeObservationProvider provider(
-            {baseline_batch, baseline_batch, baseline_batch, post_dispatch});
-        ObservationCoordinator coordinator(provider, account());
-        ObservationCollectionRequest collection;
-        collection.history_deals_window = source_window();
-        collection.history_orders_window = source_window();
-        collection.position_history_order = PositionHistoryOrder::positions_before_history_deals;
-        require(coordinator.refresh(collection).sample.has_value(),
-                "production filesystem baseline observation failed");
-        const auto first = coordinator.refresh(collection);
-        const auto second = coordinator.refresh(collection);
-        require(first.sample && second.sample,
-                "production filesystem consistency observations failed");
-        EnvironmentConsistencyRequest consistency_request;
-        consistency_request.history_deals_window = source_window();
-        consistency_request.history_orders_window = source_window();
-        const auto consistency = EnvironmentConsistencyPolicy::evaluate(
-            {*first.sample, *second.sample}, consistency_request);
-        require(consistency.consistent() && consistency.proof,
-                "production filesystem consistency proof was not admitted");
-        const auto baseline = coordinator.capture_baseline();
-
-        ManagedOpeningAllocationKey prepared_key;
-        ManagedOpeningProvenanceRequest replay_request;
         {
-        WindowsFileJournalStore journal_store(root / "journal");
-        WindowsFileManagedOpeningFactStore fact_store(root / "facts");
-        WindowsFileManagedOpeningAllocationStore allocation_store(root / "allocations");
-        WindowsSingleWriterLease lease(root / "journal", account());
-        require(journal_store.ready() && fact_store.ready() && allocation_store.ready() &&
-                    lease.ready(),
-                "production filesystem stores did not open");
-        OperationJournal journal(journal_store);
-        require(journal.create(operation(), {0x01}, OperationKind::open).accepted(),
-                "production filesystem journal create failed");
-        require(journal.transition_operation(operation(), OperationState::prechecking)
-                    .accepted(),
-                "production filesystem prechecking failed");
-        require(journal.transition_journal(operation(), JournalState::prechecked).accepted(),
-                "production filesystem prechecked transition failed");
-        require(journal.transition_journal(operation(), JournalState::dispatch_intent_persisted)
-                    .accepted(),
-                "production filesystem dispatch-intent transition failed");
-        const auto descriptor = ReconciliationDescriptor{
-            account(), baseline,
-            {expect_reconciliation_transition(
-                ReconciliationPredicateKind::history_deal_present, std::nullopt, false,
-                ReconciliationTransition::absent_to_present, 70, source_window())},
-            OperationState::filled, operation().trade_id, operation().operation_id, 5};
-        require(journal.persist_reconciliation_descriptor(operation(), descriptor).accepted(),
-                "production filesystem descriptor persistence failed");
-        DispatchAdmissionBarrier admission(journal, coordinator.graph(),
-                                           EnvironmentConsistencyRequest{});
-        DispatchAdmissionRequest admission_request;
-        admission_request.current_account = account();
-        admission_request.environment_proof = consistency.proof;
-        auto admitted = admission.admit(operation(), admission_request, lease);
-        require(admitted.admitted(), "production filesystem dispatch was not admitted");
-        runtime::OneShotDispatchBackend backend;
-        TestAccountProbe account_probe;
-        TestTransport transport;
-        const auto executed = backend.execute(journal, operation(), std::move(*admitted.permit),
-                                              account_probe, lease, transport);
-        require(executed.completed() && executed.record && transport.calls == 1,
-                "production filesystem one-shot dispatch did not complete");
-        const auto post_dispatch_sample = coordinator.refresh(collection);
-        require(post_dispatch_sample.sample.has_value(),
-                "production filesystem post-dispatch observation failed");
+            ObservationBatch baseline_batch;
+            baseline_batch.account = account();
+            baseline_batch.observed_domains = ObservationDomain::active_orders |
+                                              ObservationDomain::positions |
+                                              ObservationDomain::history_orders |
+                                              ObservationDomain::history_deals;
+            baseline_batch.history_orders_window = source_window();
+            baseline_batch.history_deals_window = source_window();
+            baseline_batch.position_history_order =
+                PositionHistoryOrder::positions_before_history_deals;
+            Mt5PositionSnapshot position{};
+            position.ticket = 7001;
+            position.identifier = 88001;
+            position.type = 0;
+            position.known_fields = MT5BRIDGE_POSITION_KNOWN_TICKET |
+                                    MT5BRIDGE_POSITION_KNOWN_IDENTIFIER |
+                                    MT5BRIDGE_POSITION_KNOWN_TYPE;
+            baseline_batch.positions = {position};
+            Mt5HistoryOrderSnapshot history_order{};
+            history_order.ticket = 3001;
+            history_order.position_id = 88001;
+            history_order.time_done_msc = 1500;
+            history_order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
+                                         MT5BRIDGE_ORDER_KNOWN_POSITION_ID |
+                                         MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
+            baseline_batch.history_orders = {history_order};
+            ObservationBatch post_dispatch = baseline_batch;
+            post_dispatch.history_deals = {deal(5001, 0.05)};
+            FakeObservationProvider provider(
+                {baseline_batch, baseline_batch, baseline_batch, post_dispatch});
+            ObservationCoordinator coordinator(provider, account());
+            ObservationCollectionRequest collection;
+            collection.history_deals_window = source_window();
+            collection.history_orders_window = source_window();
+            collection.position_history_order = PositionHistoryOrder::positions_before_history_deals;
+            require(coordinator.refresh(collection).sample.has_value(),
+                    "production filesystem baseline observation failed");
+            const auto first = coordinator.refresh(collection);
+            const auto second = coordinator.refresh(collection);
+            require(first.sample && second.sample,
+                    "production filesystem consistency observations failed");
+            EnvironmentConsistencyRequest consistency_request;
+            consistency_request.history_deals_window = source_window();
+            consistency_request.history_orders_window = source_window();
+            const auto consistency = EnvironmentConsistencyPolicy::evaluate(
+                {*first.sample, *second.sample}, consistency_request);
+            require(consistency.consistent() && consistency.proof,
+                    "production filesystem consistency proof was not admitted");
+            const auto baseline = coordinator.capture_baseline();
 
-        const auto durable_fact = fact_for(
-            coordinator.graph(), 5001, 0.05, executed.record->result_source_revision);
-        require(fact_store.commit(durable_fact, lease) ==
-                    ManagedOpeningFactCommitStatus::committed,
-                "production filesystem B3A fact was not committed");
-        ManagedOpeningSourceVerifier verifier(
-            journal_store, fact_store, coordinator.graph(),
-            ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
-        ManagedOpeningAllocationPublisher publisher(
-            verifier, fact_store, allocation_store, journal_store, lease);
-        replay_request = {operation(), OperationKind::open, executed.record->revision, 88001};
-        const auto prepared = publisher.prepare(replay_request);
-        require(prepared.status == ManagedOpeningAllocationPublicationStatus::prepared &&
-                    prepared.record,
-                "production filesystem B3C preparation failed");
-        prepared_key = prepared.record->key;
-        require(publisher.publish(prepared_key, replay_request).status ==
-                    ManagedOpeningAllocationPublicationStatus::published,
-                "production filesystem B3C publication failed");
-        }
+            WindowsFileJournalStore journal_store(root / "journal");
+            WindowsFileManagedOpeningFactStore fact_store(root / "facts");
+            WindowsFileManagedOpeningAllocationStore allocation_store(root / "allocations");
+            WindowsSingleWriterLease lease(root / "journal", account());
+            require(journal_store.ready() && fact_store.ready() && allocation_store.ready() &&
+                        lease.ready(),
+                    "production filesystem stores did not open");
+            OperationJournal journal(journal_store);
+            require(journal.create(operation(), {0x01}, OperationKind::open).accepted(),
+                    "production filesystem journal create failed");
+            require(journal.transition_operation(operation(), OperationState::prechecking)
+                        .accepted(),
+                    "production filesystem prechecking failed");
+            require(journal.transition_journal(operation(), JournalState::prechecked).accepted(),
+                    "production filesystem prechecked transition failed");
+            require(journal.transition_journal(operation(), JournalState::dispatch_intent_persisted)
+                        .accepted(),
+                    "production filesystem dispatch-intent transition failed");
+            const auto descriptor = ReconciliationDescriptor{
+                account(), baseline,
+                {expect_reconciliation_transition(
+                    ReconciliationPredicateKind::history_deal_present, std::nullopt, false,
+                    ReconciliationTransition::absent_to_present, 70, source_window())},
+                OperationState::filled, operation().trade_id, operation().operation_id, 8};
+            require(journal.persist_reconciliation_descriptor(operation(), descriptor).accepted(),
+                    "production filesystem descriptor persistence failed");
+            DispatchAdmissionBarrier admission(journal, coordinator.graph(),
+                                               EnvironmentConsistencyRequest{});
+            DispatchAdmissionRequest admission_request;
+            admission_request.current_account = account();
+            admission_request.environment_proof = consistency.proof;
+            auto admitted = admission.admit(operation(), admission_request, lease);
+            require(admitted.admitted(), "production filesystem dispatch was not admitted");
+            runtime::OneShotDispatchBackend backend;
+            TestAccountProbe account_probe;
+            TestTransport transport;
+            const auto executed = backend.execute(journal, operation(), std::move(*admitted.permit),
+                                                  account_probe, lease, transport);
+            require(executed.completed() && executed.record && transport.calls == 1,
+                    "production filesystem one-shot dispatch did not complete");
+            const auto post_dispatch_sample = coordinator.refresh(collection);
+            require(post_dispatch_sample.sample.has_value(),
+                    "production filesystem post-dispatch observation failed");
 
-        WindowsFileJournalStore persisted_journal(root / "journal");
-        require(persisted_journal.ready(), "production filesystem persisted journal did not open");
-        const auto persisted = persisted_journal.load(operation());
-        require(persisted.found() && persisted.record->reconciliation_descriptor,
-                "production filesystem journal did not retain descriptor");
-        ObservationGraph restored(
-            account(), persisted.record->reconciliation_descriptor->baseline.graph_instance_id());
-        require(restored.apply(baseline_batch).accepted() &&
-                    restored.apply(baseline_batch).accepted() &&
-                    restored.apply(baseline_batch).accepted() &&
-                    restored.apply(post_dispatch).accepted(),
-                "production filesystem graph replay failed");
+            const auto durable_fact = fact_for(
+                coordinator.graph(), 5001, 0.05, executed.record->result_source_revision);
+            require(fact_store.commit(durable_fact, lease) ==
+                        ManagedOpeningFactCommitStatus::committed,
+                    "production filesystem B3A fact was not committed");
+            ManagedOpeningSourceVerifier verifier(
+                journal_store, fact_store, coordinator.graph(),
+                ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+            ManagedOpeningAllocationPublisher publisher(
+                verifier, fact_store, allocation_store, journal_store, lease);
+            const ManagedOpeningProvenanceRequest replay_request{
+                operation(), OperationKind::open, executed.record->revision, 88001};
+            const auto prepared = publisher.prepare(replay_request);
+            require(prepared.status == ManagedOpeningAllocationPublicationStatus::prepared &&
+                        prepared.record,
+                    "production filesystem B3C preparation failed");
+            require(publisher.publish(prepared.record->key, replay_request).status ==
+                        ManagedOpeningAllocationPublicationStatus::published,
+                    "production filesystem B3C publication failed");
+            const auto later = journal.transition_operation(operation(), OperationState::reconciling);
+            require(later.accepted() && later.record &&
+                        later.record->result_source_revision == executed.record->result_source_revision,
+                    "later lifecycle transition changed immutable result anchor");
+        } // Destroy the coordinator/graph, stores, journal, and lease before restart.
+
         WindowsFileJournalStore restarted_journal(root / "journal");
         WindowsFileManagedOpeningFactStore restarted_facts(root / "facts");
         WindowsFileManagedOpeningAllocationStore restarted_allocations(root / "allocations");
@@ -920,17 +919,74 @@ void accepts_production_reachable_filesystem_allocation() {
         require(restarted_journal.ready() && restarted_facts.ready() &&
                     restarted_allocations.ready() && restarted_lease.ready(),
                 "production filesystem restart stores did not open");
+        const auto persisted = restarted_journal.load(operation());
+        require(persisted.found() && persisted.record->reconciliation_descriptor &&
+                    persisted.record->revision > persisted.record->result_source_revision,
+                "production filesystem journal lost its result anchor");
+        const auto recovered = restarted_allocations.scan(
+            account(), restarted_journal, restarted_facts);
+        require(recovered.complete() && recovered.records.size() == 1 &&
+                    recovered.preparations.empty(),
+                "production allocation was not recovered solely from durable stores");
+        const auto &entry = recovered.records.front();
+        const auto &descriptor = *persisted.record->reconciliation_descriptor;
+        const auto window = descriptor.predicates.front().history_window;
+        require(window.has_value(), "recovered descriptor lost its history query");
+        const ManagedOpeningProvenanceRequest replay_request{
+            operation(), OperationKind::open, persisted.record->revision, entry.position_identifier};
+        ObservationGraph current_graph(account());
+        ObservationBatch current;
+        current.account = account();
+        current.observed_domains = ObservationDomain::history_deals;
+        current.history_deals_window = window;
+        current.history_deals = {deal(5001, 0.05)};
+        // Only the present full broker history is available. Do not fabricate
+        // an empty old snapshot or pad revisions to the journal baseline.
+        require(current_graph.apply(current).accepted() && current_graph.revision() == 1,
+                "production current history observation failed");
         ManagedOpeningSourceVerifier restarted_verifier(
-            restarted_journal, restarted_facts, restored,
+            restarted_journal, restarted_facts, current_graph,
             ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, restarted_lease);
         ManagedOpeningAllocationPublisher restarted_publisher(
             restarted_verifier, restarted_facts, restarted_allocations,
             restarted_journal, restarted_lease);
-        const auto replayed = restarted_publisher.publish(
-            prepared_key, replay_request);
-        require(replayed.status ==
+        require(restarted_publisher.publish(entry.key, replay_request).status ==
                     ManagedOpeningAllocationPublicationStatus::already_published,
-                "production filesystem allocation replay was not idempotent");
+                "current history could not recheck the durable original allocation");
+
+        // The current complete history may add a new receipt in the current
+        // graph. B3B accepts it only together with the durable old receipt.
+        current.history_deals.push_back(deal(5002, 0.03));
+        require(current_graph.apply(current).accepted(), "post-restart late fill poll failed");
+        const auto new_fact = fact_for(
+            current_graph, 5002, 0.03, persisted.record->result_source_revision);
+        require(restarted_facts.commit(new_fact, restarted_lease) ==
+                    ManagedOpeningFactCommitStatus::committed,
+                "locally valid late-fill fact was not persisted");
+        const auto extended = restarted_verifier.verify(replay_request);
+        require(extended.found() &&
+                    extended.proof->deal_tickets() ==
+                        std::vector<std::uint64_t>{5001, 5002},
+                "bounded cross-instance partial fill was not verified");
+        const auto prepared_b = restarted_publisher.prepare(replay_request);
+        require(prepared_b.status == ManagedOpeningAllocationPublicationStatus::prepared &&
+                    prepared_b.record,
+                "cross-instance successor preparation failed");
+        const auto published_b =
+            restarted_publisher.publish(prepared_b.record->key, replay_request);
+        if (published_b.status != ManagedOpeningAllocationPublicationStatus::published)
+            std::cerr << "cross-instance successor status="
+                      << static_cast<unsigned>(published_b.status)
+                      << " error=" << restarted_allocations.last_error() << '\n';
+        require(published_b.status == ManagedOpeningAllocationPublicationStatus::published,
+                "cross-instance successor publication failed");
+        const auto final = restarted_allocations.scan(
+            account(), restarted_journal, restarted_facts);
+        require(final.complete() && final.records.size() == 2 && final.preparations.empty(),
+                "cross-instance successor did not survive publication");
+        const auto unchanged = restarted_allocations.load(entry.key);
+        require(unchanged.found() && *unchanged.record == entry,
+                "cross-instance successor rewrote the historical allocation");
     } catch (...) {
         std::filesystem::remove_all(root, cleanup_error);
         throw;
@@ -996,7 +1052,7 @@ int main() {
         accepts_idempotent_repoll_without_rewriting_receipt();
         rejects_newer_complete_history_contradictions();
         accepts_later_partial_fill_at_stable_source_revision();
-        accepts_new_fill_after_restoring_graph_causal_epoch();
+        rejects_fabricated_graph_recovery();
         accepts_production_reachable_one_shot_result();
         rejects_invalid_requests_and_store_failures();
         rejects_non_causal_or_stale_history_evidence();

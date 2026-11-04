@@ -20,6 +20,11 @@
 #include <utility>
 #include <vector>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 namespace {
 
 using namespace mt5bridge;
@@ -633,53 +638,195 @@ void preserves_historical_frontiers_when_a_partial_fill_arrives() {
     std::filesystem::remove_all(directory);
 }
 
-void discards_superseded_pending_frontiers() {
-    ObservationGraph graph(account());
-    ObservationBatch baseline_batch;
-    baseline_batch.account = account();
-    baseline_batch.observed_domains = ObservationDomain::history_deals;
-    baseline_batch.history_deals_window = source_window();
-    require(graph.apply(baseline_batch).accepted(), "superseded baseline was not accepted");
-    const auto baseline = capture_reconciliation_baseline(graph);
-    ObservationBatch first_fill = baseline_batch;
-    first_fill.history_deals = {deal(5001, 0.05)};
-    require(graph.apply(first_fill).accepted(), "superseded first fill was not accepted");
-    MemoryOpeningFactStore facts;
-    facts.facts.push_back(fact_for(graph, 5001, 0.05));
-    mt5bridge_test_support::MemoryJournalStore journal;
-    journal.records.emplace(operation(), journal_record(baseline, 8));
-    TestLease lease;
-    ManagedOpeningSourceVerifier verifier(
-        journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
-    const auto proof_a = verifier.verify({operation(), OperationKind::open, 3, 88001});
-    require(proof_a.found(), "superseded first frontier was not verified");
-    const auto entry_a = make_entry(*proof_a.proof, facts.facts);
-    const auto directory = test_directory();
-    std::filesystem::remove_all(directory);
-    try {
-        WindowsFileManagedOpeningAllocationStore store(directory);
-        require(store.prepare(entry_a, *proof_a.proof, journal, facts, lease) ==
-                    ManagedOpeningAllocationCommitStatus::committed,
-                "superseded preparation was not committed");
-        const auto preparation = store.load_preparation(entry_a.key);
-        require(preparation.found(), "superseded preparation was not durable");
+/// \brief Exercises each durable boundary without changing production storage seams.
+void preserves_superseded_publication_intent() {
+    enum class CrashPoint { before_successor, pending_successor, committed_successor,
+                            successor_write_error, predecessor_cleanup_error,
+                            successor_cleanup_error };
+    for (const auto point : {CrashPoint::before_successor, CrashPoint::pending_successor,
+                             CrashPoint::committed_successor, CrashPoint::successor_write_error,
+                             CrashPoint::predecessor_cleanup_error,
+                             CrashPoint::successor_cleanup_error}) {
+        const auto root = test_directory();
+        try {
+            {
+                ObservationGraph graph(account());
+                ObservationBatch history;
+                history.account = account();
+                history.observed_domains = ObservationDomain::history_deals;
+                history.history_deals_window = source_window();
+                require(graph.apply(history).accepted(), "supersession baseline failed");
+                const auto baseline = capture_reconciliation_baseline(graph);
+                history.history_deals = {deal(5001, 0.05)};
+                require(graph.apply(history).accepted(), "supersession first fill failed");
+                WindowsFileJournalStore journal(root / "journal");
+                WindowsFileManagedOpeningFactStore facts(root / "facts");
+                WindowsSingleWriterLease lease(root / "lease", account());
+                WindowsFileManagedOpeningAllocationStore store(root / "allocations");
+                auto record = journal_record(baseline, 8, 1, 1);
+                const auto token = lease.held_fencing_token(account());
+                require(token.has_value(), "supersession lease failed");
+                record.fencing_token = *token;
+                require(journal.commit(record, std::nullopt) == StoreCommitStatus::committed &&
+                            facts.commit(fact_for(graph, 5001, 0.05, 1), lease) ==
+                                ManagedOpeningFactCommitStatus::committed,
+                        "supersession sources were not durable");
+                ManagedOpeningSourceVerifier verifier(
+                    journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+                ManagedOpeningAllocationPublisher publisher(verifier, facts, store, journal, lease);
+                const ManagedOpeningProvenanceRequest request{
+                    operation(), OperationKind::open, 1, 88001};
+                const auto a = publisher.prepare(request);
+                require(a.status == ManagedOpeningAllocationPublicationStatus::prepared && a.record,
+                        "supersession A was not prepared");
+                const auto path_a = record_path_with_prefix(root / "allocations", L"prep-");
+                const auto initial = store.scan(account(), journal, facts);
+                require(initial.complete() && initial.records.empty() &&
+                            initial.preparations.size() == 1,
+                        "intent was missing before the second fill");
+                history.history_deals.push_back(deal(5002, 0.03));
+                require(graph.apply(history).accepted(), "supersession second fill failed");
+                require(facts.commit(fact_for(graph, 5002, 0.03, 1), lease) ==
+                            ManagedOpeningFactCommitStatus::committed,
+                        "second-fill fact was not durable");
+                require(verifier.verify(request).found(), "expanded source proof failed");
+                const auto still_pending = store.scan(account(), journal, facts);
+                require(still_pending.complete() && still_pending.records.empty() &&
+                            still_pending.preparations.size() == 1,
+                        "fresh extended proof alone erased pending intent");
 
-        ObservationBatch second_fill = baseline_batch;
-        second_fill.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
-        require(graph.apply(second_fill).accepted(), "superseded second fill was not accepted");
-        facts.facts.push_back(fact_for(graph, 5002, 0.03));
-        require(store.publish(*preparation.record, journal, facts, lease, verifier,
-                              {operation(), OperationKind::open, 3, 88001}) ==
-                    ManagedOpeningAllocationCommitStatus::superseded,
-                "stale pending frontier was published instead of superseded");
-        const auto scan = store.scan(account(), journal, facts);
-        require(scan.complete() && scan.records.empty() && scan.preparations.empty(),
-                "superseded preparation was not removed durably");
-    } catch (...) {
-        std::filesystem::remove_all(directory);
-        throw;
+                std::optional<ManagedOpeningAllocationEntry> b;
+                std::filesystem::path path_b;
+                std::filesystem::path blocked_temporary;
+                if (point != CrashPoint::before_successor &&
+                    point != CrashPoint::predecessor_cleanup_error) {
+                    const auto prepared_b = publisher.prepare(request);
+                    require(prepared_b.status == ManagedOpeningAllocationPublicationStatus::prepared &&
+                                prepared_b.record,
+                            "successor fixture was not durable");
+                    b = prepared_b.record;
+                    for (const auto &item : std::filesystem::recursive_directory_iterator(
+                             root / "allocations"))
+                        if (item.path() != path_a &&
+                            item.path().filename().wstring().rfind(L"prep-", 0) == 0 &&
+                            item.path().extension() == L".bin")
+                            path_b = item.path();
+                    require(!path_b.empty(), "successor manifest path was not found");
+                    if (point == CrashPoint::successor_write_error) {
+                        require(std::filesystem::remove(path_b), "write-error fixture removal failed");
+                        blocked_temporary = std::filesystem::path(path_b.wstring() + L".tmp");
+                        require(std::filesystem::create_directory(blocked_temporary),
+                                "successor temporary write was not blocked");
+                    } else if (point == CrashPoint::committed_successor) {
+                        require(publisher.publish(b->key, request).status ==
+                                    ManagedOpeningAllocationPublicationStatus::published,
+                                "successor allocation was not committed");
+                    }
+                }
+
+                if (point == CrashPoint::predecessor_cleanup_error) {
+                    // Deny DELETE only: publication can read A and persist B.
+                    const auto held = CreateFileW(path_a.c_str(), GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+                    require(held != INVALID_HANDLE_VALUE, "could not block predecessor cleanup");
+                    const auto status = publisher.publish(a.record->key, request).status;
+                    CloseHandle(held);
+                    require(status == ManagedOpeningAllocationPublicationStatus::io_error,
+                            "predecessor cleanup failure was hidden");
+                    const auto retained = store.scan(account(), journal, facts);
+                    require(retained.complete() && retained.records.empty() &&
+                                retained.preparations.size() == 2,
+                            "failed cleanup lost A or its durable successor");
+                } else if (point == CrashPoint::successor_cleanup_error) {
+                    const auto held = CreateFileW(path_b.c_str(), GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+                    require(held != INVALID_HANDLE_VALUE, "could not block successor cleanup");
+                    const auto status = publisher.publish(b->key, request).status;
+                    CloseHandle(held);
+                    require(status == ManagedOpeningAllocationPublicationStatus::io_error,
+                            "post-publication cleanup failure was hidden");
+                    const auto retained = store.scan(account(), journal, facts);
+                    require(retained.complete() && retained.records.size() == 1 &&
+                                retained.preparations.size() == 2,
+                            "allocation plus pending crash state was not retained");
+                } else if (point == CrashPoint::pending_successor) {
+                    // Simulate interruption after prep-B but before deleting prep-A.
+                    const auto both = store.scan(account(), journal, facts);
+                    require(both.complete() && both.preparations.size() == 2 && both.records.empty(),
+                            "two pending frontiers were not recoverable");
+                } else {
+                    const auto status = publisher.publish(a.record->key, request).status;
+                    if (point == CrashPoint::successor_write_error) {
+                        require(status == ManagedOpeningAllocationPublicationStatus::io_error &&
+                                    store.load_preparation(a.record->key).found() &&
+                                    !store.load_preparation(b->key).found(),
+                                "successor write failure lost predecessor intent");
+                        require(std::filesystem::remove(blocked_temporary),
+                                "temporary write blocker could not be removed");
+                    } else {
+                        require(status == ManagedOpeningAllocationPublicationStatus::superseded,
+                                "predecessor was not superseded");
+                        const auto durable = store.scan(account(), journal, facts);
+                        require(durable.complete() &&
+                                    durable.records.size() + durable.preparations.size() == 1 &&
+                                    !store.load(a.record->key).found() &&
+                                    !store.load_preparation(a.record->key).found(),
+                                "superseded returned without durable successor intent");
+                    }
+                }
+            } // Drop all source objects as at a process interruption.
+
+            WindowsFileJournalStore journal(root / "journal");
+            WindowsFileManagedOpeningFactStore facts(root / "facts");
+            WindowsSingleWriterLease lease(root / "lease", account());
+            WindowsFileManagedOpeningAllocationStore store(root / "allocations");
+            ObservationGraph graph(account());
+            ObservationBatch current;
+            current.account = account();
+            current.observed_domains = ObservationDomain::history_deals;
+            current.history_deals_window = source_window();
+            current.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
+            require(graph.apply(current).accepted(), "restart current history failed");
+            ManagedOpeningSourceVerifier verifier(
+                journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+            ManagedOpeningAllocationPublisher publisher(verifier, facts, store, journal, lease);
+            const auto recovered = store.scan(account(), journal, facts);
+            require(recovered.complete() && (!recovered.records.empty() ||
+                        !recovered.preparations.empty()), "restart lost all publication intent");
+            const auto journal_record = journal.load(operation());
+            require(journal_record.found(), "restart journal was not recovered");
+            const ManagedOpeningProvenanceRequest request{
+                operation(), OperationKind::open, journal_record.record->revision, 88001};
+            for (const auto &pending : recovered.preparations) {
+                const auto result = publisher.publish(pending.entry.key, request);
+                require(result.status == ManagedOpeningAllocationPublicationStatus::superseded ||
+                            result.status == ManagedOpeningAllocationPublicationStatus::published ||
+                            result.status == ManagedOpeningAllocationPublicationStatus::already_published,
+                        "restart could not recover a pending frontier");
+            }
+            // Superseding A may have created B after the initial scan.
+            const auto remaining = store.scan(account(), journal, facts);
+            require(remaining.complete(), "successor recovery scan failed");
+            for (const auto &pending : remaining.preparations) {
+                const auto result = publisher.publish(pending.entry.key, request);
+                require(result.status == ManagedOpeningAllocationPublicationStatus::published ||
+                            result.status ==
+                                ManagedOpeningAllocationPublicationStatus::already_published,
+                        "durable successor was not publishable after restart");
+            }
+            const auto final = store.scan(account(), journal, facts);
+            require(final.complete() && final.records.size() == 1 && final.preparations.empty() &&
+                        final.records.front().fact_references.size() == 2 &&
+                        final.records.front().cumulative_managed_logical_units == 8,
+                    "restart did not converge to the exact cumulative successor");
+        } catch (...) {
+            std::filesystem::remove_all(root);
+            throw;
+        }
+        std::filesystem::remove_all(root);
     }
-    std::filesystem::remove_all(directory);
 }
 
 } // namespace
@@ -691,6 +838,6 @@ int main() {
     rejects_noncanonical_reserved_paths_and_keeps_pending_separate();
     recovers_through_real_filesystem_sources();
     preserves_historical_frontiers_when_a_partial_fill_arrives();
-    discards_superseded_pending_frontiers();
+    preserves_superseded_publication_intent();
     return 0;
 }

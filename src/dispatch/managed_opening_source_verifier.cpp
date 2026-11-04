@@ -306,11 +306,25 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         const auto &receipt = fact.admission_receipt();
         const auto current_evidence_revision =
             graph.history_deal_evidence_revision(fact.deal_ticket());
-        if (receipt.graph_instance_id != descriptor.baseline.graph_instance_id() ||
+        const bool original_graph_receipt =
+            receipt.graph_instance_id == descriptor.baseline.graph_instance_id();
+        const bool current_graph_receipt = receipt.graph_instance_id == graph.instance_id();
+        const bool current_receipt_is_causal =
+            current_graph_receipt &&
+            graph.history_deal_first_evidence_revision(fact.deal_ticket()) ==
+                receipt.source_revision &&
+            graph.history_deals_covered_at_exact(
+                {receipt.history_window_from_msc, receipt.history_window_to_msc},
+                receipt.source_revision);
+        // A restarted graph may contribute only a receipt that it can prove
+        // from its own first complete observation. It cannot claim the old
+        // graph's baseline by selecting a matching numeric revision.
+        if ((!original_graph_receipt && !current_graph_receipt) ||
             receipt.history_coverage_revision != receipt.source_revision ||
-            (same_graph_instance && receipt.graph_instance_id != graph.instance_id()) ||
-            (same_graph_instance &&
-             current_evidence_revision < receipt.source_revision) ||
+            (original_graph_receipt &&
+             receipt.source_revision <= descriptor.baseline.history_deals_revision()) ||
+            (current_graph_receipt && !current_receipt_is_causal) ||
+            (same_graph_instance && current_evidence_revision < receipt.source_revision) ||
             !graph.history_deals_covered_at_exact(
                 {receipt.history_window_from_msc, receipt.history_window_to_msc},
                 current_evidence_revision))

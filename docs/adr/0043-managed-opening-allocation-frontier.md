@@ -62,6 +62,10 @@ The scan path is fail-closed for malformed records, missing facts, foreign
 operation identities, invalid journal sources, reparse points, and I/O errors.
 An absent account directory is an empty complete scan. A pending preparation is
 retained across restart and is finalized only after a fresh B3B verification.
+Reserved `prep-*.bin.tmp` and `alloc-*.bin.tmp` files are unfinished write
+artifacts: scans ignore them, never treat them as durable records, and do not
+delete arbitrary files as part of recovery. Canonical `.bin` records remain
+fail-closed for malformed or non-canonical content.
 If a later compatible frontier is visible, the store first validates and
 durably creates or finds the successor prep/alloc record under the same fence.
 Only then is the older pending preparation explicitly superseded; a failure to

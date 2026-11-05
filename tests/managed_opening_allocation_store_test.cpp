@@ -443,6 +443,28 @@ void rejects_noncanonical_reserved_paths_and_keeps_pending_separate() {
                         ManagedOpeningAllocationCommitStatus::committed,
                     "namespace preparation was not committed");
             const auto preparation_path = record_path_with_prefix(directory, L"prep-");
+            const auto orphan_preparation =
+                preparation_path.parent_path() / L"prep-orphan.bin.tmp";
+            {
+                std::ofstream orphan(orphan_preparation, std::ios::binary);
+                require(static_cast<bool>(orphan), "orphan preparation could not be created");
+            }
+            auto orphan_scan = store.scan(account(), journal, facts);
+            require(orphan_scan.complete() && orphan_scan.preparations.size() == 1,
+                    "empty orphan preparation blocked recovery");
+            std::filesystem::copy_file(
+                preparation_path, orphan_preparation,
+                std::filesystem::copy_options::overwrite_existing);
+            orphan_scan = store.scan(account(), journal, facts);
+            require(orphan_scan.complete() && orphan_scan.preparations.size() == 1,
+                    "complete orphan preparation blocked recovery");
+            ManagedOpeningAllocationPublisher publisher(
+                verifier, facts, store, journal, lease);
+            require(publisher.prepare({operation(), OperationKind::open, 3, 88001}).status ==
+                        ManagedOpeningAllocationPublicationStatus::already_prepared,
+                    "publisher prepare was blocked by orphan preparation");
+            require(std::filesystem::remove(orphan_preparation),
+                    "orphan preparation could not be removed");
             const auto preparation_alias = preparation_path.parent_path() / L"prep-alias.bin";
             std::filesystem::copy_file(preparation_path, preparation_alias);
             require(store.scan(account(), journal, facts).status ==
@@ -456,6 +478,19 @@ void rejects_noncanonical_reserved_paths_and_keeps_pending_separate() {
                         ManagedOpeningAllocationCommitStatus::committed,
                     "namespace allocation was not published");
             const auto allocation_path = allocation_record_path(directory);
+            const auto orphan_allocation =
+                allocation_path.parent_path() / L"alloc-orphan.bin.tmp";
+            std::filesystem::copy_file(
+                allocation_path, orphan_allocation,
+                std::filesystem::copy_options::overwrite_existing);
+            require(publisher.publish(entry.key, {operation(), OperationKind::open, 3, 88001}).status ==
+                        ManagedOpeningAllocationPublicationStatus::already_published,
+                    "publisher publish was blocked by orphan allocation");
+            const auto allocation_orphan_scan = store.scan(account(), journal, facts);
+            require(allocation_orphan_scan.complete() && allocation_orphan_scan.records.size() == 1,
+                    "orphan allocation changed durable scan");
+            require(std::filesystem::remove(orphan_allocation),
+                    "orphan allocation could not be removed");
             const auto allocation_alias = allocation_path.parent_path() / L"alloc-alias.bin";
             std::filesystem::copy_file(allocation_path, allocation_alias);
             require(store.scan(account(), journal, facts).status ==

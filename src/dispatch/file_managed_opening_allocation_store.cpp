@@ -1404,6 +1404,8 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
             const bool preparation = filename.rfind(L"prep-", 0) == 0;
             if (!allocation && !preparation)
                 continue;
+            if (item.path().extension() == L".tmp")
+                continue;
             if (item.path().extension() != L".bin") {
                 last_error_ = "managed opening allocation reserved path has an invalid name";
                 return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};

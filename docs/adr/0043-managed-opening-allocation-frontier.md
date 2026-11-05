@@ -64,8 +64,10 @@ An absent account directory is an empty complete scan. A pending preparation is
 retained across restart and is finalized only after a fresh B3B verification.
 Reserved `prep-*.bin.tmp` and `alloc-*.bin.tmp` files are unfinished write
 artifacts: scans ignore them, never treat them as durable records, and do not
-delete arbitrary files as part of recovery. Canonical `.bin` records remain
-fail-closed for malformed or non-canonical content.
+delete arbitrary files as part of recovery. Only regular non-reparse files use
+this temporary-artifact rule; other reserved temporary names, directories, and
+reparse points remain fail-closed. Canonical `.bin` records remain fail-closed
+for malformed or non-canonical content.
 If a later compatible frontier is visible, the store first validates and
 durably creates or finds the successor prep/alloc record under the same fence.
 Only then is the older pending preparation explicitly superseded; a failure to

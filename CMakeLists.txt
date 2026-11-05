@@ -23,6 +23,9 @@ add_library(mt5bridge_client INTERFACE)
 target_include_directories(mt5bridge_client INTERFACE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
+if(WIN32)
+    target_link_libraries(mt5bridge_client INTERFACE bcrypt)
+endif()
 add_library(mt5bridge::client ALIAS mt5bridge_client)
 set_target_properties(mt5bridge_client PROPERTIES EXPORT_NAME client)
 
@@ -45,6 +48,9 @@ target_include_directories(mt5bridge_journal PUBLIC
     $<INSTALL_INTERFACE:include>)
 target_include_directories(mt5bridge_journal PRIVATE
     ${PROJECT_SOURCE_DIR}/src/dispatch)
+if(WIN32)
+    target_link_libraries(mt5bridge_journal PUBLIC bcrypt)
+endif()
 add_library(mt5bridge::journal ALIAS mt5bridge_journal)
 set_target_properties(mt5bridge_journal PROPERTIES EXPORT_NAME journal)
 
@@ -92,6 +98,11 @@ if(BUILD_TESTING)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
     add_test(NAME mt5bridge_reconciliation_graph
              COMMAND mt5bridge_reconciliation_graph_test)
+    add_executable(mt5bridge_observation_graph_link_smoke
+                   tests/observation_graph_link_smoke.cpp)
+    target_link_libraries(mt5bridge_observation_graph_link_smoke PRIVATE mt5bridge::client)
+    add_test(NAME mt5bridge_observation_graph_link_smoke
+             COMMAND mt5bridge_observation_graph_link_smoke)
     add_executable(mt5bridge_reconciliation_engine_test
                    tests/reconciliation_engine_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_engine_test PRIVATE mt5bridge::client)

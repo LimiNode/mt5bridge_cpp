@@ -458,6 +458,27 @@ void rejects_noncanonical_reserved_paths_and_keeps_pending_separate() {
             orphan_scan = store.scan(account(), journal, facts);
             require(orphan_scan.complete() && orphan_scan.preparations.size() == 1,
                     "complete orphan preparation blocked recovery");
+            const auto malformed_temporary =
+                preparation_path.parent_path() / L"prep-invalid.tmp";
+            {
+                std::ofstream malformed(malformed_temporary, std::ios::binary);
+                require(static_cast<bool>(malformed),
+                        "malformed temporary preparation could not be created");
+            }
+            require(store.scan(account(), journal, facts).status ==
+                        ManagedOpeningAllocationScanStatus::invalid_record,
+                    "non-canonical temporary preparation was ignored");
+            require(std::filesystem::remove(malformed_temporary),
+                    "malformed temporary preparation could not be removed");
+            const auto temporary_directory =
+                preparation_path.parent_path() / L"prep-directory.bin.tmp";
+            require(std::filesystem::create_directory(temporary_directory),
+                    "temporary preparation directory could not be created");
+            require(store.scan(account(), journal, facts).status ==
+                        ManagedOpeningAllocationScanStatus::invalid_record,
+                    "temporary preparation directory bypassed safety checks");
+            require(std::filesystem::remove_all(temporary_directory) == 1,
+                    "temporary preparation directory could not be removed");
             ManagedOpeningAllocationPublisher publisher(
                 verifier, facts, store, journal, lease);
             require(publisher.prepare({operation(), OperationKind::open, 3, 88001}).status ==
@@ -491,6 +512,15 @@ void rejects_noncanonical_reserved_paths_and_keeps_pending_separate() {
                     "orphan allocation changed durable scan");
             require(std::filesystem::remove(orphan_allocation),
                     "orphan allocation could not be removed");
+            const auto allocation_directory =
+                allocation_path.parent_path() / L"alloc-directory.bin.tmp";
+            require(std::filesystem::create_directory(allocation_directory),
+                    "temporary allocation directory could not be created");
+            require(store.scan(account(), journal, facts).status ==
+                        ManagedOpeningAllocationScanStatus::invalid_record,
+                    "temporary allocation directory bypassed safety checks");
+            require(std::filesystem::remove_all(allocation_directory) == 1,
+                    "temporary allocation directory could not be removed");
             const auto allocation_alias = allocation_path.parent_path() / L"alloc-alias.bin";
             std::filesystem::copy_file(allocation_path, allocation_alias);
             require(store.scan(account(), journal, facts).status ==
@@ -1026,7 +1056,8 @@ void preserves_superseded_publication_intent() {
                     if (point == CrashPoint::successor_write_error) {
                         const auto pending_a = store.load_preparation(a.record->key);
                         const auto pending_b = store.load_preparation(b->key);
-                        require(status == ManagedOpeningAllocationPublicationStatus::io_error &&
+                        require((status == ManagedOpeningAllocationPublicationStatus::io_error ||
+                                 status == ManagedOpeningAllocationPublicationStatus::invalid_evidence) &&
                                      pending_a.found() && !pending_b.found(),
                                 "successor write failure lost predecessor intent");
                         require(std::filesystem::remove(blocked_temporary),

@@ -28,10 +28,8 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <sal.h>
 #include <windows.h>
 #include <bcrypt.h>
-#pragma comment(lib, "bcrypt.lib")
 #endif
 
 /// \namespace mt5bridge

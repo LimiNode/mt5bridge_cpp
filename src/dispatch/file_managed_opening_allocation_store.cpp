@@ -39,6 +39,42 @@ constexpr std::size_t kMaxRecordBytes = kEnvelopeBytes + kMaxBodyBytes;
 
 enum class ReadStatus { absent, valid, malformed, io_error };
 
+enum class TemporaryRecordStatus { valid, invalid_record, io_error };
+
+/// \brief Validates an unfinished atomic-write artifact before ignoring it.
+/// \param path Candidate `*.bin.tmp` path under the account namespace.
+/// \param error Receives a fail-closed filesystem diagnostic.
+/// \return Whether the artifact is a regular, non-reparse file that may be ignored.
+TemporaryRecordStatus validate_temporary_record(const std::filesystem::path &path,
+                                                std::string &error) {
+#if defined(_WIN32)
+    std::error_code status_error;
+    const auto status = std::filesystem::symlink_status(path, status_error);
+    if (status_error) {
+        error = status_error.message();
+        return TemporaryRecordStatus::io_error;
+    }
+    if (std::filesystem::is_symlink(status) || !std::filesystem::is_regular_file(status)) {
+        error = "managed opening allocation temporary is not a regular file";
+        return TemporaryRecordStatus::invalid_record;
+    }
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        error = win32_error("GetFileAttributesW(managed opening allocation temporary)");
+        return TemporaryRecordStatus::io_error;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "managed opening allocation temporary is a reparse point";
+        return TemporaryRecordStatus::invalid_record;
+    }
+    return TemporaryRecordStatus::valid;
+#else
+    (void)path;
+    error = "WindowsFileManagedOpeningAllocationStore requires Windows";
+    return TemporaryRecordStatus::io_error;
+#endif
+}
+
 std::string account_key_bytes(const AccountKey &account) {
     std::vector<std::uint8_t> bytes;
     append_u64(bytes, static_cast<std::uint64_t>(account.server.size()));
@@ -279,8 +315,18 @@ AccountRecordScanResult read_account_records_unlocked(
             const bool preparation = filename.rfind(L"prep-", 0) == 0;
             if (!allocation && !preparation)
                 continue;
-            if (item.path().extension() == L".tmp")
+            const auto filename_suffix = filename.size() >= 8
+                                             ? filename.substr(filename.size() - 8)
+                                             : std::wstring();
+            if (filename_suffix == L".bin.tmp") {
+                const auto temporary_status = validate_temporary_record(item.path(), error);
+                if (temporary_status != TemporaryRecordStatus::valid)
+                    return {temporary_status == TemporaryRecordStatus::io_error
+                                ? AccountRecordScanStatus::io_error
+                                : AccountRecordScanStatus::invalid_record,
+                            {}};
                 continue;
+            }
             if (item.path().extension() != L".bin") {
                 error = "managed opening allocation reserved path has an invalid name: " +
                         item.path().filename().string();
@@ -1404,8 +1450,21 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
             const bool preparation = filename.rfind(L"prep-", 0) == 0;
             if (!allocation && !preparation)
                 continue;
-            if (item.path().extension() == L".tmp")
+            const auto filename_suffix = filename.size() >= 8
+                                             ? filename.substr(filename.size() - 8)
+                                             : std::wstring();
+            if (filename_suffix == L".bin.tmp") {
+                std::string error;
+                const auto temporary_status = validate_temporary_record(item.path(), error);
+                if (temporary_status != TemporaryRecordStatus::valid) {
+                    last_error_ = error;
+                    return {temporary_status == TemporaryRecordStatus::io_error
+                                ? ManagedOpeningAllocationScanStatus::io_error
+                                : ManagedOpeningAllocationScanStatus::invalid_record,
+                            {}, {}};
+                }
                 continue;
+            }
             if (item.path().extension() != L".bin") {
                 last_error_ = "managed opening allocation reserved path has an invalid name";
                 return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};

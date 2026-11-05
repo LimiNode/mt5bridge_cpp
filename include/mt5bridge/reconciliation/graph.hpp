@@ -10,19 +10,29 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
 #include <random>
 #include <string>
 #include <stdexcept>
-#include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <sal.h>
+#include <windows.h>
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+#endif
 
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
@@ -44,22 +54,28 @@ inline std::uint64_t mix_observation_graph_identity(std::uint64_t value) {
 
 /// \brief Allocates one unpredictable causal epoch for this process.
 /// \return Non-zero process nonce shared by this process's graph instances.
+/// \note Windows uses the system-preferred CNG random source and fails closed
+///       when it is unavailable. No clock/address fallback is used for a
+///       cross-process identity.
 inline std::uint64_t observation_graph_process_nonce() {
     static const std::uint64_t nonce = [] {
-        const auto now = static_cast<std::uint64_t>(
-            std::chrono::high_resolution_clock::now().time_since_epoch().count());
-        const auto address = reinterpret_cast<std::uintptr_t>(&now);
-        const auto thread = static_cast<std::uint64_t>(
-            std::hash<std::thread::id>{}(std::this_thread::get_id()));
-        std::uint64_t value = now ^ static_cast<std::uint64_t>(address) ^ thread;
+#if defined(_WIN32)
+        std::uint64_t value = 0;
+        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value),
+                            static_cast<ULONG>(sizeof(value)),
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+            throw std::runtime_error("observation graph entropy unavailable");
+#else
+        std::uint64_t value = 0;
         try {
             std::random_device random;
-            value ^= static_cast<std::uint64_t>(random()) << 32;
-            value ^= static_cast<std::uint64_t>(random());
+            const auto high = static_cast<std::uint64_t>(random());
+            const auto low = static_cast<std::uint64_t>(random());
+            value = (high << 32) ^ low;
         } catch (...) {
-            // The clock/address/thread mix remains process-specific when a
-            // platform does not provide a random device.
+            throw std::runtime_error("observation graph entropy unavailable");
         }
+#endif
         value = mix_observation_graph_identity(value);
         return value == 0 ? UINT64_C(0x9e3779b97f4a7c15) : value;
     }();

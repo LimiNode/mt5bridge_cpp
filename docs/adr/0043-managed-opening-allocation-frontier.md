@@ -26,8 +26,12 @@ The store has two files for one frontier:
 
 Both files use bounded checksummed envelopes and atomic write/replace under an
 account-scoped writer lease and a store lock. A second identical preparation or
-publication is idempotent. A different payload for the same identity is a
-conflict. A later partial fill creates a new frontier record and never rewrites
+publication is idempotent. Source-equivalent payloads (the same operation
+identity, immutable source tuple, quantities, digest, and fact references) are
+also assigned one durable discriminator: an alias under another discriminator
+returns the existing committed identity rather than creating a second record.
+A different payload for the same identity is a conflict. A later partial fill
+creates a new frontier record and never rewrites
 the previous one. Recovery of an older frontier remains valid when the fact
 store also contains later compatible facts: within one graph instance, an
 omitted fact from the same or an earlier source revision is incomplete. Across
@@ -116,8 +120,9 @@ recovery, missing-source rejection, unknown-account empty scans, stale lease
 behavior, stale-proof rejection at the low-level store boundary, canonical
 reserved-path and pending-manifest handling, a real journal/fact/allocation
 filesystem restart, production-reachable journal admission and one-shot result
-publication, bounded two-process cross-instance history attribution, canonical
-successor-key rejection, prepare-after-publish idempotence, explicit
+publication, bounded two-process cross-instance history attribution, per-graph
+revision ordering, source-equivalent alias rejection, a three-frontier
+successor recovery chain, prepare-after-publish idempotence, explicit
 superseded pending cleanup, and preservation of an earlier frontier after a
 second partial fill.
 Additional B3C tests must retain the same fail-closed source and fencing

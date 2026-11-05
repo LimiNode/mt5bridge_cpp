@@ -3,6 +3,7 @@
 
 #include "managed_opening_source_verifier.hpp"
 #include "managed_opening_allocation.hpp"
+#include "managed_opening_source_digest.hpp"
 #include "one_shot_backend.hpp"
 
 #include "support/memory_journal_store.hpp"
@@ -1189,6 +1190,17 @@ void survives_filesystem_store_reload() {
 }
 #endif
 
+/// \brief Locks the non-authoritative source digest algorithm to a golden vector.
+/// \return No value; throws when fixed canonical inputs change unexpectedly.
+void preserves_source_digest_golden_vector() {
+    mt5bridge::dispatch::detail::ManagedOpeningSourceDigest digest;
+    digest.add_text("mt5bridge-golden");
+    digest.add_u64(UINT64_C(0x0123456789abcdef));
+    digest.add_bytes({0, 1, 2, 255});
+    require(digest.value() == UINT64_C(0x79d8ea7db41dd3fa),
+            "managed opening source digest golden vector changed");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1197,6 +1209,7 @@ int main(int argc, char **argv) {
         return cross_process_recovery_child(argv[2]);
 #endif
     try {
+        preserves_source_digest_golden_vector();
         accepts_only_independent_source_chain();
         rejects_missing_or_rewritten_sources();
         rejects_identity_and_history_contradictions();

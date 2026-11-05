@@ -227,6 +227,117 @@ ReadStatus read_entry(const std::filesystem::path &path,
 #endif
 }
 
+struct DurableOpeningFileRecord {
+    ManagedOpeningAllocationEntry entry;
+    bool allocation = false;
+};
+
+enum class AccountRecordScanStatus { complete, invalid_record, io_error };
+
+struct AccountRecordScanResult {
+    AccountRecordScanStatus status = AccountRecordScanStatus::io_error;
+    std::vector<DurableOpeningFileRecord> records;
+};
+
+AccountRecordScanResult read_account_records_unlocked(
+    const std::filesystem::path &directory, const AccountKey &account,
+    std::string &error) {
+#if defined(_WIN32)
+    const auto account_path = account_directory(directory, account);
+    std::error_code status_error;
+    const auto status = std::filesystem::symlink_status(account_path, status_error);
+    const bool no_such_account =
+        status_error == std::make_error_code(std::errc::no_such_file_or_directory) ||
+        status_error.value() == ERROR_FILE_NOT_FOUND ||
+        status_error.value() == ERROR_PATH_NOT_FOUND;
+    if ((status.type() == std::filesystem::file_type::not_found && !status_error) ||
+        no_such_account)
+        return {AccountRecordScanStatus::complete, {}};
+    if (status_error) {
+        error = status_error.message();
+        return {AccountRecordScanStatus::io_error, {}};
+    }
+    if (std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status)) {
+        error = "managed opening allocation account path is not a directory";
+        return {AccountRecordScanStatus::invalid_record, {}};
+    }
+    const auto account_attributes = GetFileAttributesW(account_path.c_str());
+    if (account_attributes == INVALID_FILE_ATTRIBUTES) {
+        error = win32_error("GetFileAttributesW(managed opening allocation account)");
+        return {AccountRecordScanStatus::io_error, {}};
+    }
+    if ((account_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "managed opening allocation account path is a reparse point";
+        return {AccountRecordScanStatus::invalid_record, {}};
+    }
+
+    std::vector<DurableOpeningFileRecord> records;
+    try {
+        for (const auto &item : std::filesystem::directory_iterator(account_path)) {
+            const auto filename = item.path().filename().wstring();
+            const bool allocation = filename.rfind(L"alloc-", 0) == 0;
+            const bool preparation = filename.rfind(L"prep-", 0) == 0;
+            if (!allocation && !preparation)
+                continue;
+            if (item.path().extension() == L".tmp")
+                continue;
+            if (item.path().extension() != L".bin") {
+                error = "managed opening allocation reserved path has an invalid name: " +
+                        item.path().filename().string();
+                return {AccountRecordScanStatus::invalid_record, {}};
+            }
+            std::error_code item_status_error;
+            const auto item_status = std::filesystem::symlink_status(
+                item.path(), item_status_error);
+            if (item_status_error) {
+                error = item_status_error.message();
+                return {AccountRecordScanStatus::io_error, {}};
+            }
+            if (std::filesystem::is_symlink(item_status) ||
+                !std::filesystem::is_regular_file(item_status)) {
+                error = "managed opening allocation record is not a regular file";
+                return {AccountRecordScanStatus::invalid_record, {}};
+            }
+            const auto item_attributes = GetFileAttributesW(item.path().c_str());
+            if (item_attributes == INVALID_FILE_ATTRIBUTES) {
+                error = win32_error("GetFileAttributesW(managed opening allocation record)");
+                return {AccountRecordScanStatus::io_error, {}};
+            }
+            if ((item_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                error = "managed opening allocation record is a reparse point";
+                return {AccountRecordScanStatus::invalid_record, {}};
+            }
+            std::optional<ManagedOpeningAllocationEntry> entry;
+            const auto read_status = read_entry(item.path(), entry, error);
+            if (read_status != ReadStatus::valid || !entry || entry->account != account) {
+                if (error.empty())
+                    error = "managed opening allocation record is invalid";
+                return {read_status == ReadStatus::io_error
+                            ? AccountRecordScanStatus::io_error
+                            : AccountRecordScanStatus::invalid_record,
+                        {}};
+            }
+            const auto expected_path = record_path(
+                directory, entry->key, allocation ? "alloc-" : "prep-");
+            if (expected_path.filename() != item.path().filename()) {
+                error = "managed opening allocation record filename is not canonical";
+                return {AccountRecordScanStatus::invalid_record, {}};
+            }
+            records.push_back({std::move(*entry), allocation});
+        }
+    } catch (const std::filesystem::filesystem_error &filesystem_error) {
+        error = filesystem_error.what();
+        return {AccountRecordScanStatus::io_error, {}};
+    }
+    return {AccountRecordScanStatus::complete, std::move(records)};
+#else
+    (void)directory;
+    (void)account;
+    error = "WindowsFileManagedOpeningAllocationStore requires Windows";
+    return {AccountRecordScanStatus::io_error, {}};
+#endif
+}
+
 enum class SourceValidation { valid, missing_source, invalid_source, io_error };
 
 enum class ProofRelation { exact, extended, contradiction };
@@ -346,8 +457,7 @@ SourceValidation validate_entry_sources(
     // The key revision is a durable discriminator.  It may be advanced to
     // avoid a collision after an observation-graph restart, so source
     // completeness must use the actual source frontier instead.
-    std::uint64_t source_frontier_revision = 0;
-    std::set<std::uint64_t> source_graph_instances;
+    std::map<std::uint64_t, std::uint64_t> source_frontier_revisions;
     for (std::size_t index = 0; index != entry.fact_references.size(); ++index) {
         const auto &reference = entry.fact_references[index];
         const auto fact_it = facts.find(reference.deal_ticket);
@@ -380,10 +490,16 @@ SourceValidation validate_entry_sources(
             error = "managed opening allocation fact does not match the entry";
             return SourceValidation::invalid_source;
         }
-        source_frontier_revision = (std::max)(source_frontier_revision, receipt.source_revision);
-        source_graph_instances.insert(receipt.graph_instance_id);
+        auto &graph_frontier_revision =
+            source_frontier_revisions[receipt.graph_instance_id];
+        graph_frontier_revision =
+            (std::max)(graph_frontier_revision, receipt.source_revision);
         frontier_facts.push_back(fact);
     }
+    std::uint64_t source_frontier_revision = 0;
+    for (const auto &graph_frontier : source_frontier_revisions)
+        source_frontier_revision = (std::max)(source_frontier_revision,
+                                              graph_frontier.second);
     if (source_frontier_revision > entry.key.frontier_revision) {
         error = "managed opening allocation frontier revision mismatch";
         return SourceValidation::invalid_source;
@@ -416,10 +532,11 @@ SourceValidation validate_entry_sources(
         // this historical snapshot incomplete; cross-instance revisions are
         // not ordered and are bounded by B3B current-history verification.
         const auto &receipt = fact.admission_receipt();
+        const auto graph_frontier = source_frontier_revisions.find(
+            receipt.graph_instance_id);
         if (!frontier->accepts_identity(fact) ||
-            (source_graph_instances.find(receipt.graph_instance_id) !=
-                 source_graph_instances.end() &&
-             receipt.source_revision <= source_frontier_revision)) {
+            (graph_frontier != source_frontier_revisions.end() &&
+             receipt.source_revision <= graph_frontier->second)) {
             error = "managed opening allocation historical frontier is incomplete";
             return SourceValidation::invalid_source;
         }
@@ -553,6 +670,62 @@ bool same_entry_payload(const ManagedOpeningAllocationEntry &left,
     return normalized_left == normalized_right;
 }
 
+enum class SourceEquivalentLookupStatus { not_found, found, invalid_record, io_error };
+
+struct SourceEquivalentLookup {
+    SourceEquivalentLookupStatus status = SourceEquivalentLookupStatus::not_found;
+    std::optional<ManagedOpeningAllocationEntry> entry;
+    bool allocation = false;
+};
+
+/// \brief Finds a source-equivalent allocation or preparation under the held account fence.
+/// \param directory Allocation namespace, already locked by the caller.
+/// \param account Account whose allocation namespace is inspected.
+/// \param candidate Source-derived candidate to compare without its discriminator.
+/// \param error Receives a fail-closed filesystem or record diagnostic.
+/// \return One structurally valid source-equivalent record, or an explicit scan status.
+SourceEquivalentLookup find_source_equivalent_unlocked(
+    const std::filesystem::path &directory, const AccountKey &account,
+    const ManagedOpeningAllocationEntry &candidate, std::string &error) {
+    const auto scanned = read_account_records_unlocked(directory, account, error);
+    if (scanned.status == AccountRecordScanStatus::io_error)
+        return {SourceEquivalentLookupStatus::io_error, std::nullopt};
+    if (scanned.status == AccountRecordScanStatus::invalid_record)
+        return {SourceEquivalentLookupStatus::invalid_record, std::nullopt};
+    std::optional<ManagedOpeningAllocationEntry> allocation_equivalent;
+    std::optional<ManagedOpeningAllocationEntry> pending_equivalent;
+    for (const auto &record : scanned.records) {
+        if (!same_entry_payload(candidate, record.entry))
+            continue;
+        auto &equivalent = record.allocation ? allocation_equivalent : pending_equivalent;
+        if (equivalent) {
+            error = "duplicate source-equivalent managed opening records";
+            return {SourceEquivalentLookupStatus::invalid_record, std::nullopt};
+        }
+        equivalent = record.entry;
+    }
+    if (allocation_equivalent) {
+        if (pending_equivalent &&
+            !(pending_equivalent->key == allocation_equivalent->key)) {
+            error = "source-equivalent allocation and preparation use different keys";
+            return {SourceEquivalentLookupStatus::invalid_record, std::nullopt};
+        }
+        return {SourceEquivalentLookupStatus::found, allocation_equivalent, true};
+    }
+    if (pending_equivalent)
+        return {SourceEquivalentLookupStatus::found, pending_equivalent, false};
+    return {};
+}
+
+/// \brief Detects two source-equivalent records with different durable keys.
+/// \param left First durable record.
+/// \param right Second durable record.
+/// \return True when both describe one source frontier under different keys.
+bool source_identity_conflict(const ManagedOpeningAllocationEntry &left,
+                              const ManagedOpeningAllocationEntry &right) {
+    return same_entry_payload(left, right) && !(left.key == right.key);
+}
+
 /// \brief Selects a durable frontier discriminator without changing source identity.
 /// \param candidate Fresh source-derived frontier candidate.
 /// \param existing Complete account scan under the allocation store fence.
@@ -636,11 +809,30 @@ ManagedOpeningAllocationCommitStatus ensure_durable_successor(
     }
     successor->key.frontier_revision = (std::max)(
         successor->key.frontier_revision, predecessor.key.frontier_revision + 1);
+    const auto equivalent = find_source_equivalent_unlocked(
+        directory, predecessor.account, *successor, error);
+    if (equivalent.status == SourceEquivalentLookupStatus::io_error)
+        return ManagedOpeningAllocationCommitStatus::io_error;
+    if (equivalent.status == SourceEquivalentLookupStatus::invalid_record) {
+        if (error.empty())
+            error = "successor equivalent scan rejected a record";
+        return ManagedOpeningAllocationCommitStatus::invalid_record;
+    }
+    if (equivalent.status == SourceEquivalentLookupStatus::found && equivalent.entry) {
+        const auto validation = validate_entry_sources(
+            *equivalent.entry, &proof, journal_store, fact_store, error);
+        if (validation != SourceValidation::valid)
+            return map_validation_status(validation);
+        return ManagedOpeningAllocationCommitStatus::committed;
+    }
     for (;;) {
         const auto validation = validate_entry_sources(
             *successor, &proof, journal_store, fact_store, error);
-        if (validation != SourceValidation::valid)
+        if (validation != SourceValidation::valid) {
+            if (error.empty())
+                error = "successor source validation failed";
             return map_validation_status(validation);
+        }
 
         bool durable = false;
         bool conflict = false;
@@ -848,6 +1040,24 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
             last_error_ = error.what();
             return;
         }
+        const auto equivalent = find_source_equivalent_unlocked(
+            directory_, entry.account, entry, last_error_);
+        if (equivalent.status == SourceEquivalentLookupStatus::io_error) {
+            result = ManagedOpeningAllocationCommitStatus::io_error;
+            return;
+        }
+        if (equivalent.status == SourceEquivalentLookupStatus::invalid_record) {
+            result = ManagedOpeningAllocationCommitStatus::invalid_record;
+            return;
+        }
+        if (equivalent.status == SourceEquivalentLookupStatus::found && equivalent.entry) {
+            const auto validation = validate_entry_sources(
+                *equivalent.entry, nullptr, journal_store, fact_store, last_error_);
+            result = validation == SourceValidation::valid
+                         ? ManagedOpeningAllocationCommitStatus::already_committed
+                         : map_validation_status(validation);
+            return;
+        }
         const auto validation = validate_entry_sources(
             entry, &proof, journal_store, fact_store, last_error_);
         if (validation != SourceValidation::valid) {
@@ -987,6 +1197,40 @@ ManagedOpeningAllocationCommitStatus WindowsFileManagedOpeningAllocationStore::p
             if (!fresh.found()) {
                 result = map_verifier_commit_status(fresh.status);
                 last_error_ = "managed opening allocation source verification failed";
+                return;
+            }
+            const auto equivalent = find_source_equivalent_unlocked(
+                directory_, preparation.entry.account, preparation.entry, last_error_);
+            if (equivalent.status == SourceEquivalentLookupStatus::io_error) {
+                result = ManagedOpeningAllocationCommitStatus::io_error;
+                return;
+            }
+            if (equivalent.status == SourceEquivalentLookupStatus::invalid_record) {
+                result = ManagedOpeningAllocationCommitStatus::invalid_record;
+                return;
+            }
+            if (equivalent.status == SourceEquivalentLookupStatus::found &&
+                equivalent.entry &&
+                !(equivalent.entry->key == preparation.entry.key)) {
+                if (!equivalent.allocation) {
+                    result = ManagedOpeningAllocationCommitStatus::conflict;
+                    last_error_ =
+                        "managed opening allocation source frontier has a pending alias";
+                    return;
+                }
+                const auto historical_validation = validate_entry_sources(
+                    *equivalent.entry, &*fresh.proof, journal_store, fact_store, last_error_);
+                if (historical_validation != SourceValidation::valid) {
+                    result = map_validation_status(historical_validation);
+                    return;
+                }
+                if (durable_status == ReadStatus::valid &&
+                    !remove_preparation_file(
+                        record_path(directory_, preparation.entry.key, "prep-"), last_error_)) {
+                    result = ManagedOpeningAllocationCommitStatus::io_error;
+                    return;
+                }
+                result = ManagedOpeningAllocationCommitStatus::already_committed;
                 return;
             }
             const auto target = record_path(directory_, preparation.entry.key, "alloc-");
@@ -1206,6 +1450,18 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
                     last_error_ = "duplicate managed opening allocation identity";
                     return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
                 }
+                for (const auto &existing : records)
+                    if (source_identity_conflict(*entry, existing)) {
+                        last_error_ =
+                            "duplicate managed opening source frontier identity";
+                        return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+                    }
+                for (const auto &existing : preparations)
+                    if (source_identity_conflict(*entry, existing.entry)) {
+                        last_error_ =
+                            "allocation conflicts with pending source frontier identity";
+                        return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+                    }
                 const auto validation = validate_entry_sources(
                     *entry, nullptr, journal_store, fact_store, error);
                 if (validation != SourceValidation::valid) {
@@ -1222,6 +1478,18 @@ ManagedOpeningAllocationScanResult WindowsFileManagedOpeningAllocationStore::sca
                     last_error_ = "duplicate managed opening preparation identity";
                     return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
                 }
+                for (const auto &existing : records)
+                    if (source_identity_conflict(*entry, existing)) {
+                        last_error_ =
+                            "preparation conflicts with committed source frontier identity";
+                        return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+                    }
+                for (const auto &existing : preparations)
+                    if (source_identity_conflict(*entry, existing.entry)) {
+                        last_error_ =
+                            "duplicate pending source frontier identity";
+                        return {ManagedOpeningAllocationScanStatus::invalid_record, {}, {}};
+                    }
                 const auto validation = validate_entry_sources(
                     *entry, nullptr, journal_store, fact_store, error);
                 if (validation != SourceValidation::valid) {

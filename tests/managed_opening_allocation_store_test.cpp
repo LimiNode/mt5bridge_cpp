@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -256,6 +257,17 @@ void durable_prepare_publish_restart_and_replay() {
                                   {operation(), OperationKind::open, 3, 88001}) ==
                         ManagedOpeningAllocationCommitStatus::committed,
                     "opening allocation was not published");
+            auto alias = entry;
+            alias.key.frontier_revision += 100;
+            require(store.prepare(alias, *proof_result.proof, journal, facts, lease) ==
+                        ManagedOpeningAllocationCommitStatus::already_committed &&
+                        !store.load_preparation(alias.key).found(),
+                    "source-equivalent alias created a second preparation");
+            require(store.publish(ManagedOpeningAllocationPreparation{alias}, journal, facts,
+                                  lease, verifier,
+                                  {operation(), OperationKind::open, 3, 88001}) ==
+                        ManagedOpeningAllocationCommitStatus::already_committed,
+                    "source-equivalent alias created a second committed allocation");
             require(store.prepare(entry, *proof_result.proof, journal, facts, lease) ==
                         ManagedOpeningAllocationCommitStatus::already_committed &&
                         !store.load_preparation(entry.key).found(),
@@ -649,6 +661,199 @@ void preserves_historical_frontiers_when_a_partial_fill_arrives() {
     std::filesystem::remove_all(directory);
 }
 
+/// \brief Verifies source revision ordering independently for each graph epoch.
+/// \note Numeric revisions from different observation graphs are not comparable.
+void preserves_cross_graph_frontier_history() {
+    ObservationBatch empty_history;
+    empty_history.account = account();
+    empty_history.observed_domains = ObservationDomain::history_deals;
+    empty_history.history_deals_window = source_window();
+    const auto baseline_batch = empty_history;
+
+    ObservationGraph graph_a(account());
+    require(graph_a.apply(empty_history).accepted(), "graph A baseline was not accepted");
+    const auto baseline = capture_reconciliation_baseline(graph_a);
+    empty_history.history_deals = {deal(5001, 0.05)};
+    require(graph_a.apply(empty_history).accepted(), "graph A fill was not accepted");
+
+    MemoryOpeningFactStore facts;
+    facts.facts.push_back(fact_for(graph_a, 5001, 0.05));
+    mt5bridge_test_support::MemoryJournalStore journal;
+    journal.records.emplace(operation(), journal_record(baseline, 10));
+    TestLease lease;
+    const ManagedOpeningProvenanceRequest request{
+        operation(), OperationKind::open, 3, 88001};
+    ManagedOpeningSourceVerifier verifier_a(
+        journal, facts, graph_a, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+    const auto proof_a = verifier_a.verify(request);
+    require(proof_a.found(), "graph A proof was not verified");
+    const auto entry_a = make_entry(*proof_a.proof, facts.facts);
+
+    const auto directory = test_directory();
+    std::filesystem::remove_all(directory);
+    try {
+        WindowsFileManagedOpeningAllocationStore store(directory);
+        require(store.prepare(entry_a, *proof_a.proof, journal, facts, lease) ==
+                    ManagedOpeningAllocationCommitStatus::committed &&
+                    store.publish(ManagedOpeningAllocationPreparation{entry_a}, journal, facts,
+                                  lease, verifier_a, request) ==
+                        ManagedOpeningAllocationCommitStatus::committed,
+                "graph A frontier was not published");
+
+        ObservationGraph graph_b(account());
+        require(graph_b.instance_id() != graph_a.instance_id(),
+                "independent graph epochs reused their identity");
+        ObservationBatch first_b = baseline_batch;
+        first_b.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
+        require(graph_b.apply(first_b).accepted(), "graph B first fill was not accepted");
+        facts.facts.push_back(fact_for(graph_b, 5002, 0.03));
+        ManagedOpeningSourceVerifier verifier_b(
+            journal, facts, graph_b, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+        ManagedOpeningAllocationPublisher publisher_b(
+            verifier_b, facts, store, journal, lease);
+        const auto prepared_b = publisher_b.prepare(request);
+        require(prepared_b.status == ManagedOpeningAllocationPublicationStatus::prepared &&
+                    prepared_b.record &&
+                    publisher_b.publish(prepared_b.record->key, request).status ==
+                        ManagedOpeningAllocationPublicationStatus::published,
+                "graph B first frontier was not published");
+
+        ObservationBatch second_b = baseline_batch;
+        second_b.history_deals = {deal(5001, 0.05), deal(5002, 0.03), deal(5003, 0.02)};
+        require(graph_b.apply(second_b).accepted(), "graph B second fill was not accepted");
+        facts.facts.push_back(fact_for(graph_b, 5003, 0.02));
+        const auto historical = store.scan(account(), journal, facts);
+        require(historical.complete() && historical.records.size() == 2,
+                "cross-graph historical frontier was rejected by a foreign revision");
+
+        const auto prepared_c = publisher_b.prepare(request);
+        require(prepared_c.status == ManagedOpeningAllocationPublicationStatus::prepared &&
+                    prepared_c.record &&
+                    publisher_b.publish(prepared_c.record->key, request).status ==
+                        ManagedOpeningAllocationPublicationStatus::published,
+                "graph B second frontier was not publishable");
+        const auto final = store.scan(account(), journal, facts);
+        require(final.complete() && final.records.size() == 3 && final.preparations.empty(),
+                "cross-graph frontier progression did not converge");
+    } catch (...) {
+        std::filesystem::remove_all(directory);
+        throw;
+    }
+    std::filesystem::remove_all(directory);
+}
+
+/// \brief Replays a three-frontier supersession chain after a process restart.
+void recovers_one_durable_successor_after_multiple_supersessions() {
+    const auto root = test_directory();
+    std::filesystem::remove_all(root);
+    try {
+        std::optional<ManagedOpeningAllocationKey> key_a;
+        std::optional<ManagedOpeningAllocationKey> key_b;
+        std::optional<ManagedOpeningAllocationKey> key_c;
+        {
+            ObservationGraph graph(account());
+            ObservationBatch history;
+            history.account = account();
+            history.observed_domains = ObservationDomain::history_deals;
+            history.history_deals_window = source_window();
+            require(graph.apply(history).accepted(), "multi-successor baseline failed");
+            const auto baseline = capture_reconciliation_baseline(graph);
+            const auto baseline_history = history;
+            auto first_fill = baseline_history;
+            first_fill.history_deals = {deal(5001, 0.05)};
+            require(graph.apply(first_fill).accepted(), "multi-successor first fill failed");
+
+            WindowsFileJournalStore journal(root / "journal");
+            WindowsFileManagedOpeningFactStore facts(root / "facts");
+            WindowsSingleWriterLease lease(root / "lease", account());
+            WindowsFileManagedOpeningAllocationStore store(root / "allocations");
+            auto record = journal_record(baseline, 10, 1, 1);
+            const auto token = lease.held_fencing_token(account());
+            require(token.has_value(), "multi-successor lease failed");
+            record.fencing_token = *token;
+            require(journal.commit(record, std::nullopt) == StoreCommitStatus::committed &&
+                        facts.commit(fact_for(graph, 5001, 0.05, 1), lease) ==
+                            ManagedOpeningFactCommitStatus::committed,
+                    "multi-successor first sources were not durable");
+            ManagedOpeningSourceVerifier verifier(
+                journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+            ManagedOpeningAllocationPublisher publisher(verifier, facts, store, journal, lease);
+            const ManagedOpeningProvenanceRequest request{
+                operation(), OperationKind::open, 1, 88001};
+            const auto a = publisher.prepare(request);
+            require(a.status == ManagedOpeningAllocationPublicationStatus::prepared && a.record,
+                    "multi-successor A was not prepared");
+            key_a = a.record->key;
+
+            auto second_fill = baseline_history;
+            second_fill.history_deals = {deal(5001, 0.05), deal(5002, 0.03)};
+            require(graph.apply(second_fill).accepted(), "multi-successor second fill failed");
+            require(facts.commit(fact_for(graph, 5002, 0.03, 1), lease) ==
+                        ManagedOpeningFactCommitStatus::committed,
+                    "multi-successor second source was not durable");
+            const auto b = publisher.prepare(request);
+            require(b.status == ManagedOpeningAllocationPublicationStatus::prepared && b.record,
+                    "multi-successor B was not prepared");
+            key_b = b.record->key;
+
+            auto third_fill = baseline_history;
+            third_fill.history_deals = {
+                deal(5001, 0.05), deal(5002, 0.03), deal(5003, 0.02)};
+            require(graph.apply(third_fill).accepted(), "multi-successor third fill failed");
+            require(facts.commit(fact_for(graph, 5003, 0.02, 1), lease) ==
+                        ManagedOpeningFactCommitStatus::committed,
+                    "multi-successor third source was not durable");
+            const auto c = publisher.prepare(request);
+            require(c.status == ManagedOpeningAllocationPublicationStatus::prepared && c.record,
+                    "multi-successor C was not prepared");
+            key_c = c.record->key;
+
+            require(publisher.publish(*key_b, request).status ==
+                        ManagedOpeningAllocationPublicationStatus::superseded,
+                    "publishing B did not reuse durable C");
+            require(publisher.publish(*key_a, request).status ==
+                        ManagedOpeningAllocationPublicationStatus::superseded,
+                    "publishing A did not reuse durable C");
+            const auto pending = store.scan(account(), journal, facts);
+            require(pending.complete() && pending.records.empty() &&
+                        pending.preparations.size() == 1 &&
+                        pending.preparations.front().entry.key == *key_c,
+                    "multi-successor cleanup left a duplicate frontier");
+        }
+
+        WindowsFileJournalStore journal(root / "journal");
+        WindowsFileManagedOpeningFactStore facts(root / "facts");
+        WindowsSingleWriterLease lease(root / "lease", account());
+        WindowsFileManagedOpeningAllocationStore store(root / "allocations");
+        ObservationGraph graph(account());
+        ObservationBatch current;
+        current.account = account();
+        current.observed_domains = ObservationDomain::history_deals;
+        current.history_deals_window = source_window();
+        current.history_deals = {deal(5001, 0.05), deal(5002, 0.03), deal(5003, 0.02)};
+        require(graph.apply(current).accepted(), "multi-successor restart history failed");
+        ManagedOpeningSourceVerifier verifier(
+            journal, facts, graph, ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, lease);
+        ManagedOpeningAllocationPublisher publisher(verifier, facts, store, journal, lease);
+        const auto recovered = store.scan(account(), journal, facts);
+        require(recovered.complete() && recovered.records.empty() &&
+                    recovered.preparations.size() == 1 &&
+                    recovered.preparations.front().entry.key == *key_c,
+                "multi-successor restart did not retain canonical C");
+        require(publisher.publish(*key_c, {operation(), OperationKind::open, 1, 88001}).status ==
+                    ManagedOpeningAllocationPublicationStatus::published,
+                "canonical C was not publishable after restart");
+        const auto final = store.scan(account(), journal, facts);
+        require(final.complete() && final.records.size() == 1 && final.preparations.empty() &&
+                    final.records.front().fact_references.size() == 3,
+                "multi-successor restart created a duplicate allocation");
+    } catch (...) {
+        std::filesystem::remove_all(root);
+        throw;
+    }
+    std::filesystem::remove_all(root);
+}
+
 /// \brief Exercises each durable boundary without changing production storage seams.
 void preserves_superseded_publication_intent() {
     enum class CrashPoint { before_successor, pending_successor, committed_successor,
@@ -738,21 +943,9 @@ void preserves_superseded_publication_intent() {
                         auto alias = *b;
                         ++alias.key.frontier_revision;
                         require(store.prepare(alias, *expanded_proof.proof, journal, facts, lease) ==
-                                    ManagedOpeningAllocationCommitStatus::committed,
-                                "canonical mismatch alias was not prepared");
-                        std::filesystem::path alias_path;
-                        for (const auto &item : std::filesystem::recursive_directory_iterator(
-                                 root / "allocations"))
-                            if (item.path().filename().wstring().rfind(L"prep-", 0) == 0 &&
-                                item.path() != path_a && item.path() != path_b)
-                                alias_path = item.path();
-                        require(!alias_path.empty(), "canonical mismatch alias path was not found");
-                        require(std::filesystem::copy_file(
-                                    alias_path, path_b,
-                                    std::filesystem::copy_options::overwrite_existing),
-                                "canonical mismatch fixture was not installed");
-                        require(std::filesystem::remove(alias_path),
-                                "canonical mismatch alias was not removed");
+                                    ManagedOpeningAllocationCommitStatus::already_committed &&
+                                    !store.load_preparation(alias.key).found(),
+                                "source-equivalent alias bypassed durable identity guard");
                     }
                 }
 
@@ -790,15 +983,16 @@ void preserves_superseded_publication_intent() {
                             "two pending frontiers were not recoverable");
                 } else if (point == CrashPoint::canonical_successor_mismatch) {
                     const auto status = publisher.publish(a.record->key, request).status;
-                    require(status == ManagedOpeningAllocationPublicationStatus::invalid_evidence &&
-                                store.load_preparation(a.record->key).found(),
-                            "non-canonical successor was accepted");
+                    require(status == ManagedOpeningAllocationPublicationStatus::superseded &&
+                                !store.load_preparation(a.record->key).found(),
+                            "canonical successor recovery did not remain idempotent");
                 } else {
                     const auto status = publisher.publish(a.record->key, request).status;
                     if (point == CrashPoint::successor_write_error) {
+                        const auto pending_a = store.load_preparation(a.record->key);
+                        const auto pending_b = store.load_preparation(b->key);
                         require(status == ManagedOpeningAllocationPublicationStatus::io_error &&
-                                    store.load_preparation(a.record->key).found() &&
-                                    !store.load_preparation(b->key).found(),
+                                     pending_a.found() && !pending_b.found(),
                                 "successor write failure lost predecessor intent");
                         require(std::filesystem::remove(blocked_temporary),
                                 "temporary write blocker could not be removed");
@@ -873,12 +1067,19 @@ void preserves_superseded_publication_intent() {
 } // namespace
 
 int main() {
-    durable_prepare_publish_restart_and_replay();
-    rejects_missing_source_and_stale_lease();
-    rejects_stale_source_proof_at_low_level_publication();
-    rejects_noncanonical_reserved_paths_and_keeps_pending_separate();
-    recovers_through_real_filesystem_sources();
-    preserves_historical_frontiers_when_a_partial_fill_arrives();
-    preserves_superseded_publication_intent();
-    return 0;
+    try {
+        durable_prepare_publish_restart_and_replay();
+        rejects_missing_source_and_stale_lease();
+        rejects_stale_source_proof_at_low_level_publication();
+        rejects_noncanonical_reserved_paths_and_keeps_pending_separate();
+        recovers_through_real_filesystem_sources();
+        preserves_historical_frontiers_when_a_partial_fill_arrives();
+        preserves_cross_graph_frontier_history();
+        recovers_one_durable_successor_after_multiple_supersessions();
+        preserves_superseded_publication_intent();
+        return 0;
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "failure: %s\n", error.what());
+        return 1;
+    }
 }

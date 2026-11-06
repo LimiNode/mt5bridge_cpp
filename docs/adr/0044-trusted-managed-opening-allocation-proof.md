@@ -86,10 +86,12 @@ reloads the complete allocation namespace. It then:
 4. requires one candidate whose fact-ticket set is exactly the fresh verified
    cumulative set, with matching position, immutable source tuple, quantities,
    and source digest; and
-5. returns `unavailable` only when no allocation has been published for the
-   operation and no contradiction is present. A published candidate that is
-   absent from the fresh cumulative set, a duplicate/alias, an incomparable
-   candidate, a missing historical ticket, or a source contradiction is
+5. returns `unavailable` when no allocation has been published for the
+   operation, or when the fresh proof is a compatible `extended` frontier for
+   an already published prefix but its cumulative successor is not yet
+   durable. This is normal publication lag, not a contradiction. A rewritten
+   or incompatible candidate, a duplicate/alias, an incomparable candidate,
+   a missing historical ticket, or a source contradiction is
    `invalid_evidence`. More than one current candidate is always
    `invalid_evidence`.
 
@@ -216,6 +218,7 @@ and `h_A`/`h_B` are the immutable allocation digests.
 | --- | --- | --- | --- |
 | `alloc-A`: `{a}`, `(r_s, d_A, h_A)` | `{a,b}` | `ExactFrontier(A)` | `found`, `historical`, `{a}`, `h_A`; B3B relation `extended` |
 | `alloc-A`: `{a}`, `(r_s, d_A, h_A)` | `{a,b}` | `ExactFrontier(B)` | `unavailable` (B is not published) |
+| `alloc-A`: `{a}`, `(r_s, d_A, h_A)` | `{a,b}` | `CurrentFrontier` | `unavailable` (compatible B is observed but not yet published) |
 | `alloc-A` and `alloc-B`: `{a}`, `{a,b}` | `{a,b}` | `ExactFrontier(A)` | `found`, `historical`, `{a}`, `h_A` |
 | `alloc-A` and `alloc-B`: `{a}`, `{a,b}` | `{a,b}` | `ExactFrontier(B)` | `found`, `historical`, `{a,b}`, `h_B` |
 | `alloc-A` and `alloc-B`: `{a}`, `{a,b}` | `{a,b}` | `CurrentFrontier` | `found`, `current`, B, `{a,b}`, `h_B` |

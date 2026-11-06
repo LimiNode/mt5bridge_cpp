@@ -280,7 +280,9 @@ producer passes the current journal lifecycle revision to B3B while retaining
 the immutable `result_source_revision` in the allocation identity. The durable
 frontier discriminator is not a causal clock. The future sealed proof retains
 the selected frontier identity and historical/current scope, while permission
-to mutate managed exposure stays outside B3D. Until the producer and its
+to mutate managed exposure stays outside B3D. If B3B observes a compatible
+successor before its `alloc-*` record is durable, current lookup remains
+`unavailable` until publication catches up. Until the producer and its
 restart/fencing regressions are verified, the opening provenance source and
 managed `INOUT` path remain fail-closed.
 Progressive deep tick synchronization is specified in

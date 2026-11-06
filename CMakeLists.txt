@@ -375,6 +375,8 @@ if(MT5BRIDGE_BUILD_RUNTIME)
             "mt5bridge runtime currently requires CPython 3.11.x; "
             "selected ${Python3_VERSION} at ${Python3_EXECUTABLE}")
     endif()
+    get_filename_component(MT5BRIDGE_PYTHON_HOME
+                           "${Python3_EXECUTABLE}" DIRECTORY)
 
     add_library(mt5_bridge SHARED
                 src/bridge/mt5_bridge.cpp
@@ -387,11 +389,15 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                                ${PROJECT_SOURCE_DIR}/src/trade)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
     target_link_libraries(mt5_bridge PRIVATE Python3::Python mt5bridge::runtime_lane)
-    get_target_property(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
-                        Python3::Python IMPORTED_LOCATION_RELEASE)
-    if(NOT MT5BRIDGE_PYTHON_RUNTIME_RELEASE)
+    set(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
+        "${MT5BRIDGE_PYTHON_HOME}/python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.dll")
+    if(NOT EXISTS "${MT5BRIDGE_PYTHON_RUNTIME_RELEASE}")
         get_target_property(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
-                            Python3::Python IMPORTED_LOCATION)
+                            Python3::Python IMPORTED_LOCATION_RELEASE)
+        if(NOT MT5BRIDGE_PYTHON_RUNTIME_RELEASE)
+            get_target_property(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
+                                Python3::Python IMPORTED_LOCATION)
+        endif()
     endif()
     if(MT5BRIDGE_PYTHON_RUNTIME_RELEASE)
         add_custom_command(TARGET mt5_bridge POST_BUILD
@@ -421,12 +427,12 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         endif()
         list(GET MT5BRIDGE_PYTHON_RUNTIME_DIRS 0 MT5BRIDGE_PYTHON_RUNTIME_DIR)
         set(MT5BRIDGE_TEST_PATH
-            "${MT5BRIDGE_PYTHON_RUNTIME_DIR};$ENV{PATH}")
+            "${MT5BRIDGE_PYTHON_HOME};${MT5BRIDGE_PYTHON_RUNTIME_DIR};$ENV{PATH}")
         add_test(
             NAME mt5bridge_owned_runtime
             COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_lifecycle_module"
-                    "PYTHONHOME=${MT5BRIDGE_PYTHON_RUNTIME_DIR}"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
                     "PATH=${MT5BRIDGE_TEST_PATH}"
                     "$<TARGET_FILE:mt5bridge_owned_runtime_smoke>"
                     "$<TARGET_FILE:mt5_bridge>"
@@ -438,7 +444,7 @@ if(MT5BRIDGE_BUILD_RUNTIME)
             NAME mt5bridge_owned_realtime
             COMMAND ${CMAKE_COMMAND} -E env
                     "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_mt5_module"
-                    "PYTHONHOME=${MT5BRIDGE_PYTHON_RUNTIME_DIR}"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
                     "PATH=${MT5BRIDGE_TEST_PATH}"
                     "$<TARGET_FILE:mt5bridge_owned_realtime_smoke>"
                     "$<TARGET_FILE:mt5_bridge>"
@@ -453,6 +459,27 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                     "${Python3_EXECUTABLE}" -m unittest tests.test_fake_mt5_runtime -v
         )
         set_tests_properties(mt5bridge_fake_runtime PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
+        add_executable(mt5bridge_managed_trade_python_integration_test
+                       tests/managed_trade_python_integration_test.cpp
+                       src/trade/python_dispatch_transport.cpp)
+        target_include_directories(mt5bridge_managed_trade_python_integration_test PRIVATE
+                                   ${PROJECT_SOURCE_DIR}/include
+                                   ${PROJECT_SOURCE_DIR}/src/dispatch
+                                   ${PROJECT_SOURCE_DIR}/src/runtime
+                                   ${PROJECT_SOURCE_DIR}/src/trade)
+        target_link_libraries(mt5bridge_managed_trade_python_integration_test PRIVATE
+                              mt5bridge::managed_trade_owner Python3::Python)
+        add_test(
+            NAME mt5bridge_managed_trade_python_integration
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_owner_mt5_module"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
+                    "PATH=${MT5BRIDGE_PYTHON_HOME};$<TARGET_FILE_DIR:mt5bridge_managed_trade_python_integration_test>;$ENV{PATH}"
+                    "$<TARGET_FILE:mt5bridge_managed_trade_python_integration_test>"
+        )
+        set_tests_properties(mt5bridge_managed_trade_python_integration PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
         add_test(

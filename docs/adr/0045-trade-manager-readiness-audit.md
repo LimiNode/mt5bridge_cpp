@@ -72,6 +72,12 @@ unattributed position changes, `INOUT` reversal, FIFO/LIFO/pro-rata allocation,
 and unsupported filling/account modes. These are policy decisions, not reasons
 to weaken the existing durable contracts.
 
+The B3D opening proof is only evidence that one committed OPEN allocation is
+attributable to a managed trade at a selected frontier. It does not prove that
+the current broker position is still exclusively owned by that trade, authorize
+a CLOSE, or authorize managed-exposure mutation. Those decisions require a
+separate current-position ownership gate and remain fail-closed in this MVP.
+
 ## Acceptance criteria for the next implementation batch
 
 The next implementation PR should remain separate from B3D and should provide
@@ -110,3 +116,11 @@ scheduler, capability policy, startup coordinator, and callback delivery as
 missing rather than inferring them from test-only seams. A passing fake
 transport test is not evidence of a live terminal integration; that integration
 requires a separately authorized bounded smoke test.
+
+## Verification record
+
+The local Windows Release build used for this audit ran 33/33 configured CTest
+targets. The exact-head GitHub Actions run for the documentation commit ran
+40/40 tests because CI also enables the runtime and Python-backed targets. Both
+results are recorded separately; the local count is not presented as the CI
+count.

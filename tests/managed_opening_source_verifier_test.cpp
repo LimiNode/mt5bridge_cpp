@@ -3,6 +3,7 @@
 
 #include "managed_opening_source_verifier.hpp"
 #include "managed_opening_allocation.hpp"
+#include "managed_opening_provenance_producer.hpp"
 #include "managed_opening_source_digest.hpp"
 #include "one_shot_backend.hpp"
 
@@ -1117,6 +1118,27 @@ void accepts_production_reachable_filesystem_allocation() {
                     extended.proof->deal_tickets() ==
                         std::vector<std::uint64_t>{5001, 5002},
                 "bounded cross-instance partial fill was not verified");
+
+        ManagedOpeningProvenanceProducer producer(
+            restarted_journal, restarted_facts, restarted_allocations,
+            restarted_verifier, restarted_lease);
+        const auto exact_a_selector = ManagedOpeningProvenanceSelector{
+            ManagedOpeningProvenanceLookupKind::exact_historical, operation(),
+            entry.key.operation_revision, entry.key.frontier_revision,
+            entry.position_identifier};
+        const auto exact_a = producer.verify(exact_a_selector);
+        require(exact_a.found() &&
+                    exact_a.proof->scope() == ManagedOpeningProofScope::historical &&
+                    exact_a.proof->frontier_revision() == entry.key.frontier_revision,
+                "trusted producer did not preserve historical frontier A after fill B");
+
+        const auto current_before_b = producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::current, operation(),
+                entry.key.operation_revision, 0, entry.position_identifier});
+        require(current_before_b.status == ManagedOpeningProvenanceStatus::unavailable,
+                "current lookup treated unpublished compatible successor as evidence failure");
+
         const auto prepared_b = restarted_publisher.prepare(replay_request);
         require(prepared_b.status == ManagedOpeningAllocationPublicationStatus::prepared &&
                     prepared_b.record,
@@ -1129,6 +1151,15 @@ void accepts_production_reachable_filesystem_allocation() {
                       << " error=" << restarted_allocations.last_error() << '\n';
         require(published_b.status == ManagedOpeningAllocationPublicationStatus::published,
                 "cross-instance successor publication failed");
+        const auto current_after_b = producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::current, operation(),
+                entry.key.operation_revision, 0, entry.position_identifier});
+        require(current_after_b.found() &&
+                    current_after_b.proof->scope() == ManagedOpeningProofScope::current &&
+                    current_after_b.proof->frontier_revision() !=
+                        entry.key.frontier_revision,
+                "trusted producer did not select the published current frontier B");
         const auto final = restarted_allocations.scan(
             account(), restarted_journal, restarted_facts);
         require(final.complete() && final.records.size() == 2 && final.preparations.empty(),

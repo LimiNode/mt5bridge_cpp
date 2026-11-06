@@ -64,18 +64,19 @@ struct ManagedOpeningProvenanceSelector {
     OperationKey operation_key;
     std::uint64_t operation_revision = 0; ///< Immutable result-source revision.
     std::uint64_t frontier_revision = 0; ///< Required only for exact lookup.
+    /// Broker position identity; required for `current`, optional for exact
+    /// lookup because the durable allocation is the identity authority.
     std::uint64_t position_identifier = 0;
 
     /// \brief Tests whether the explicit selector is complete.
     /// \return True only when all fields required by its kind are present.
     bool valid() const {
-        if (!operation_key.valid() || operation_revision == 0 ||
-            position_identifier == 0)
+        if (!operation_key.valid() || operation_revision == 0)
             return false;
         if (kind == ManagedOpeningProvenanceLookupKind::exact_historical)
             return frontier_revision != 0;
         return kind == ManagedOpeningProvenanceLookupKind::current &&
-               frontier_revision == 0;
+               frontier_revision == 0 && position_identifier != 0;
     }
 };
 

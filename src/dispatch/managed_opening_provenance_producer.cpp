@@ -102,7 +102,11 @@ ManagedOpeningProvenanceResult ManagedOpeningProvenanceProducer::verify_locked(
         if (record.key.operation_key != selector.operation_key)
             continue;
         if (record.key.operation_revision != selector.operation_revision ||
-            record.position_identifier != selector.position_identifier)
+            (selector.kind == ManagedOpeningProvenanceLookupKind::current &&
+             record.position_identifier != selector.position_identifier) ||
+            (selector.kind == ManagedOpeningProvenanceLookupKind::exact_historical &&
+             selector.position_identifier != 0 &&
+             record.position_identifier != selector.position_identifier))
             return {ManagedOpeningProvenanceStatus::invalid_evidence, std::nullopt};
         candidates.push_back(&record);
     }
@@ -127,9 +131,13 @@ ManagedOpeningProvenanceResult ManagedOpeningProvenanceProducer::verify_locked(
         }
     }
 
+    const auto requested_position =
+        selector.kind == ManagedOpeningProvenanceLookupKind::exact_historical
+            ? selected->position_identifier
+            : selector.position_identifier;
     const ManagedOpeningProvenanceRequest fresh_request{
         selector.operation_key, OperationKind::open, journal.record->revision,
-        selector.position_identifier};
+        requested_position};
     const auto fresh = verifier_.verify(fresh_request);
     if (!fresh.found())
         return map_verifier_result(fresh);

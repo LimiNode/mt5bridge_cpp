@@ -13,9 +13,9 @@ ADR-0038 sealed `VerifiedManagedOpeningAllocation` but deliberately left its
 producer unavailable. ADR-0042 supplies a fresh B3B source fact, and ADR-0043
 persists one immutable allocation for each cumulative opening frontier.
 
-The existing `ManagedOpeningProvenanceRequest` identifies an operation,
-result-source revision, and broker `POSITION_IDENTIFIER`, but it does not
-identify one frontier. That omission is harmless while the source is
+The existing `ManagedOpeningProvenanceRequest` identifies an operation, one
+journal revision for the B3B verifier, and broker `POSITION_IDENTIFIER`, but it
+does not identify one frontier. That omission is harmless while the source is
 unavailable and becomes unsafe when several immutable frontiers exist for one
 OPEN. In particular, the durable frontier discriminator is allowed to advance
 after an observation-graph restart; its numeric maximum is not a statement
@@ -44,17 +44,26 @@ ExactFrontier {
 
 CurrentFrontier {
     OperationKey operation_key
-    uint64_t operation_revision       // immutable journal result-source revision
+    uint64_t result_source_revision   // immutable allocation/journal anchor
     uint64_t position_identifier
 }
 ```
 
-`ExactFrontier` compares the complete `(operation_key, operation_revision,
-frontier_revision)` key and never falls back to an alias or another
-discriminator. `CurrentFrontier` is the only path that may select a record;
+`ExactFrontier` compares the complete `(operation_key,
+result_source_revision, frontier_revision)` allocation key and never falls
+back to an alias or another discriminator. `CurrentFrontier` is the only path
+that may select a record;
 it must select it by source completeness, not by the largest discriminator.
 The existing query fields remain constraints and never become proof merely
 because a caller supplied them.
+
+The B3D producer loads the current journal record before invoking B3B and
+constructs a fresh `ManagedOpeningProvenanceRequest` with
+`operation_revision = record.revision`. This preserves the existing B3B API:
+its request revision is the current lifecycle revision, while the returned
+`VerifiedManagedOpeningSourceFact::operation_revision()` and the allocation
+key carry the immutable `result_source_revision`. B3D compares those two
+anchors explicitly; it does not reinterpret the existing B3B field.
 
 One producer may implement both selectors because they share the same fenced
 validation path. They remain separate variants in the private contract so a
@@ -67,17 +76,21 @@ For `CurrentFrontier`, the producer holds the account fencing capability and
 reloads the complete allocation namespace. It then:
 
 1. loads the exact committed OPEN journal record and requires its immutable
-   `result_source_revision` to equal `operation_revision`;
+   `result_source_revision` to equal the selector's
+   `result_source_revision`;
 2. scans every canonical `alloc-*` record for the operation and validates its
    journal, B3A fact references, immutable source tuple, quantities, digest,
    and canonical filename;
 3. obtains a fresh `VerifiedManagedOpeningSourceFact` through
    `ManagedOpeningSourceVerifier` while the same fence is held;
 4. requires one candidate whose fact-ticket set is exactly the fresh verified
-   cumulative set, with matching position, order, direction, quantities, and
-   source digest; and
-5. rejects zero candidates, more than one candidate, an incomparable
-   candidate, a missing historical ticket, or a source contradiction as
+   cumulative set, with matching position, immutable source tuple, quantities,
+   and source digest; and
+5. returns `unavailable` only when no allocation has been published for the
+   operation and no contradiction is present. A published candidate that is
+   absent from the fresh cumulative set, a duplicate/alias, an incomparable
+   candidate, a missing historical ticket, or a source contradiction is
+   `invalid_evidence`. More than one current candidate is always
    `invalid_evidence`.
 
 The current frontier is therefore the unique source-complete record. A larger
@@ -94,13 +107,29 @@ without the referenced durable facts.
 
 ## Exact historical validation
 
-For `ExactFrontier`, the producer loads only the requested canonical
-`alloc-*` path and requires the decoded key to equal the requested key. It
-then reloads the journal, all referenced B3A facts, and the immutable source
-tuple. A missing record is `unavailable`; malformed, checksum-invalid,
-non-canonical, source-mismatched, or incomplete evidence is
-`invalid_evidence`. A valid historical allocation remains valid after later
-compatible fills; later facts do not rewrite its ticket set or quantities.
+For `ExactFrontier`, the producer loads the requested canonical `alloc-*` path
+and requires the decoded key to equal the requested key. It then performs the
+existing account-wide `DurableManagedOpeningAllocationStore::scan()` under the
+same fence. The scan is the namespace authority: it detects malformed sibling
+records, duplicate identities, source-equivalent aliases, canonical-path
+violations, and I/O failures without introducing a second scanner. A pending
+`prep-*` record never produces a proof. The producer then reloads the journal,
+all referenced B3A facts, and the immutable source tuple.
+
+An absent requested allocation with a complete, contradiction-free scan is
+`unavailable`; malformed, checksum-invalid, non-canonical, aliased,
+source-mismatched, or incomplete evidence is `invalid_evidence`. A valid
+historical allocation remains valid after later compatible fills; later facts
+do not rewrite its ticket set or quantities. Fresh B3B evidence is compared to
+the historical entry by the existing B3C relation: `exact` is accepted, and
+`extended` is accepted when the fresh ticket set contains every historical
+ticket and the cumulative quantity increases without changing the immutable
+source tuple. The historical allocation's digest is retained; it is not
+required to equal the digest of the expanded B3B frontier.
+
+`CurrentFrontier` requires the stricter `exact` relation. Thus, after a later
+fill, `ExactFrontier(A)` may succeed with an `extended` fresh B3B proof while
+`CurrentFrontier` selects only the published B frontier.
 
 The exact proof carries the selected frontier identity in the sealed value (at
 minimum the complete allocation key or its `frontier_revision`), so downstream
@@ -120,8 +149,10 @@ capability:
 * every referenced B3A fact is present, version-supported, immutable, and
   exactly joined by deal ticket, account, order, position, direction,
   quantity, graph provenance, and coverage revision;
-* the fresh B3B verifier agrees with the allocation's complete ticket set,
-  position identity, immutable quantities, and evidence digest;
+* the fresh B3B verifier has been called with the current journal lifecycle
+  revision and agrees with the immutable result-source anchor; its relation to
+  the allocation is `exact` for `current` scope and `exact` or compatible
+  `extended` for `historical` scope;
 * cumulative broker and managed quantities are overflow-safe and equal to the
   validated frontier; and
 * the held fencing capability remains valid at the return boundary.
@@ -129,6 +160,24 @@ capability:
 Caller-provided digest, quantity, ticket list, position identity, frontier
 revision, or authority flag can only constrain a lookup. None can construct or
 upgrade a proof.
+
+The future private sealed value contains at least:
+
+```text
+ManagedOpeningAllocationKey frontier_key
+ManagedOpeningProofScope scope   // historical or current
+OperationKey operation_key
+uint64_t position_identifier
+uint64_t managed_logical_units
+uint64_t evidence_digest
+```
+
+`frontier_key` is the exact immutable allocation identity checked by the
+producer. `scope` is a type-level semantic discriminator for downstream code;
+it is not a claim that a historical proof is current. Adding these private
+fields and the `lease_not_held` status is reserved for the separate B3D
+implementation PR; this documentation PR does not change the existing B3B
+interface or production contract.
 
 The producer returns three distinct trust facts and must not collapse them:
 
@@ -157,6 +206,25 @@ whose historical facts are missing, rewritten, or contradicted is rejected.
 The producer never reconstructs a lost allocation from the latest broker
 position volume.
 
+## Historical/current semantics
+
+The distinction is observable in the following bounded sequence. `r_s` is the
+immutable `result_source_revision`; `d_A` and `d_B` are durable discriminators,
+and `h_A`/`h_B` are the immutable allocation digests.
+
+| Durable state | Fresh B3B tickets | Lookup | Expected result |
+| --- | --- | --- | --- |
+| `alloc-A`: `{a}`, `(r_s, d_A, h_A)` | `{a,b}` | `ExactFrontier(A)` | `found`, `historical`, `{a}`, `h_A`; B3B relation `extended` |
+| `alloc-A`: `{a}`, `(r_s, d_A, h_A)` | `{a,b}` | `ExactFrontier(B)` | `unavailable` (B is not published) |
+| `alloc-A` and `alloc-B`: `{a}`, `{a,b}` | `{a,b}` | `ExactFrontier(A)` | `found`, `historical`, `{a}`, `h_A` |
+| `alloc-A` and `alloc-B`: `{a}`, `{a,b}` | `{a,b}` | `ExactFrontier(B)` | `found`, `historical`, `{a,b}`, `h_B` |
+| `alloc-A` and `alloc-B`: `{a}`, `{a,b}` | `{a,b}` | `CurrentFrontier` | `found`, `current`, B, `{a,b}`, `h_B` |
+
+The current result is not selected because `d_B` is numerically greater. It is
+selected because B is the unique allocation whose complete immutable source
+set exactly matches fresh B3B evidence. An alias, duplicate, or incomparable
+candidate changes the result to `invalid_evidence`.
+
 ## Failure contract
 
 The private result status keeps these cases distinct:
@@ -164,7 +232,7 @@ The private result status keeps these cases distinct:
 | Condition | Result |
 | --- | --- |
 | malformed selector | `invalid_request` |
-| no exact record or no current source-complete record | `unavailable` |
+| requested record is absent, or no allocation has yet been published and no contradiction exists | `unavailable` |
 | checksum, format, canonical-path, identity, quantity, or source mismatch | `invalid_evidence` |
 | durable source read failure | `io_error` |
 | lease/fencing capability lost | `lease_not_held` |
@@ -173,6 +241,29 @@ The private result status keeps these cases distinct:
 An `unavailable` result is not repaired from a position snapshot or a
 caller-supplied digest. An `invalid_evidence` result is not downgraded to
 `unavailable` merely to make recovery retryable.
+
+The existing `ManagedOpeningProvenanceStatus` has no `lease_not_held` value.
+That is an intentional private-contract extension for B3D, not a change to
+the B3B verifier API: the B3D producer will add the status in its own result
+type (or an equivalent strict wrapper) and map lease loss explicitly.
+
+## B3D implementation readiness matrix
+
+| Concern | Reuse | B3D obligation | Observable regression |
+| --- | --- | --- | --- |
+| Journal/source anchor | `DurableJournalStore`, v6 `result_source_revision` | Separate current lifecycle revision from immutable allocation identity | journal advances; B3B receives current revision while proof keeps `r_s` |
+| Fresh broker evidence | `ManagedOpeningSourceVerifier` | Accept `exact`/`extended` only for historical scope; `exact` only for current | A survives B; current selects B |
+| Allocation namespace | `DurableManagedOpeningAllocationStore::scan()` and `load()` | Scan before `found`; pending prep never proves; aliases fail closed | malformed sibling and source-equivalent alias |
+| Durable source chain | B3A fact store and B3C source validation | Match every referenced fact and cumulative quantity without reconstruction | missing/rewritten fact and quantity mismatch |
+| Proof boundary | private sealed constructor | Include exact key and `historical`/`current` scope; no lease lifetime claim | fabricated caller fields cannot yield `found` |
+| Fencing | `SingleWriterLease` | Hold capability through all reads and return `lease_not_held` on loss | lease transfer blocks stale writer |
+| Recovery | existing real Windows stores | No second store or provenance registry; restart rechecks sources | restart with new graph instance |
+
+The implementation review must also include an anti-neuroslop check: each
+positive assertion in the tests must name the durable record, source relation,
+fence state, or exact status it proves; no test may pass merely because a
+non-zero digest, a maximum discriminator, a position snapshot, or a caller
+selected identity is present.
 
 ## B3D implementation boundary
 

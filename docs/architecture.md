@@ -287,6 +287,13 @@ Python implementation of that seam is specified in
 [ADR-0014](adr/0014-private-python-dispatch-transport.md).
 The bridge never retries a side-effecting order implicitly.
 
+The current private dispatch/reconciliation path and the smallest bounded
+public-manager milestone are audited in
+[ADR-0045](adr/0045-trade-manager-readiness-audit.md). That audit does not
+enable a public `TradeManager`, production `INOUT`, or live trading; it records
+the integration seams and acceptance criteria for a separate implementation
+batch.
+
 The dispatch/recovery interleavings are also specified by the finite TLC model
 in [ADR-0021](adr/0021-formal-dispatch-recovery-model.md). It checks the
 non-resendable barrier, writer/epoch fencing, atomic result-plus-binding

@@ -77,7 +77,7 @@ void requires_an_explicit_frontier_selector() {
 
     const auto exact = source.verify(ManagedOpeningProvenanceSelector{
         ManagedOpeningProvenanceLookupKind::exact_historical, request().operation_key,
-        4, 9, 88001});
+        4, 9, 0});
     require(exact.status == ManagedOpeningProvenanceStatus::unavailable,
             "valid historical selector did not fail closed without a producer");
 }

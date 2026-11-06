@@ -1125,7 +1125,7 @@ void accepts_production_reachable_filesystem_allocation() {
         const auto exact_a_selector = ManagedOpeningProvenanceSelector{
             ManagedOpeningProvenanceLookupKind::exact_historical, operation(),
             entry.key.operation_revision, entry.key.frontier_revision,
-            entry.position_identifier};
+            0};
         const auto exact_a = producer.verify(exact_a_selector);
         require(exact_a.found() &&
                     exact_a.proof->scope() == ManagedOpeningProofScope::historical &&

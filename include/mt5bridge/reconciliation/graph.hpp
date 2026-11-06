@@ -15,10 +15,22 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <random>
 #include <string>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 
 /// \namespace mt5bridge
 /// \brief Contains the lightweight C++ consumer API.
@@ -26,11 +38,57 @@ namespace mt5bridge {
 
 namespace detail {
 
+/// \brief Mixes a process nonce with one local graph sequence.
+/// \param value Input value.
+/// \return Avalanche-mixed non-zero candidate.
+inline std::uint64_t mix_observation_graph_identity(std::uint64_t value) {
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    value ^= value >> 31;
+    return value;
+}
+
+/// \brief Allocates one unpredictable causal epoch for this process.
+/// \return Non-zero process nonce shared by this process's graph instances.
+/// \note Windows uses the system-preferred CNG random source and fails closed
+///       when it is unavailable. No clock/address fallback is used for a
+///       cross-process identity.
+inline std::uint64_t observation_graph_process_nonce() {
+    static const std::uint64_t nonce = [] {
+#if defined(_WIN32)
+        std::uint64_t value = 0;
+        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value),
+                            static_cast<ULONG>(sizeof(value)),
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+            throw std::runtime_error("observation graph entropy unavailable");
+#else
+        std::uint64_t value = 0;
+        try {
+            std::random_device random;
+            const auto high = static_cast<std::uint64_t>(random());
+            const auto low = static_cast<std::uint64_t>(random());
+            value = (high << 32) ^ low;
+        } catch (...) {
+            throw std::runtime_error("observation graph entropy unavailable");
+        }
+#endif
+        value = mix_observation_graph_identity(value);
+        return value == 0 ? UINT64_C(0x9e3779b97f4a7c15) : value;
+    }();
+    return nonce;
+}
+
 /// \brief Allocates a process-local identity for one observation graph.
-/// \return Non-zero identity unique within the current process.
+/// \return Non-zero identity carrying a process-specific causal epoch.
 inline std::uint64_t allocate_observation_graph_instance_id() {
     static std::atomic<std::uint64_t> next_id{1};
-    const std::uint64_t id = next_id.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t sequence = next_id.fetch_add(1, std::memory_order_relaxed);
+    if (sequence == 0)
+        throw std::overflow_error("observation graph instance id exhausted");
+    const std::uint64_t id = mix_observation_graph_identity(
+        observation_graph_process_nonce() ^ sequence);
     if (id == 0)
         throw std::overflow_error("observation graph instance id exhausted");
     return id;

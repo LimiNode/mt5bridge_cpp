@@ -3,6 +3,8 @@
 
 #include "managed_opening_source_verifier.hpp"
 
+#include "managed_opening_source_digest.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -20,40 +22,6 @@ constexpr std::uint64_t kRequiredDealFields =
     MT5BRIDGE_DEAL_KNOWN_POSITION_ID | MT5BRIDGE_DEAL_KNOWN_TYPE |
     MT5BRIDGE_DEAL_KNOWN_ENTRY | MT5BRIDGE_DEAL_KNOWN_VOLUME |
     MT5BRIDGE_DEAL_KNOWN_TIME;
-
-class SourceDigest {
-public:
-    void add_u64(std::uint64_t value) {
-        for (unsigned shift = 0; shift != 64; shift += 8) {
-            value_ ^= static_cast<std::uint8_t>(value >> shift);
-            value_ *= 1099511628211ULL;
-        }
-    }
-
-    void add_bytes(const std::vector<std::uint8_t> &bytes) {
-        add_u64(static_cast<std::uint64_t>(bytes.size()));
-        for (const auto byte : bytes) {
-            value_ ^= byte;
-            value_ *= 1099511628211ULL;
-        }
-    }
-
-    void add_text(const std::string &value) {
-        add_u64(static_cast<std::uint64_t>(value.size()));
-        for (const auto byte : value) {
-            value_ ^= static_cast<std::uint8_t>(byte);
-            value_ *= 1099511628211ULL;
-        }
-    }
-
-    /// \brief Returns a deterministic fingerprint, not a cryptographic
-    /// authority proof.
-    /// \return Non-zero FNV-64 fingerprint of the committed source tuple.
-    std::uint64_t value() const { return value_ == 0 ? 1 : value_; }
-
-private:
-    std::uint64_t value_ = 1469598103934665603ULL;
-};
 
 std::optional<BrokerPositionDirection> direction_for_type(std::uint32_t type) {
     // MT5 DEAL_TYPE_BUY/POSITION_TYPE_BUY are 0; SELL values are 1.
@@ -306,11 +274,25 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
         const auto &receipt = fact.admission_receipt();
         const auto current_evidence_revision =
             graph.history_deal_evidence_revision(fact.deal_ticket());
-        if (receipt.graph_instance_id != descriptor.baseline.graph_instance_id() ||
+        const bool original_graph_receipt =
+            receipt.graph_instance_id == descriptor.baseline.graph_instance_id();
+        const bool current_graph_receipt = receipt.graph_instance_id == graph.instance_id();
+        const bool current_receipt_is_causal =
+            current_graph_receipt &&
+            graph.history_deal_first_evidence_revision(fact.deal_ticket()) ==
+                receipt.source_revision &&
+            graph.history_deals_covered_at_exact(
+                {receipt.history_window_from_msc, receipt.history_window_to_msc},
+                receipt.source_revision);
+        // A restarted graph may contribute only a receipt that it can prove
+        // from its own first complete observation. It cannot claim the old
+        // graph's baseline by selecting a matching numeric revision.
+        if ((!original_graph_receipt && !current_graph_receipt) ||
             receipt.history_coverage_revision != receipt.source_revision ||
-            (same_graph_instance && receipt.graph_instance_id != graph.instance_id()) ||
-            (same_graph_instance &&
-             current_evidence_revision < receipt.source_revision) ||
+            (original_graph_receipt &&
+             receipt.source_revision <= descriptor.baseline.history_deals_revision()) ||
+            (current_graph_receipt && !current_receipt_is_causal) ||
+            (same_graph_instance && current_evidence_revision < receipt.source_revision) ||
             !graph.history_deals_covered_at_exact(
                 {receipt.history_window_from_msc, receipt.history_window_to_msc},
                 current_evidence_revision))
@@ -344,7 +326,7 @@ ManagedOpeningSourceVerificationResult ManagedOpeningSourceVerifier::verify_lock
          record.settled_volume != frontier->cumulative_managed_logical_units()))
         return invalid_evidence();
 
-    SourceDigest digest;
+    detail::ManagedOpeningSourceDigest digest;
     digest.add_text("mt5bridge-managed-opening-source-v2");
     digest.add_text(request.operation_key.account.server);
     digest.add_u64(request.operation_key.account.login);

@@ -79,9 +79,10 @@ For a valid `ManagedOpeningProvenanceRequest`, the verifier:
    retained in the graph. A repeated complete poll containing the unchanged
    deal may advance latest evidence without changing the immutable
    first-admission receipt. After
-   restart numeric graph revisions are not compared across instances; the
-   durable baseline/receipt provenance is retained and the re-observed graph
-   must independently provide exact complete-window coverage;
+   restart numeric graph revisions are not compared across instances: an
+   original-graph receipt is rechecked against current complete history, while
+   a current-graph receipt is accepted only when its ticket's first evidence
+   and exact coverage are present in that current graph;
 4. reloads every bound deal and every deal for the bound order, requiring exact
    account/order/position identity, `DEAL_ENTRY_IN`, one direction, complete
    fields, and complete coverage;
@@ -104,17 +105,21 @@ the saved fact or a position snapshot.
 ## Restart and contradiction boundary
 
 The verifier accepts a fresh graph instance after restart only when the durable
-descriptor and first-admission receipts identify the original graph/account and
-the new graph independently re-observes the same complete history window. The
-graph instance identifier is provenance, never a cross-restart ordering
-relation. A changed history payload, old coverage reused for a later uncovered
-deal, a newer complete covering sample that omits a previously admitted deal,
-missing causal evidence, foreign same-position execution, or unavailable
-durable fact fails closed. A complete observation of a non-overlapping window
-does not contradict the deal. The current journal store retains only its latest
-revision, so B3B accepts a record already advanced into the `reconciling`
-lifecycle only when the v6 immutable result-source anchor is present. A legacy
-record without that anchor remains fail-closed.
+descriptor/result-source anchor and original B3A receipts identify the old
+frontier, the current graph independently observes one complete history window,
+and every newly admitted receipt has first evidence plus exact coverage in that
+current graph. Each graph identifier carries a process-start nonce as well as a
+local sequence, so independent processes cannot restart the counter into the
+same causal epoch in ordinary operation. The identifier is provenance, never a
+cross-restart ordering relation; it is never restored or selected by a caller.
+A changed history payload, an old receipt missing from current history, a newer
+complete covering sample that omits a previously admitted deal, a receipt from
+an unrelated graph, missing causal evidence, foreign same-position execution,
+or unavailable durable fact fails closed. A complete observation of a
+non-overlapping window does not contradict the deal. The current journal store
+retains only its latest revision, so B3B accepts a record already advanced into
+the reconciling lifecycle only when the v6 immutable result-source anchor is
+present. A legacy record without that anchor remains fail-closed.
 
 The verifier does not infer that an OPEN is terminal, does not publish an
 opening allocation, and does not modify `ManagedTradeOwner`, exposure, the C ABI,
@@ -130,6 +135,8 @@ fencing, requested-volume bounds, invalid requests, durable-store I/O failure,
 idempotent repeated polling, newer complete-history contradictions, stable
 source identity across lifecycle changes and later partial fills, rejection of
 fabricated future tickets, and a
-production-shaped `OperationJournal` → `DispatchAdmissionBarrier` →
-`OneShotDispatchBackend` → verifier path. B3C remains responsible for durable
+production-shaped OperationJournal → DispatchAdmissionBarrier →
+OneShotDispatchBackend → verifier path, cross-instance current-history
+attribution, a two-process durable recovery regression, and rejection of
+incomplete post-restart history. B3C remains responsible for durable
 opening-allocation publication and its crash matrix.

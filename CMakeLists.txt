@@ -375,8 +375,20 @@ if(MT5BRIDGE_BUILD_RUNTIME)
             "mt5bridge runtime currently requires CPython 3.11.x; "
             "selected ${Python3_VERSION} at ${Python3_EXECUTABLE}")
     endif()
-    get_filename_component(MT5BRIDGE_PYTHON_HOME
-                           "${Python3_EXECUTABLE}" DIRECTORY)
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c
+                "import sys; print(sys.base_prefix)"
+        RESULT_VARIABLE MT5BRIDGE_PYTHON_BASE_PREFIX_RESULT
+        OUTPUT_VARIABLE MT5BRIDGE_PYTHON_BASE_PREFIX
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(MT5BRIDGE_PYTHON_BASE_PREFIX_RESULT EQUAL 0 AND
+       EXISTS "${MT5BRIDGE_PYTHON_BASE_PREFIX}/Lib")
+        set(MT5BRIDGE_PYTHON_HOME "${MT5BRIDGE_PYTHON_BASE_PREFIX}")
+    else()
+        get_filename_component(MT5BRIDGE_PYTHON_HOME
+                               "${Python3_EXECUTABLE}" DIRECTORY)
+    endif()
 
     add_library(mt5_bridge SHARED
                 src/bridge/mt5_bridge.cpp
@@ -480,6 +492,18 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                     "$<TARGET_FILE:mt5bridge_managed_trade_python_integration_test>"
         )
         set_tests_properties(mt5bridge_managed_trade_python_integration PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
+        add_test(
+            NAME mt5bridge_managed_trade_python_uncertain_restart
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_owner_mt5_module"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
+                    "PATH=${MT5BRIDGE_PYTHON_HOME};$<TARGET_FILE_DIR:mt5bridge_managed_trade_python_integration_test>;$ENV{PATH}"
+                    "$<TARGET_FILE:mt5bridge_managed_trade_python_integration_test>"
+                    "--uncertain-restart"
+        )
+        set_tests_properties(mt5bridge_managed_trade_python_uncertain_restart PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
         add_test(

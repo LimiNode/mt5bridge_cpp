@@ -121,12 +121,22 @@ public:
         const std::function<void()> &publication) const override {
         if (!held || candidate != account() || candidate_token != token)
             return false;
+        ++callback_depth;
         publication();
+        if (transfer_after_inner_callback && callback_depth == 2) {
+            transfer_after_inner_callback = false;
+            ++token;
+            ++transfers;
+        }
+        --callback_depth;
         return true;
     }
 
     bool held = true;
-    std::uint64_t token = 17;
+    mutable std::uint64_t token = 17;
+    mutable std::size_t callback_depth = 0;
+    mutable bool transfer_after_inner_callback = false;
+    mutable std::size_t transfers = 0;
 };
 
 class TestAccountProbe final : public runtime::CurrentAccountProbe {
@@ -1338,6 +1348,30 @@ void accepts_production_reachable_filesystem_allocation() {
         require(revoked.status == ManagedOpeningProvenanceStatus::lease_not_held &&
                     !revoked.found() && !revoked.proof,
                 "stale producer lease did not fail closed");
+
+        memory_allocations.records = {final.records.back()};
+        const auto reject_mid_verification_transfer =
+            [&](const ManagedOpeningProvenanceSelector &selector, const char *message) {
+                TestLease transfer_lease;
+                transfer_lease.transfer_after_inner_callback = true;
+                ManagedOpeningSourceVerifier transfer_verifier(
+                    restarted_journal, restarted_facts, current_graph,
+                    ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, transfer_lease);
+                ManagedOpeningProvenanceProducer transfer_producer(
+                    restarted_journal, restarted_facts, memory_allocations,
+                    transfer_verifier, transfer_lease);
+                const auto transferred = transfer_producer.verify(selector);
+                require(transferred.status == ManagedOpeningProvenanceStatus::lease_not_held &&
+                            !transferred.found() && !transferred.proof &&
+                            transfer_lease.transfers == 1,
+                        message);
+            };
+        reject_mid_verification_transfer(
+            current_selector,
+            "current producer lookup accepted a lease transferred during verification");
+        reject_mid_verification_transfer(
+            exact_b_selector,
+            "historical producer lookup accepted a lease transferred during verification");
 
         const auto unchanged = restarted_allocations.load(entry.key);
         require(unchanged.found() && *unchanged.record == entry,

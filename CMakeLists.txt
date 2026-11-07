@@ -42,7 +42,8 @@ add_library(mt5bridge_journal STATIC
             src/dispatch/file_managed_allocation_store.cpp
             src/dispatch/file_managed_opening_fact_store.cpp
             src/dispatch/file_managed_opening_allocation_store.cpp
-            src/dispatch/managed_opening_source_verifier.cpp)
+            src/dispatch/managed_opening_source_verifier.cpp
+            src/dispatch/managed_opening_provenance_producer.cpp)
 target_include_directories(mt5bridge_journal PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
@@ -324,7 +325,8 @@ if(BUILD_TESTING)
                    tests/header_self_containment_file_journal_store.cpp
                    tests/header_self_containment_file_managed_deal_settlement_store.cpp
                    tests/header_self_containment_file_managed_settlement_preparation_store.cpp
-                   tests/header_self_containment_dispatch_managed_opening_allocation.cpp)
+                   tests/header_self_containment_dispatch_managed_opening_allocation.cpp
+                   tests/header_self_containment_dispatch_managed_opening_provenance_producer.cpp)
     target_link_libraries(mt5bridge_header_self_containment_test PRIVATE
                           mt5bridge::client)
     target_include_directories(mt5bridge_header_self_containment_test PRIVATE

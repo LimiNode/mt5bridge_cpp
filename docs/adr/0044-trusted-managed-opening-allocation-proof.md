@@ -129,6 +129,13 @@ ticket and the cumulative quantity increases without changing the immutable
 source tuple. The historical allocation's digest is retained; it is not
 required to equal the digest of the expanded B3B frontier.
 
+When the requested exact key is absent, B3D returns `unavailable` after the
+complete namespace scan without invoking B3B: `ExactFrontier` deliberately
+contains no position identity from which a fresh B3B request could be formed.
+`CurrentFrontier`, in contrast, always invokes fresh B3B before classifying an
+empty allocation namespace, so a source contradiction or I/O failure is never
+reported as ordinary publication absence.
+
 `CurrentFrontier` requires the stricter `exact` relation. Thus, after a later
 fill, `ExactFrontier(A)` may succeed with an `extended` fresh B3B proof while
 `CurrentFrontier` selects only the published B frontier.

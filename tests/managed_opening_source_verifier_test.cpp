@@ -3,6 +3,7 @@
 
 #include "managed_opening_source_verifier.hpp"
 #include "managed_opening_allocation.hpp"
+#include "managed_opening_provenance_producer.hpp"
 #include "managed_opening_source_digest.hpp"
 #include "one_shot_backend.hpp"
 
@@ -64,6 +65,46 @@ public:
 
     ManagedOpeningFactScanStatus scan_status = ManagedOpeningFactScanStatus::complete;
     std::vector<ManagedOpeningDealFact> facts;
+};
+
+class MemoryOpeningAllocationStore final : public DurableManagedOpeningAllocationStore {
+public:
+    ManagedOpeningAllocationCommitStatus prepare(
+        const ManagedOpeningAllocationEntry &, const VerifiedManagedOpeningSourceFact &,
+        const DurableJournalStore &, const DurableManagedOpeningFactStore &,
+        const SingleWriterLease &) override {
+        return ManagedOpeningAllocationCommitStatus::io_error;
+    }
+
+    ManagedOpeningAllocationPreparationLoadResult load_preparation(
+        const ManagedOpeningAllocationKey &) const override {
+        return {ManagedOpeningAllocationLoadStatus::not_found, std::nullopt};
+    }
+
+    ManagedOpeningAllocationCommitStatus publish(
+        const ManagedOpeningAllocationPreparation &, const DurableJournalStore &,
+        const DurableManagedOpeningFactStore &, const SingleWriterLease &,
+        const ManagedOpeningSourceVerifier &, const ManagedOpeningProvenanceRequest &) override {
+        return ManagedOpeningAllocationCommitStatus::io_error;
+    }
+
+    ManagedOpeningAllocationLoadResult load(
+        const ManagedOpeningAllocationKey &key) const override {
+        for (const auto &record : records)
+            if (record.key == key)
+                return {ManagedOpeningAllocationLoadStatus::found, record};
+        return {ManagedOpeningAllocationLoadStatus::not_found, std::nullopt};
+    }
+
+    ManagedOpeningAllocationScanResult scan(
+        const AccountKey &, const DurableJournalStore &,
+        const DurableManagedOpeningFactStore &) const override {
+        return {scan_status, records, preparations};
+    }
+
+    ManagedOpeningAllocationScanStatus scan_status = ManagedOpeningAllocationScanStatus::complete;
+    std::vector<ManagedOpeningAllocationEntry> records;
+    std::vector<ManagedOpeningAllocationPreparation> preparations;
 };
 
 class TestLease final : public SingleWriterLease {
@@ -1117,6 +1158,27 @@ void accepts_production_reachable_filesystem_allocation() {
                     extended.proof->deal_tickets() ==
                         std::vector<std::uint64_t>{5001, 5002},
                 "bounded cross-instance partial fill was not verified");
+
+        ManagedOpeningProvenanceProducer producer(
+            restarted_journal, restarted_facts, restarted_allocations,
+            restarted_verifier, restarted_lease);
+        const auto exact_a_selector = ManagedOpeningProvenanceSelector{
+            ManagedOpeningProvenanceLookupKind::exact_historical, operation(),
+            entry.key.operation_revision, entry.key.frontier_revision,
+            0};
+        const auto exact_a = producer.verify(exact_a_selector);
+        require(exact_a.found() &&
+                    exact_a.proof->scope() == ManagedOpeningProofScope::historical &&
+                    exact_a.proof->frontier_revision() == entry.key.frontier_revision,
+                "trusted producer did not preserve historical frontier A after fill B");
+
+        const auto current_before_b = producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::current, operation(),
+                entry.key.operation_revision, 0, entry.position_identifier});
+        require(current_before_b.status == ManagedOpeningProvenanceStatus::unavailable,
+                "current lookup treated unpublished compatible successor as evidence failure");
+
         const auto prepared_b = restarted_publisher.prepare(replay_request);
         require(prepared_b.status == ManagedOpeningAllocationPublicationStatus::prepared &&
                     prepared_b.record,
@@ -1129,10 +1191,154 @@ void accepts_production_reachable_filesystem_allocation() {
                       << " error=" << restarted_allocations.last_error() << '\n';
         require(published_b.status == ManagedOpeningAllocationPublicationStatus::published,
                 "cross-instance successor publication failed");
+        const auto current_after_b = producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::current, operation(),
+                entry.key.operation_revision, 0, entry.position_identifier});
+        require(current_after_b.found() &&
+                    current_after_b.proof->scope() == ManagedOpeningProofScope::current &&
+                    current_after_b.proof->frontier_revision() !=
+                        entry.key.frontier_revision,
+                "trusted producer did not select the published current frontier B");
         const auto final = restarted_allocations.scan(
             account(), restarted_journal, restarted_facts);
         require(final.complete() && final.records.size() == 2 && final.preparations.empty(),
                 "cross-instance successor did not survive publication");
+
+        // Exercise producer decisions against controlled namespace views while
+        // retaining the real journal, B3A facts, graph, and B3B verifier.
+        MemoryOpeningAllocationStore memory_allocations;
+        memory_allocations.records = final.records;
+        ManagedOpeningProvenanceProducer memory_producer(
+            restarted_journal, restarted_facts, memory_allocations,
+            restarted_verifier, restarted_lease);
+        const auto current_selector = ManagedOpeningProvenanceSelector{
+            ManagedOpeningProvenanceLookupKind::current, operation(),
+            entry.key.operation_revision, 0, entry.position_identifier};
+        const auto exact_b_selector = ManagedOpeningProvenanceSelector{
+            ManagedOpeningProvenanceLookupKind::exact_historical, operation(),
+            entry.key.operation_revision, final.records.back().key.frontier_revision, 0};
+
+        auto mismatched_digest = final.records.back();
+        ++mismatched_digest.evidence_digest;
+        memory_allocations.records = {mismatched_digest};
+        const auto digest_current = memory_producer.verify(current_selector);
+        require(digest_current.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !digest_current.found() && !digest_current.proof,
+                "current lookup accepted same-ticket evidence with a mismatched digest");
+        const auto digest_exact = memory_producer.verify(exact_b_selector);
+        require(digest_exact.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !digest_exact.found() && !digest_exact.proof,
+                "historical lookup accepted same-ticket evidence with a mismatched digest");
+
+        memory_allocations.records.clear();
+        const auto no_allocation = memory_producer.verify(current_selector);
+        require(no_allocation.status == ManagedOpeningProvenanceStatus::unavailable &&
+                    !no_allocation.found() && !no_allocation.proof,
+                "valid sources without an allocation were not reported unavailable");
+        const auto missing_exact = memory_producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::exact_historical, operation(),
+                entry.key.operation_revision,
+                final.records.back().key.frontier_revision + 1000, 0});
+        require(missing_exact.status == ManagedOpeningProvenanceStatus::unavailable &&
+                    !missing_exact.found() && !missing_exact.proof,
+                "missing exact frontier was not reported unavailable");
+
+        memory_allocations.records = {final.records.back()};
+        const auto wrong_anchor = memory_producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::current, operation(),
+                entry.key.operation_revision + 1, 0, entry.position_identifier});
+        require(wrong_anchor.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !wrong_anchor.found() && !wrong_anchor.proof,
+                "wrong immutable result-source revision produced a proof");
+        const auto wrong_position = memory_producer.verify(
+            ManagedOpeningProvenanceSelector{
+                ManagedOpeningProvenanceLookupKind::current, operation(),
+                entry.key.operation_revision, 0, entry.position_identifier + 1});
+        require(wrong_position.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !wrong_position.found() && !wrong_position.proof,
+                "wrong position identity produced a proof");
+
+        memory_allocations.records = {final.records.back(), final.records.back()};
+        const auto duplicate = memory_producer.verify(current_selector);
+        require(duplicate.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !duplicate.found() && !duplicate.proof,
+                "duplicate current frontiers produced a proof");
+
+        auto older_with_larger_discriminator = final.records.front();
+        older_with_larger_discriminator.key.frontier_revision =
+            final.records.back().key.frontier_revision + 1000;
+        memory_allocations.records = {older_with_larger_discriminator, final.records.back()};
+        const auto source_complete_current = memory_producer.verify(current_selector);
+        require(source_complete_current.found() &&
+                    source_complete_current.proof->frontier_revision() ==
+                        final.records.back().key.frontier_revision,
+                "current lookup selected the largest discriminator instead of source completeness");
+
+        memory_allocations.records = {final.records.back(), mismatched_digest};
+        const auto incomparable = memory_producer.verify(current_selector);
+        require(incomparable.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !incomparable.found() && !incomparable.proof,
+                "incomparable current frontiers produced a proof");
+
+        memory_allocations.records.clear();
+        memory_allocations.scan_status = ManagedOpeningAllocationScanStatus::invalid_record;
+        const auto malformed_namespace = memory_producer.verify(current_selector);
+        require(malformed_namespace.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !malformed_namespace.found() && !malformed_namespace.proof,
+                "malformed allocation namespace produced a proof");
+        memory_allocations.scan_status = ManagedOpeningAllocationScanStatus::complete;
+
+        const auto legacy = memory_producer.verify(replay_request);
+        require(legacy.status == ManagedOpeningProvenanceStatus::invalid_request &&
+                    !legacy.found() && !legacy.proof,
+                "legacy unscoped producer request was not rejected");
+
+        MemoryOpeningFactStore missing_facts;
+        ManagedOpeningSourceVerifier missing_fact_verifier(
+            restarted_journal, missing_facts, current_graph,
+            ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, restarted_lease);
+        memory_allocations.records = {final.records.back()};
+        ManagedOpeningProvenanceProducer missing_fact_producer(
+            restarted_journal, missing_facts, memory_allocations,
+            missing_fact_verifier, restarted_lease);
+        const auto missing_fact = missing_fact_producer.verify(current_selector);
+        require(missing_fact.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !missing_fact.found() && !missing_fact.proof,
+                "missing B3A fact produced a proof");
+
+        ObservationGraph contradictory_graph(account());
+        ObservationBatch contradictory_batch = current;
+        contradictory_batch.history_deals = {deal(5001, 0.04), deal(5002, 0.03)};
+        require(contradictory_graph.apply(contradictory_batch).accepted(),
+                "contradictory graph fixture was rejected");
+        ManagedOpeningSourceVerifier contradictory_verifier(
+            restarted_journal, restarted_facts, contradictory_graph,
+            ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, restarted_lease);
+        memory_allocations.records.clear();
+        ManagedOpeningProvenanceProducer contradictory_producer(
+            restarted_journal, restarted_facts, memory_allocations,
+            contradictory_verifier, restarted_lease);
+        const auto contradictory_source = contradictory_producer.verify(current_selector);
+        require(contradictory_source.status == ManagedOpeningProvenanceStatus::invalid_evidence &&
+                    !contradictory_source.found() && !contradictory_source.proof,
+                "contradictory B3B source without allocation was reported unavailable");
+
+        TestLease revoked_lease;
+        revoked_lease.held = false;
+        ManagedOpeningSourceVerifier revoked_verifier(
+            restarted_journal, restarted_facts, current_graph,
+            ManagedOpeningQuantityDomain{2, 1, 1, 1000, 1000}, revoked_lease);
+        ManagedOpeningProvenanceProducer revoked_producer(
+            restarted_journal, restarted_facts, memory_allocations,
+            revoked_verifier, revoked_lease);
+        const auto revoked = revoked_producer.verify(current_selector);
+        require(revoked.status == ManagedOpeningProvenanceStatus::lease_not_held &&
+                    !revoked.found() && !revoked.proof,
+                "stale producer lease did not fail closed");
+
         const auto unchanged = restarted_allocations.load(entry.key);
         require(unchanged.found() && *unchanged.record == entry,
                 "cross-instance successor rewrote the historical allocation");

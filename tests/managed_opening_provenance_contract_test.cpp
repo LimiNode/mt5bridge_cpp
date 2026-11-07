@@ -61,6 +61,27 @@ void rejects_invalid_query_before_source_lookup() {
             "non-open operation kind was accepted");
 }
 
+void requires_an_explicit_frontier_selector() {
+    UnavailableManagedOpeningProvenanceSource source;
+    const auto invalid = source.verify(ManagedOpeningProvenanceSelector{
+        ManagedOpeningProvenanceLookupKind::current, request().operation_key,
+        4, 1, 88001});
+    require(invalid.status == ManagedOpeningProvenanceStatus::invalid_request,
+            "current selector accepted a forbidden frontier discriminator");
+
+    const auto valid = source.verify(ManagedOpeningProvenanceSelector{
+        ManagedOpeningProvenanceLookupKind::current, request().operation_key,
+        4, 0, 88001});
+    require(valid.status == ManagedOpeningProvenanceStatus::unavailable,
+            "valid current selector did not fail closed without a producer");
+
+    const auto exact = source.verify(ManagedOpeningProvenanceSelector{
+        ManagedOpeningProvenanceLookupKind::exact_historical, request().operation_key,
+        4, 9, 0});
+    require(exact.status == ManagedOpeningProvenanceStatus::unavailable,
+            "valid historical selector did not fail closed without a producer");
+}
+
 void rejects_found_status_without_sealed_proof() {
     ForgedFoundSource source;
     const auto result = source.verify(request());
@@ -96,6 +117,7 @@ int main() {
     try {
         rejects_structural_lookup_without_source();
         rejects_invalid_query_before_source_lookup();
+        requires_an_explicit_frontier_selector();
         rejects_found_status_without_sealed_proof();
         caller_query_fields_do_not_create_proof();
         proof_is_not_caller_constructible();

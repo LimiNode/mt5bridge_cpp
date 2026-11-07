@@ -24,7 +24,8 @@ FrontierRelation classify_frontier_relation(
             return FrontierRelation::contradiction;
     }
     if (proof.deal_tickets().size() == entry.fact_references.size() &&
-        proof.managed_logical_units() == entry.cumulative_managed_logical_units)
+        proof.managed_logical_units() == entry.cumulative_managed_logical_units &&
+        proof.evidence_digest() == entry.evidence_digest)
         return FrontierRelation::exact;
     if (proof.deal_tickets().size() > entry.fact_references.size() &&
         proof.managed_logical_units() > entry.cumulative_managed_logical_units)
@@ -120,10 +121,12 @@ ManagedOpeningProvenanceResult ManagedOpeningProvenanceProducer::verify_locked(
             }
         }
         if (!selected)
+            // An exact selector carries no position identity. Without the
+            // requested durable record there is no trusted position with
+            // which to invoke B3B; the complete scan therefore establishes
+            // the explicit `unavailable` result for this historical lookup.
             return {ManagedOpeningProvenanceStatus::unavailable, std::nullopt};
     } else {
-        if (candidates.empty())
-            return {ManagedOpeningProvenanceStatus::unavailable, std::nullopt};
         if (candidates.size() > 1) {
             // Fresh evidence below distinguishes a compatible historical
             // prefix from two competing current records. Keep the scan
@@ -141,6 +144,10 @@ ManagedOpeningProvenanceResult ManagedOpeningProvenanceProducer::verify_locked(
     const auto fresh = verifier_.verify(fresh_request);
     if (!fresh.found())
         return map_verifier_result(fresh);
+
+    if (selector.kind == ManagedOpeningProvenanceLookupKind::current &&
+        candidates.empty())
+        return {ManagedOpeningProvenanceStatus::unavailable, std::nullopt};
 
     if (selector.kind == ManagedOpeningProvenanceLookupKind::exact_historical) {
         const auto relation = classify_frontier_relation(*selected, *fresh.proof);

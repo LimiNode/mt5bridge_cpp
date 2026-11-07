@@ -4,16 +4,24 @@ import os
 
 _call_count_file = os.environ.get("MT5BRIDGE_CALL_COUNT_FILE")
 _send_mode = os.environ.get("MT5BRIDGE_ORDER_SEND_MODE", "success")
+_expect_existing_count = os.environ.get("MT5BRIDGE_EXPECT_EXISTING_COUNT") == "1"
 
 
 def _read_call_count() -> int:
     if not _call_count_file:
         return 0
+    if not os.path.exists(_call_count_file):
+        if _expect_existing_count:
+            raise RuntimeError("durable order call counter is missing")
+        return 0
     try:
         with open(_call_count_file, "r", encoding="ascii") as stream:
-            return int(stream.read() or "0")
-    except (OSError, ValueError):
-        return 0
+            value = int(stream.read())
+    except (OSError, ValueError) as error:
+        raise RuntimeError("durable order call counter is unreadable") from error
+    if value < 0:
+        raise RuntimeError("durable order call counter is negative")
+    return value
 
 
 order_calls = _read_call_count()

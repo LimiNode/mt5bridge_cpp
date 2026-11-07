@@ -230,18 +230,35 @@ int run_uncertain_phase(const std::filesystem::path &root, bool first_phase) {
                             mt5bridge::OperationState::submitting,
                     "transport uncertainty did not become reconcile-only");
         } else {
-            const auto recovery = journal.recover_all();
-            require(recovery.accepted() && recovery.records().size() == 1,
+            const auto journal_recovery = journal.recover_all();
+            const auto recovery = mt5bridge::OperationRecoveryCoordinator::recover(journal);
+            require(recovery.accepted() && recovery.operations.size() == 1,
                     "restart did not recover one unresolved operation");
-            const auto &record = recovery.records().front();
+            const auto &recovered = recovery.operations.front();
+            const auto &record = recovered.record;
             require(record.journal_state == mt5bridge::JournalState::reconciling &&
                         record.operation_state == mt5bridge::OperationState::submitting,
                     "unresolved operation was not kept reconciliation-only");
-            require(mt5bridge::OperationRecoveryCoordinator::classify(record) ==
+            require(recovered.action ==
                         mt5bridge::OperationRecoveryAction::reconcile_only,
                     "recovery classified an unresolved operation as resendable");
+            mt5bridge::DispatchAdmissionRequest admission_request;
+            admission_request.current_account = operation_account;
+            admission_request.environment_proof = consistency.proof;
+            const auto admission_result = admission.admit(
+                record.key, admission_request, lease);
+            require(!admission_result.admitted() &&
+                        admission_result.status ==
+                            mt5bridge::DispatchAdmissionStatus::invalid_state &&
+                        !admission_result.permit,
+                    "recovered dispatch barrier was reopened");
+            const auto after_admission = journal.find(record.key);
+            require(after_admission &&
+                        after_admission->journal_state ==
+                            mt5bridge::JournalState::reconciling,
+                    "recovery admission changed the durable journal state");
             require(!mt5bridge::dispatch::ManagedTradeOwner::recover_settled_trade(
-                         initial, operation_account, recovery),
+                         initial, operation_account, journal_recovery),
                     "unresolved operation was incorrectly treated as settled");
             mt5bridge::dispatch::ManagedTradeOwner owner(
                 initial, operation_account, journal, admission, backend, account_probe,
@@ -269,6 +286,7 @@ int run_uncertain_restart(const char *executable) {
     const auto count_file = test_root.path() / "order-calls.txt";
     set_environment("MT5BRIDGE_CALL_COUNT_FILE", count_file);
     set_environment("MT5BRIDGE_ORDER_SEND_MODE", "none");
+    set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "0");
     const auto root_text = test_root.path().string();
     const std::string first_arg = "--uncertain-child=first=" + root_text;
     const std::string second_arg = "--uncertain-child=second=" + root_text;
@@ -277,12 +295,14 @@ int run_uncertain_restart(const char *executable) {
 #if defined(_WIN32)
     require(_spawnv(_P_WAIT, executable, first_args) == 0,
             "uncertain first process failed");
+    set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "1");
     require(_spawnv(_P_WAIT, executable, second_args) == 0,
             "uncertain second process failed");
 #else
     require(std::system((std::string(executable) + " \"" + first_arg + "\"").c_str()) ==
                 0,
             "uncertain first process failed");
+    set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "1");
     require(std::system((std::string(executable) + " \"" + second_arg + "\"").c_str()) ==
                 0,
             "uncertain second process failed");
@@ -293,6 +313,7 @@ int run_uncertain_restart(const char *executable) {
     require(count == "1", "restart path performed a duplicate order_send");
     clear_environment("MT5BRIDGE_CALL_COUNT_FILE");
     clear_environment("MT5BRIDGE_ORDER_SEND_MODE");
+    clear_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT");
     return 0;
 }
 

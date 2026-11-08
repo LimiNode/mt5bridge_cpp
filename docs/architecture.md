@@ -270,6 +270,21 @@ versioned durable per-deal facts; its digest verifies but never replaces that
 source chain. Until both source and quantity chains are implemented and
 restart-tested, the opening proof and production `INOUT` paths remain
 fail-closed.
+[ADR-0044](adr/0044-trusted-managed-opening-allocation-proof.md) fixes the
+C3A B3D lookup boundary before implementation: exact historical allocation
+identity and current cumulative frontier selection are explicit alternatives.
+Currentness is established only by a unique source-complete allocation joined
+to fresh B3B evidence under the account fence; historical lookup accepts the
+existing B3C `extended` relation without replacing the historical digest. The
+producer passes the current journal lifecycle revision to B3B while retaining
+the immutable `result_source_revision` in the allocation identity. The durable
+frontier discriminator is not a causal clock. The future sealed proof retains
+the selected frontier identity and historical/current scope, while permission
+to mutate managed exposure stays outside B3D. If B3B observes a compatible
+successor before its `alloc-*` record is durable, current lookup remains
+`unavailable` until publication catches up. Until the producer and its
+restart/fencing regressions are verified, the opening provenance source and
+managed `INOUT` path remain fail-closed.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

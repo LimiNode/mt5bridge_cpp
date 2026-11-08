@@ -506,6 +506,27 @@ if(MT5BRIDGE_BUILD_RUNTIME)
         set_tests_properties(mt5bridge_managed_trade_python_uncertain_restart PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
+        add_executable(mt5bridge_managed_trade_python_negative_test
+                       tests/managed_trade_python_negative_test.cpp
+                       src/trade/python_dispatch_transport.cpp)
+        target_include_directories(mt5bridge_managed_trade_python_negative_test PRIVATE
+                                   ${PROJECT_SOURCE_DIR}/include
+                                   ${PROJECT_SOURCE_DIR}/src/dispatch
+                                   ${PROJECT_SOURCE_DIR}/src/runtime
+                                   ${PROJECT_SOURCE_DIR}/src/trade)
+        target_link_libraries(mt5bridge_managed_trade_python_negative_test PRIVATE
+                              mt5bridge::managed_trade_owner Python3::Python)
+        add_test(
+            NAME mt5bridge_managed_trade_python_negative
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_owner_mt5_module"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
+                    "PATH=${MT5BRIDGE_PYTHON_HOME};$<TARGET_FILE_DIR:mt5bridge_managed_trade_python_negative_test>;$ENV{PATH}"
+                    "$<TARGET_FILE:mt5bridge_managed_trade_python_negative_test>"
+        )
+        set_tests_properties(mt5bridge_managed_trade_python_negative PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
         add_test(
             NAME mt5bridge_python_adapter
             COMMAND ${CMAKE_COMMAND} -E env

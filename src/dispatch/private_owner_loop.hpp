@@ -41,6 +41,7 @@ enum class PrivateOwnerLoopStepStatus {
     recovery_failed,      ///< A fresh complete journal scan failed.
     idle,                 ///< No non-terminal durable operation remains.
     reconcile_only,       ///< Observation may progress this operation; never resend.
+    ambiguous_blocked,    ///< Lifecycle ended, but exposure remains unresolved.
     resume_pre_dispatch,  ///< Caller may apply normal admission/fencing rules.
 };
 
@@ -55,6 +56,7 @@ struct PrivateOwnerLoopStepResult {
     /// \return False for every step that crosses or observes a dispatch barrier.
     bool non_resendable() const {
         return status == PrivateOwnerLoopStepStatus::reconcile_only ||
+               status == PrivateOwnerLoopStepStatus::ambiguous_blocked ||
                (operation && operation->non_resendable());
     }
 };
@@ -128,10 +130,16 @@ private:
     /// \return True only while the same lease token is held.
     bool lease_held() const;
 
+    /// \brief Tests whether one recovered record blocks this account scope.
+    /// \param operation Classified durable operation.
+    /// \return True for unresolved lifecycle or ambiguous exposure.
+    bool blocks_scope(const RecoveredOperation &operation) const;
+
     OperationJournal &journal_;
     AccountKey account_;
     const SingleWriterLease &lease_;
     std::optional<std::uint64_t> fencing_token_;
+    std::optional<OperationKey> cursor_;
     bool started_ = false;
 };
 

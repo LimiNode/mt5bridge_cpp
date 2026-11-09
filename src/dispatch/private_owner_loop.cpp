@@ -3,11 +3,15 @@
 
 #include "private_owner_loop.hpp"
 
+#include <algorithm>
+#include <vector>
+
 namespace mt5bridge::dispatch {
 
 PrivateOwnerLoopStartupResult PrivateOwnerLoop::start() {
     started_ = false;
     fencing_token_.reset();
+    cursor_.reset();
     if (!account_.valid())
         return {PrivateOwnerLoopStartupStatus::lease_unavailable,
                 JournalMutationStatus::invalid_record, 0};
@@ -21,6 +25,9 @@ PrivateOwnerLoopStartupResult PrivateOwnerLoop::start() {
     if (recovered.status != JournalMutationStatus::accepted)
         return {PrivateOwnerLoopStartupStatus::recovery_failed,
                 recovered.status, 0};
+    if (!lease_held())
+        return {PrivateOwnerLoopStartupStatus::lease_unavailable,
+                JournalMutationStatus::not_durable, 0};
 
     started_ = true;
     return {PrivateOwnerLoopStartupStatus::ready, recovered.status,
@@ -36,15 +43,35 @@ PrivateOwnerLoopStepResult PrivateOwnerLoop::step() {
     const auto recovered = refresh_recovery();
     if (recovered.status != JournalMutationStatus::accepted)
         return {PrivateOwnerLoopStepStatus::recovery_failed, std::nullopt};
+    if (!lease_held())
+        return {PrivateOwnerLoopStepStatus::lease_lost, std::nullopt};
 
+    std::vector<const RecoveredOperation *> pending;
     for (const auto &operation : recovered.operations) {
-        if (operation.action == OperationRecoveryAction::terminal)
-            continue;
-        if (operation.action == OperationRecoveryAction::reconcile_only)
-            return {PrivateOwnerLoopStepStatus::reconcile_only, operation};
-        return {PrivateOwnerLoopStepStatus::resume_pre_dispatch, operation};
+        if (operation.record.key.account == account_ && blocks_scope(operation))
+            pending.push_back(&operation);
     }
-    return {PrivateOwnerLoopStepStatus::idle, std::nullopt};
+    if (pending.empty()) {
+        cursor_.reset();
+        return {PrivateOwnerLoopStepStatus::idle, std::nullopt};
+    }
+
+    std::size_t selected = 0;
+    if (cursor_) {
+        const auto after = std::find_if(
+            pending.begin(), pending.end(), [this](const auto *operation) {
+                return cursor_.value() < operation->record.key;
+            });
+        if (after != pending.end())
+            selected = static_cast<std::size_t>(after - pending.begin());
+    }
+    const auto &operation = *pending[selected];
+    cursor_ = operation.record.key;
+    if (operation.record.operation_state == OperationState::ambiguous)
+        return {PrivateOwnerLoopStepStatus::ambiguous_blocked, operation};
+    if (operation.action == OperationRecoveryAction::reconcile_only)
+        return {PrivateOwnerLoopStepStatus::reconcile_only, operation};
+    return {PrivateOwnerLoopStepStatus::resume_pre_dispatch, operation};
 }
 
 PrivateOwnerLoopIntentResult PrivateOwnerLoop::intent_admission(
@@ -53,14 +80,17 @@ PrivateOwnerLoopIntentResult PrivateOwnerLoop::intent_admission(
         return {PrivateOwnerLoopIntentStatus::not_ready};
     if (!key.valid() || key.account != account_)
         return {PrivateOwnerLoopIntentStatus::account_mismatch};
-    if (journal_.find(key))
-        return {PrivateOwnerLoopIntentStatus::duplicate};
-
     const auto recovered = refresh_recovery();
     if (recovered.status != JournalMutationStatus::accepted)
         return {PrivateOwnerLoopIntentStatus::not_ready};
+    if (!lease_held())
+        return {PrivateOwnerLoopIntentStatus::not_ready};
     for (const auto &operation : recovered.operations) {
-        if (operation.action != OperationRecoveryAction::terminal)
+        if (operation.record.key.account != account_)
+            continue;
+        if (operation.record.key == key)
+            return {PrivateOwnerLoopIntentStatus::duplicate};
+        if (blocks_scope(operation))
             return {PrivateOwnerLoopIntentStatus::unresolved_block};
     }
     return {PrivateOwnerLoopIntentStatus::accepted};
@@ -72,6 +102,11 @@ bool PrivateOwnerLoop::ready() const {
 
 OperationRecoveryResult PrivateOwnerLoop::refresh_recovery() {
     return OperationRecoveryCoordinator::recover(journal_);
+}
+
+bool PrivateOwnerLoop::blocks_scope(const RecoveredOperation &operation) const {
+    return operation.action != OperationRecoveryAction::terminal ||
+           operation.record.operation_state == OperationState::ambiguous;
 }
 
 bool PrivateOwnerLoop::lease_held() const {

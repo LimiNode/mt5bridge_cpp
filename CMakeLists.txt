@@ -94,6 +94,16 @@ target_link_libraries(mt5bridge_managed_trade_owner PRIVATE
                       mt5bridge::one_shot_backend)
 add_library(mt5bridge::managed_trade_owner ALIAS mt5bridge_managed_trade_owner)
 
+# Private startup recovery orchestration remains Python-free and does not expose
+# a broker-send API. Callers supply observation and normal admission steps.
+add_library(mt5bridge_private_owner_loop STATIC
+            src/dispatch/private_owner_loop.cpp)
+target_include_directories(mt5bridge_private_owner_loop PRIVATE
+                           ${PROJECT_SOURCE_DIR}/include
+                           ${PROJECT_SOURCE_DIR}/src/dispatch)
+target_link_libraries(mt5bridge_private_owner_loop PRIVATE mt5bridge::journal)
+add_library(mt5bridge::private_owner_loop ALIAS mt5bridge_private_owner_loop)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -367,6 +377,15 @@ if(BUILD_TESTING)
                           mt5bridge::managed_trade_owner)
     add_test(NAME mt5bridge_managed_trade_owner
              COMMAND mt5bridge_managed_trade_owner_test)
+    add_executable(mt5bridge_private_owner_loop_test
+                   tests/private_owner_loop_test.cpp)
+    target_include_directories(mt5bridge_private_owner_loop_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/include
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
+    target_link_libraries(mt5bridge_private_owner_loop_test PRIVATE
+                          mt5bridge::private_owner_loop mt5bridge::journal)
+    add_test(NAME mt5bridge_private_owner_loop
+             COMMAND mt5bridge_private_owner_loop_test)
 endif()
 
 if(MT5BRIDGE_BUILD_RUNTIME)

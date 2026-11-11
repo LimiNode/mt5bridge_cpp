@@ -2,20 +2,16 @@
 
 import os
 
-_call_count_file = os.environ.get("MT5BRIDGE_CALL_COUNT_FILE")
-_send_mode = os.environ.get("MT5BRIDGE_ORDER_SEND_MODE", "success")
-_expect_existing_count = os.environ.get("MT5BRIDGE_EXPECT_EXISTING_COUNT") == "1"
-
-
 def _read_call_count() -> int:
-    if not _call_count_file:
+    call_count_file = os.environ.get("MT5BRIDGE_CALL_COUNT_FILE")
+    if not call_count_file:
         return 0
-    if not os.path.exists(_call_count_file):
-        if _expect_existing_count:
+    if not os.path.exists(call_count_file):
+        if os.environ.get("MT5BRIDGE_EXPECT_EXISTING_COUNT") == "1":
             raise RuntimeError("durable order call counter is missing")
         return 0
     try:
-        with open(_call_count_file, "r", encoding="ascii") as stream:
+        with open(call_count_file, "r", encoding="ascii") as stream:
             value = int(stream.read())
     except (OSError, ValueError) as error:
         raise RuntimeError("durable order call counter is unreadable") from error
@@ -29,20 +25,30 @@ order_calls = _read_call_count()
 
 def account_info() -> dict[str, object]:
     """Return the account identity used by the durable owner fixture."""
-    return {"server": "Fake-Server", "login": 42}
+    return {
+        "server": os.environ.get("MT5BRIDGE_ACCOUNT_SERVER", "Fake-Server"),
+        "login": int(os.environ.get("MT5BRIDGE_ACCOUNT_LOGIN", "42")),
+    }
 
 
 def order_send(request: dict[str, object]) -> dict[str, object] | None:
     """Accept one request and return a complete MqlTradeResult-shaped mapping."""
     global order_calls
-    order_calls += 1
-    if _call_count_file:
-        with open(_call_count_file, "w", encoding="ascii") as stream:
+    order_calls = _read_call_count() + 1
+    call_count_file = os.environ.get("MT5BRIDGE_CALL_COUNT_FILE")
+    if call_count_file:
+        with open(call_count_file, "w", encoding="ascii") as stream:
             stream.write(str(order_calls))
-    if _send_mode == "none":
+    send_mode = os.environ.get("MT5BRIDGE_ORDER_SEND_MODE", "success")
+    if send_mode == "none":
         return None
+    if send_mode == "exception":
+        raise RuntimeError("simulated Python transport failure")
+    if send_mode == "malformed":
+        return {"retcode": 10009}
+    retcode = 10018 if send_mode == "market_closed" else 10009
     return {
-        "retcode": 10009,
+        "retcode": retcode,
         "deal": 7002,
         "order": 7001,
         "volume": float(request["volume"]),

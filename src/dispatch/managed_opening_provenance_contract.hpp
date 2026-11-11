@@ -11,6 +11,21 @@
 
 namespace mt5bridge::dispatch {
 
+/// \enum ManagedOpeningProofScope
+/// \brief States whether a sealed opening proof is historical or current.
+enum class ManagedOpeningProofScope : std::uint8_t {
+    historical = 0, ///< Exact immutable frontier; later fills may exist.
+    current = 1,    ///< Exact immutable frontier matching fresh B3B evidence.
+};
+
+/// \brief Tests whether a proof scope is defined.
+/// \param scope Candidate scope.
+/// \return True only for a known proof scope.
+constexpr bool valid_managed_opening_proof_scope(ManagedOpeningProofScope scope) {
+    return scope == ManagedOpeningProofScope::historical ||
+           scope == ManagedOpeningProofScope::current;
+}
+
 /// \struct ManagedOpeningProvenanceRequest
 /// \brief Identifies a durable opening-evidence lookup.
 ///
@@ -27,6 +42,41 @@ struct ManagedOpeningProvenanceRequest {
     bool valid() const {
         return operation_key.valid() && operation_kind == OperationKind::open &&
                operation_revision != 0 && position_identifier != 0;
+    }
+};
+
+/// \enum ManagedOpeningProvenanceLookupKind
+/// \brief Selects historical identity lookup or current frontier lookup.
+enum class ManagedOpeningProvenanceLookupKind : std::uint8_t {
+    exact_historical = 0, ///< Requires the complete immutable frontier key.
+    current = 1,          ///< Requires the unique source-complete current frontier.
+};
+
+/// \struct ManagedOpeningProvenanceSelector
+/// \brief Explicit private selector for trusted opening proof lookup.
+///
+/// `operation_revision` is the immutable journal `result_source_revision`.
+/// The B3D producer derives the current lifecycle revision separately before
+/// invoking the existing B3B verifier API.
+struct ManagedOpeningProvenanceSelector {
+    ManagedOpeningProvenanceLookupKind kind =
+        ManagedOpeningProvenanceLookupKind::exact_historical;
+    OperationKey operation_key;
+    std::uint64_t operation_revision = 0; ///< Immutable result-source revision.
+    std::uint64_t frontier_revision = 0; ///< Required only for exact lookup.
+    /// Broker position identity; required for `current`, optional for exact
+    /// lookup because the durable allocation is the identity authority.
+    std::uint64_t position_identifier = 0;
+
+    /// \brief Tests whether the explicit selector is complete.
+    /// \return True only when all fields required by its kind are present.
+    bool valid() const {
+        if (!operation_key.valid() || operation_revision == 0)
+            return false;
+        if (kind == ManagedOpeningProvenanceLookupKind::exact_historical)
+            return frontier_revision != 0;
+        return kind == ManagedOpeningProvenanceLookupKind::current &&
+               frontier_revision == 0 && position_identifier != 0;
     }
 };
 
@@ -50,6 +100,14 @@ public:
     /// \return Non-zero POSITION_IDENTIFIER.
     std::uint64_t position_identifier() const { return position_identifier_; }
 
+    /// \brief Returns the immutable frontier discriminator checked by the proof.
+    /// \return Non-zero durable frontier identity.
+    std::uint64_t frontier_revision() const { return frontier_revision_; }
+
+    /// \brief Returns the semantic scope of the proof.
+    /// \return Historical or current lookup scope.
+    ManagedOpeningProofScope scope() const { return scope_; }
+
     /// \brief Returns the committed managed logical units.
     /// \return Positive logical quantity.
     std::uint64_t managed_logical_units() const { return managed_logical_units_; }
@@ -62,30 +120,36 @@ public:
     /// \return True for a complete proof value.
     bool valid() const {
         return operation_key_.valid() && operation_revision_ != 0 &&
-               position_identifier_ != 0 && managed_logical_units_ != 0 &&
-               evidence_digest_ != 0;
+               position_identifier_ != 0 && frontier_revision_ != 0 &&
+               managed_logical_units_ != 0 && evidence_digest_ != 0 &&
+               valid_managed_opening_proof_scope(scope_);
     }
 
 private:
     VerifiedManagedOpeningAllocation(OperationKey operation_key,
                                      std::uint64_t operation_revision,
                                      std::uint64_t position_identifier,
+                                     std::uint64_t frontier_revision,
                                      std::uint64_t managed_logical_units,
-                                     std::uint64_t evidence_digest)
+                                     std::uint64_t evidence_digest,
+                                     ManagedOpeningProofScope scope)
         : operation_key_(std::move(operation_key)),
           operation_revision_(operation_revision),
           position_identifier_(position_identifier),
+          frontier_revision_(frontier_revision),
           managed_logical_units_(managed_logical_units),
-          evidence_digest_(evidence_digest) {}
+          evidence_digest_(evidence_digest), scope_(scope) {}
 
     OperationKey operation_key_;
     std::uint64_t operation_revision_ = 0;
     std::uint64_t position_identifier_ = 0;
+    std::uint64_t frontier_revision_ = 0;
     std::uint64_t managed_logical_units_ = 0;
     std::uint64_t evidence_digest_ = 0;
+    ManagedOpeningProofScope scope_ = ManagedOpeningProofScope::historical;
 
-    // Deliberately undeclared in this slice. A future producer must be added
-    // as a separate reviewed implementation after validating durable sources.
+    // Construction remains private to the trusted producer. Caller-provided
+    // identities and quantities cannot manufacture this value.
     friend class ManagedOpeningProvenanceProducer;
 };
 
@@ -94,9 +158,10 @@ private:
 enum class ManagedOpeningProvenanceStatus : std::uint8_t {
     found = 0, ///< A trusted producer returned a sealed proof.
     invalid_request = 1, ///< The lookup identity is malformed.
-    unavailable = 2, ///< No trusted producer exists in the current slice.
+    unavailable = 2, ///< No matching durable frontier is currently available.
     invalid_evidence = 3, ///< A producer found malformed or mismatched evidence.
     io_error = 4, ///< Durable source I/O failed.
+    lease_not_held = 5, ///< Account fencing was lost before the result boundary.
 };
 
 /// \struct ManagedOpeningProvenanceResult
@@ -125,6 +190,16 @@ public:
     /// \return A sealed proof or a fail-closed status.
     virtual ManagedOpeningProvenanceResult verify(
         const ManagedOpeningProvenanceRequest &request) const = 0;
+
+    /// \brief Looks up a proof using an explicit historical/current selector.
+    /// \param selector Private lookup scope and immutable identity constraints.
+    /// \return A sealed proof or a fail-closed status.
+    virtual ManagedOpeningProvenanceResult verify(
+        const ManagedOpeningProvenanceSelector &selector) const {
+        if (!selector.valid())
+            return {ManagedOpeningProvenanceStatus::invalid_request, std::nullopt};
+        return {ManagedOpeningProvenanceStatus::unavailable, std::nullopt};
+    }
 };
 
 /// \class UnavailableManagedOpeningProvenanceSource
@@ -132,6 +207,8 @@ public:
 class UnavailableManagedOpeningProvenanceSource final
     : public DurableManagedOpeningProvenanceSource {
 public:
+    using DurableManagedOpeningProvenanceSource::verify;
+
     /// \brief Rejects every valid lookup because no producer exists yet.
     /// \param request Query constraints to validate before failing closed.
     /// \return `invalid_request` for malformed input, otherwise `unavailable`.

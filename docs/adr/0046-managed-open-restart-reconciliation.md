@@ -1,4 +1,4 @@
-# ADR-0045: Restart reconciliation of unresolved managed OPEN
+# ADR-0046: Restart reconciliation of unresolved managed OPEN
 
 ## Status
 

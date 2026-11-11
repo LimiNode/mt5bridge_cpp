@@ -1578,6 +1578,56 @@ int main() {
                     recovered_complete->pending_remainder_volume == 0,
                 "durable completed fill did not reconstruct managed exposure");
 
+        MemoryStore pending_store;
+        mt5bridge::OperationJournal pending_journal(pending_store);
+        const mt5bridge::OperationKey pending_key{operation_account, 63, 1};
+        require(pending_journal.create(pending_key, {0x63},
+                                       mt5bridge::OperationKind::open)
+                    .accepted() &&
+                    pending_journal.transition_operation(
+                        pending_key, mt5bridge::OperationState::prechecking)
+                        .accepted() &&
+                    pending_journal.transition_journal(
+                        pending_key, mt5bridge::JournalState::prechecked)
+                        .accepted() &&
+                    pending_journal.transition_journal(
+                        pending_key, mt5bridge::JournalState::dispatch_intent_persisted)
+                        .accepted(),
+                "pending OPEN recovery setup did not reach durable intent");
+        const auto pending_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, recovery_baseline,
+            {mt5bridge::require_active_order(3001)},
+            mt5bridge::OperationState::filled, 63, 1, 2};
+        require(pending_journal.persist_reconciliation_descriptor(
+                    pending_key, pending_descriptor)
+                    .accepted() &&
+                    pending_journal.transition_journal(
+                        pending_key, mt5bridge::JournalState::dispatching, 1)
+                        .accepted() &&
+                    pending_journal.transition_operation(
+                        pending_key, mt5bridge::OperationState::submitting)
+                        .accepted(),
+                "pending OPEN recovery setup did not cross dispatch barrier");
+        const auto pending_recovery = pending_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState pending_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &pending_seed, mt5bridge::managed_trade::TradeId{63}, 2, 2, 2),
+                "pending OPEN recovery seed initialization failed");
+        const auto recovered_pending =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                pending_seed, operation_account, pending_recovery);
+        require(recovered_pending && recovered_pending->valid() &&
+                    recovered_pending->slice.operation_id == 1 &&
+                    recovered_pending->slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    recovered_pending->slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::open &&
+                    recovered_pending->slice.requested_volume == 2 &&
+                    recovered_pending->slice.send_count == 0 &&
+                    recovered_pending->open_volume == 0 &&
+                    recovered_pending->pending_remainder_volume == 0,
+                "restart did not restore unresolved OPEN at the submitting edge");
+
         require(recovered_records.accepted() && !recovered_records.records().empty(),
                 "accepted recovery did not expose a complete read-only record view");
         return EXIT_SUCCESS;

@@ -3,6 +3,7 @@
 
 #include "managed_trade_owner.hpp"
 #include "python_dispatch_transport.hpp"
+#include "private_owner_loop.hpp"
 
 #include "python_ref.hpp"
 
@@ -317,6 +318,173 @@ int run_uncertain_restart(const char *executable) {
     return 0;
 }
 
+int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) {
+    Py_Initialize();
+    require(Py_IsInitialized() != 0, "CPython initialization failed");
+    PyObject *module = PyImport_ImportModule("MetaTrader5");
+    require(module != nullptr, "fake MetaTrader5 module import failed");
+    try {
+        const auto operation_account = account();
+        const mt5bridge::ObservationWindow window{1000, 3000};
+        std::vector<mt5bridge::ObservationBatch> batches;
+        if (first_phase) {
+            batches = {empty_batch(operation_account, window),
+                       empty_batch(operation_account, window)};
+        } else {
+            batches = {settled_batch(operation_account, window)};
+        }
+        auto provider = std::make_unique<mt5bridge_test_support::FakeObservationProvider>(
+            std::move(batches));
+        mt5bridge::ObservationCoordinator coordinator(*provider, operation_account);
+        mt5bridge::ObservationCollectionRequest collection;
+        collection.observe_active_orders = true;
+        collection.observe_positions = true;
+        collection.position_history_order =
+            mt5bridge::PositionHistoryOrder::positions_before_history_deals;
+        collection.history_deals_window = window;
+
+        mt5bridge::WindowsFileJournalStore store(root / "journal");
+        mt5bridge::WindowsSingleWriterLease lease(root / "journal", operation_account);
+        require(store.ready() && lease.ready(), "open-restart store is not ready");
+        mt5bridge::OperationJournal journal(store);
+        mt5bridge::runtime::OneShotDispatchBackend backend;
+        mt5bridge::runtime::Mt5PythonAccountProbe account_probe(module);
+        mt5bridge::runtime::Mt5PythonDispatchTransport transport(module, account_probe);
+
+        mt5bridge::managed_trade::ManagedTradeState initial;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &initial, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),
+                "open-restart state initialization failed");
+
+        if (first_phase) {
+            const auto first = coordinator.refresh(collection);
+            const auto second = coordinator.refresh(collection);
+            require(first.sample && second.sample,
+                    "open-restart baseline was not accepted");
+            mt5bridge::EnvironmentConsistencyRequest consistency_request;
+            consistency_request.history_deals_window = window;
+            const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*first.sample, *second.sample}, consistency_request);
+            require(consistency.consistent() && consistency.proof,
+                    "open-restart environment proof was not established");
+
+            mt5bridge::DispatchAdmissionBarrier admission(
+                journal, coordinator.graph(), {});
+            mt5bridge::dispatch::ManagedTradeOwner owner(
+                initial, operation_account, journal, admission, backend, account_probe,
+                lease, transport);
+            const std::string request =
+                R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+            mt5bridge::dispatch::ManagedTradeIntent intent{
+                std::vector<std::uint8_t>(request.begin(), request.end()),
+                descriptor(operation_account, coordinator.capture_baseline(), window)};
+            const auto prepared = owner.prepare_open(1, std::move(intent));
+            require(prepared.status ==
+                        mt5bridge::dispatch::OwnerStepStatus::prepared,
+                    "open-restart first process did not prepare OPEN");
+            mt5bridge::DispatchAdmissionRequest ready;
+            ready.current_account = operation_account;
+            ready.environment_proof = consistency.proof;
+            const auto executed = owner.execute_pending(ready);
+            require(executed.status ==
+                        mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                        executed.record &&
+                        executed.record->journal_state ==
+                            mt5bridge::JournalState::result_persisted &&
+                        executed.record->operation_state ==
+                            mt5bridge::OperationState::reconciling,
+                    "open-restart first process did not persist unresolved result");
+            require(owner.state().open_volume == 0 &&
+                        owner.state().slice.state ==
+                            mt5bridge::managed_trade::OperationState::submitting,
+                    "open-restart first process fabricated exposure");
+        } else {
+            mt5bridge::dispatch::PrivateOwnerLoop loop(
+                journal, operation_account, lease);
+            const auto startup = loop.start();
+            require(startup.ready() && startup.operation_count == 1,
+                    "open-restart second process did not complete owner startup");
+            const auto action = loop.step();
+            require(action.status ==
+                        mt5bridge::dispatch::PrivateOwnerLoopStepStatus::reconcile_only &&
+                        action.operation,
+                    "open-restart recovery became resendable");
+
+            const auto recovery = journal.recover_all();
+            require(recovery.accepted(), "open-restart journal scan failed");
+            const auto recovered =
+                mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                    initial, operation_account, recovery);
+            require(recovered && recovered->open_volume == 0 &&
+                        recovered->slice.state ==
+                            mt5bridge::managed_trade::OperationState::submitting,
+                    "open-restart did not rebuild the unresolved managed slice");
+
+            mt5bridge::DispatchAdmissionBarrier admission(
+                journal, coordinator.graph(), {});
+            mt5bridge::dispatch::ManagedTradeOwner owner(
+                *recovered, operation_account, journal, admission, backend, account_probe,
+                lease, transport);
+            mt5bridge::OperationReconciliationWorker worker(
+                journal, {operation_account, 7, 1}, coordinator, collection);
+            const auto settled = owner.settle_reconciliation(worker);
+            require(settled.status ==
+                        mt5bridge::dispatch::OwnerStepStatus::completed &&
+                        settled.record &&
+                        settled.record->operation_state ==
+                            mt5bridge::OperationState::filled &&
+                        owner.state().open_volume == 1 &&
+                        owner.state().pending_remainder_volume == 0,
+                    "open-restart matching deal did not settle OPEN");
+            check_order_calls(module);
+        }
+        Py_DECREF(module);
+        Py_FinalizeEx();
+        return 0;
+    } catch (...) {
+        Py_DECREF(module);
+        if (Py_IsInitialized())
+            Py_FinalizeEx();
+        throw;
+    }
+}
+
+int run_open_restart(const char *executable) {
+    TestRoot test_root("mt5bridge-managed-trade-python-open-restart");
+    const auto count_file = test_root.path() / "order-calls.txt";
+    set_environment("MT5BRIDGE_CALL_COUNT_FILE", count_file);
+    set_environment("MT5BRIDGE_ORDER_SEND_MODE", "success");
+    set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "0");
+    const auto root_text = test_root.path().string();
+    const std::string first_arg = "--open-restart-child=first=" + root_text;
+    const std::string second_arg = "--open-restart-child=second=" + root_text;
+    const char *first_args[] = {executable, first_arg.c_str(), nullptr};
+    const char *second_args[] = {executable, second_arg.c_str(), nullptr};
+#if defined(_WIN32)
+    require(_spawnv(_P_WAIT, executable, first_args) == 0,
+            "open-restart first process failed");
+    set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "1");
+    require(_spawnv(_P_WAIT, executable, second_args) == 0,
+            "open-restart second process failed");
+#else
+    require(std::system((std::string(executable) + " \"" + first_arg + "\"").c_str()) ==
+                0,
+            "open-restart first process failed");
+    set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "1");
+    require(std::system((std::string(executable) + " \"" + second_arg + "\"").c_str()) ==
+                0,
+            "open-restart second process failed");
+#endif
+    std::ifstream calls(count_file);
+    std::string count;
+    std::getline(calls, count);
+    require(count == "1", "open-restart performed a duplicate order_send");
+    clear_environment("MT5BRIDGE_CALL_COUNT_FILE");
+    clear_environment("MT5BRIDGE_ORDER_SEND_MODE");
+    clear_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -332,6 +500,19 @@ int main(int argc, char **argv) {
 
     if (argc == 2 && std::string(argv[1]) == "--uncertain-restart")
         return run_uncertain_restart(argv[0]);
+
+    if (argc == 2 && std::string(argv[1]) == "--open-restart")
+        return run_open_restart(argv[0]);
+
+    if (argc == 2 && std::string(argv[1]).rfind("--open-restart-child=", 0) == 0) {
+        const std::string argument(argv[1]);
+        const auto prefix = std::string("--open-restart-child=");
+        const auto phase_start = prefix.size();
+        const auto separator = argument.find('=', phase_start);
+        const auto phase = argument.substr(phase_start, separator - phase_start);
+        const auto root = std::filesystem::path(argument.substr(separator + 1));
+        return run_open_restart_phase(root, phase == "first");
+    }
 
     TestRoot test_root("mt5bridge-managed-trade-python-integration");
     const auto &root = test_root.path();

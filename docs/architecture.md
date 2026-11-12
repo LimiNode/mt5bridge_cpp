@@ -453,6 +453,10 @@ worker process.
    allocation envelope. Both broker legs remain explicitly unallocated;
    FIFO/LIFO/pro-rata ownership and managed exposure mutation remain outside
    this slice.
+   Restart recovery now also reconstructs an unresolved legacy OPEN slice at
+   the non-resendable submitting edge. A fresh private owner loop and a new
+   observation graph can settle that same operation only after matching
+   history-deal evidence; the transport call is never repeated.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

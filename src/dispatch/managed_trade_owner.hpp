@@ -111,6 +111,17 @@ public:
         managed_trade::ManagedTradeState initial_state, const AccountKey &account,
         const JournalRecoveryResult &recovery);
 
+    /// \brief Rebuilds one unresolved OPEN slice without claiming exposure.
+    /// \param initial_state Empty initialized state carrying trade bounds.
+    /// \param account Account scope whose record may be resumed by observation.
+    /// \param recovery Complete journal scan recovered after a process restart.
+    /// \return State at the non-resendable submitting edge, or empty when the
+    ///         durable sequence is incomplete or inconsistent.
+    /// \note This helper never applies fill volume and never creates a permit.
+    static std::optional<managed_trade::ManagedTradeState> recover_pending_open(
+        managed_trade::ManagedTradeState initial_state, const AccountKey &account,
+        const JournalRecoveryResult &recovery);
+
     /// \brief Returns the current private logical state.
     /// \return Owner-loop state owned by this instance.
     const managed_trade::ManagedTradeState &state() const { return state_; }

@@ -69,6 +69,10 @@ public:
         return result;
     }
 
+    void inject(const mt5bridge::OperationRecord &record) {
+        records[record.key] = record;
+    }
+
 private:
     std::map<mt5bridge::OperationKey, mt5bridge::OperationRecord> records;
 };
@@ -1577,6 +1581,194 @@ int main() {
                     recovered_complete->open_volume == 5 &&
                     recovered_complete->pending_remainder_volume == 0,
                 "durable completed fill did not reconstruct managed exposure");
+
+        MemoryStore pending_store;
+        mt5bridge::OperationJournal pending_journal(pending_store);
+        const mt5bridge::OperationKey pending_key{operation_account, 63, 1};
+        require(pending_journal.create(pending_key, {0x63},
+                                       mt5bridge::OperationKind::open)
+                    .accepted() &&
+                    pending_journal.transition_operation(
+                        pending_key, mt5bridge::OperationState::prechecking)
+                        .accepted() &&
+                    pending_journal.transition_journal(
+                        pending_key, mt5bridge::JournalState::prechecked)
+                        .accepted() &&
+                    pending_journal.transition_journal(
+                        pending_key, mt5bridge::JournalState::dispatch_intent_persisted)
+                        .accepted(),
+                "pending OPEN recovery setup did not reach durable intent");
+        const auto pending_descriptor = mt5bridge::ReconciliationDescriptor{
+            operation_account, recovery_baseline,
+            {mt5bridge::require_active_order(3001)},
+            mt5bridge::OperationState::filled, 63, 1, 2};
+        require(pending_journal.persist_reconciliation_descriptor(
+                    pending_key, pending_descriptor)
+                    .accepted() &&
+                    pending_journal.transition_journal(
+                        pending_key, mt5bridge::JournalState::dispatching, 1)
+                        .accepted() &&
+                    pending_journal.transition_operation(
+                        pending_key, mt5bridge::OperationState::submitting)
+                        .accepted(),
+                "pending OPEN recovery setup did not cross dispatch barrier");
+        const auto pending_recovery = pending_journal.recover_all();
+        mt5bridge::managed_trade::ManagedTradeState pending_seed;
+        require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                    &pending_seed, mt5bridge::managed_trade::TradeId{63}, 2, 2, 2),
+                "pending OPEN recovery seed initialization failed");
+        const auto recovered_pending =
+            mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                pending_seed, operation_account, pending_recovery);
+        require(recovered_pending && recovered_pending->valid() &&
+                    recovered_pending->slice.operation_id == 1 &&
+                    recovered_pending->slice.state ==
+                        mt5bridge::managed_trade::OperationState::submitting &&
+                    recovered_pending->slice.kind ==
+                        mt5bridge::managed_trade::OperationKind::open &&
+                    recovered_pending->slice.requested_volume == 2 &&
+                    recovered_pending->slice.send_count == 0 &&
+                    recovered_pending->open_volume == 0 &&
+                    recovered_pending->pending_remainder_volume == 0,
+                "restart did not restore unresolved OPEN at the submitting edge");
+
+        const auto intact_pending = pending_journal.find(pending_key);
+        require(intact_pending.has_value(), "pending OPEN fixture lost its record");
+        MemoryStore corrupt_descriptor_store;
+        auto corrupt_descriptor = *intact_pending;
+        corrupt_descriptor.reconciliation_descriptor->requested_volume = 0;
+        corrupt_descriptor.reconciliation_descriptor->account = {"Other-Server", 99};
+        corrupt_descriptor_store.inject(corrupt_descriptor);
+        mt5bridge::OperationJournal corrupt_descriptor_journal(
+            corrupt_descriptor_store);
+        const auto corrupt_descriptor_recovery =
+            corrupt_descriptor_journal.recover_all();
+        require(!corrupt_descriptor_recovery.accepted() &&
+                    !mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                        pending_seed, operation_account, corrupt_descriptor_recovery),
+                "corrupt pending descriptor was accepted");
+
+        MemoryStore missing_binding_store;
+        auto missing_binding = *intact_pending;
+        missing_binding.reconciliation_descriptor->predicates = {
+            mt5bridge::expect_reconciliation_transition(
+                mt5bridge::ReconciliationPredicateKind::history_deal_present,
+                std::nullopt, false,
+                mt5bridge::ReconciliationTransition::absent_to_present, 1002,
+                mt5bridge::ObservationWindow{1000, 3000})};
+        missing_binding.journal_state = mt5bridge::JournalState::result_persisted;
+        missing_binding.result_payload = {0xA1};
+        require(!missing_binding.valid(),
+                "missing result binding fixture unexpectedly became valid");
+        missing_binding_store.inject(missing_binding);
+        mt5bridge::OperationJournal missing_binding_journal(missing_binding_store);
+        const auto missing_binding_recovery = missing_binding_journal.recover_all();
+        require(!missing_binding_recovery.accepted() &&
+                    !mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                        pending_seed, operation_account, missing_binding_recovery),
+                "missing result binding did not fail closed");
+
+        auto build_pending_recovery = [&](MemoryStore &fixture,
+                                          mt5bridge::AccountKey record_account,
+                                          std::uint64_t trade_id,
+                                          std::uint64_t operation_id,
+                                          mt5bridge::OperationKind kind,
+                                          mt5bridge::ManagedSettlementMode mode,
+                                          std::uint64_t requested) {
+            mt5bridge::OperationJournal fixture_journal(fixture);
+            require(fixture_journal.recover_all().accepted(),
+                    "negative pending fixture recovery setup failed");
+            const auto key = mt5bridge::OperationKey{
+                record_account, trade_id, operation_id};
+            require(fixture_journal.create(key, {0x71}, kind, mode).accepted(),
+                    "negative pending fixture create failed");
+            require(fixture_journal.transition_operation(
+                        key, mt5bridge::OperationState::prechecking).accepted() &&
+                        fixture_journal.transition_journal(
+                            key, mt5bridge::JournalState::prechecked).accepted() &&
+                        fixture_journal.transition_journal(
+                            key, mt5bridge::JournalState::dispatch_intent_persisted)
+                            .accepted(),
+                    "negative pending fixture did not reach durable intent");
+            const auto baseline = mt5bridge::ReconciliationBaseline::restore(
+                record_account, 1, 1, 0, 0, 0, 0);
+            require(baseline.has_value(), "negative pending baseline is invalid");
+            const auto descriptor = mt5bridge::ReconciliationDescriptor{
+                record_account, *baseline,
+                {mt5bridge::require_active_order(9000 + operation_id)},
+                mt5bridge::OperationState::filled, trade_id, operation_id,
+                requested};
+            require(fixture_journal.persist_reconciliation_descriptor(
+                        key, descriptor)
+                        .accepted() &&
+                        fixture_journal.transition_journal(
+                            key, mt5bridge::JournalState::dispatching, 1)
+                            .accepted() &&
+                        fixture_journal.transition_operation(
+                            key, mt5bridge::OperationState::submitting)
+                            .accepted(),
+                    "negative pending fixture did not cross dispatch barrier");
+            return fixture_journal.recover_all();
+        };
+        auto pending_seed_for = [&](std::uint64_t trade_id) {
+            mt5bridge::managed_trade::ManagedTradeState seed;
+            require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                        &seed, mt5bridge::managed_trade::TradeId{trade_id}, 2, 2, 2),
+                    "negative pending seed initialization failed");
+            return seed;
+        };
+
+        MemoryStore missing_pending_store;
+        mt5bridge::OperationJournal missing_pending_journal(missing_pending_store);
+        const auto missing_pending = missing_pending_journal.recover_all();
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                     pending_seed, operation_account, missing_pending),
+                "missing pending OPEN was accepted");
+
+        MemoryStore gapped_pending_store;
+        const auto gapped_pending = build_pending_recovery(
+            gapped_pending_store, operation_account, 64, 2,
+            mt5bridge::OperationKind::open, mt5bridge::ManagedSettlementMode::legacy, 2);
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                     pending_seed_for(64), operation_account, gapped_pending),
+                "operation-id gap was accepted by pending recovery");
+
+        MemoryStore wrong_mode_store;
+        const auto wrong_mode = build_pending_recovery(
+            wrong_mode_store, operation_account, 65, 1,
+            mt5bridge::OperationKind::close,
+            mt5bridge::ManagedSettlementMode::allocation_gated, 2);
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                     pending_seed_for(65), operation_account, wrong_mode),
+                "wrong settlement mode was accepted by pending recovery");
+
+        MemoryStore wrong_volume_store;
+        const auto wrong_volume = build_pending_recovery(
+            wrong_volume_store, operation_account, 66, 1,
+            mt5bridge::OperationKind::open, mt5bridge::ManagedSettlementMode::legacy, 3);
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                     pending_seed_for(66), operation_account, wrong_volume),
+                "oversized pending volume was accepted by pending recovery");
+
+        MemoryStore foreign_store;
+        const auto foreign = build_pending_recovery(
+            foreign_store, {"Other-Server", 99}, 63, 1,
+            mt5bridge::OperationKind::open, mt5bridge::ManagedSettlementMode::legacy, 2);
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                     pending_seed_for(63), operation_account, foreign),
+                "foreign-account pending OPEN was accepted");
+
+        MemoryStore trailing_store;
+        const auto first_pending = build_pending_recovery(
+            trailing_store, operation_account, 67, 1,
+            mt5bridge::OperationKind::open, mt5bridge::ManagedSettlementMode::legacy, 2);
+        (void)first_pending;
+        const auto trailing = build_pending_recovery(
+            trailing_store, operation_account, 67, 2,
+            mt5bridge::OperationKind::open, mt5bridge::ManagedSettlementMode::legacy, 2);
+        require(!mt5bridge::dispatch::ManagedTradeOwner::recover_pending_open(
+                     pending_seed_for(67), operation_account, trailing),
+                "unexpected subsequent OPEN was accepted by pending recovery");
 
         require(recovered_records.accepted() && !recovered_records.records().empty(),
                 "accepted recovery did not expose a complete read-only record view");

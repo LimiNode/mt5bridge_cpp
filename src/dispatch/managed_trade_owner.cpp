@@ -220,8 +220,6 @@ ManagedTradeOwner::recover_settled_trade(
             break;
         case OperationKind::cancel:
             {
-                const auto requested =
-                    record->reconciliation_descriptor->requested_volume;
                 if (candidate.restore_cancel_reconciliation(
                         record->key.operation_id, requested) !=
                     managed_trade::MutationStatus::applied) {
@@ -246,6 +244,83 @@ ManagedTradeOwner::recover_settled_trade(
             return std::nullopt;
     }
     return candidate;
+}
+
+std::optional<managed_trade::ManagedTradeState>
+ManagedTradeOwner::recover_pending_open(
+    managed_trade::ManagedTradeState initial_state, const AccountKey &account,
+    const JournalRecoveryResult &recovery) {
+    if (!recovery.accepted() || !account.valid() || !initial_state.valid() ||
+        initial_state.slice.operation_id != 0 || initial_state.plan.slice_count != 0 ||
+        initial_state.open_volume != 0 || initial_state.pending_remainder_volume != 0 ||
+        initial_state.slice.state != managed_trade::OperationState::idle)
+        return std::nullopt;
+
+    std::vector<const OperationRecord *> records;
+    for (const auto &record : recovery.records()) {
+        if (record.key.account != account ||
+            record.key.trade_id != initial_state.trade_id.value)
+            continue;
+        records.push_back(&record);
+    }
+    std::sort(records.begin(), records.end(),
+              [](const auto *left, const auto *right) {
+                  return left->key.operation_id < right->key.operation_id;
+              });
+
+    auto candidate = std::move(initial_state);
+    bool pending_found = false;
+    for (const auto *record : records) {
+        if (!record->valid() || record->operation_kind != OperationKind::open ||
+            !record->reconciliation_descriptor ||
+            record->reconciliation_descriptor->requested_volume == 0 ||
+            record->reconciliation_descriptor->requested_volume >
+                candidate.plan.max_slice_volume ||
+            record->settlement_mode != ManagedSettlementMode::legacy ||
+            candidate.slice.operation_id ==
+                (std::numeric_limits<std::uint64_t>::max)() ||
+            record->key.operation_id != candidate.slice.operation_id + 1)
+            return std::nullopt;
+
+        const auto requested = record->reconciliation_descriptor->requested_volume;
+        if (!pending_found && record->journal_state == JournalState::reconciling &&
+            record->settled_volume != 0 &&
+            record->settled_volume <= requested &&
+            (record->operation_state == OperationState::partially_filled ||
+             record->operation_state == OperationState::filled)) {
+            const auto expected_state =
+                record->settled_volume == requested ? OperationState::filled
+                                                    : OperationState::partially_filled;
+            if (record->operation_state != expected_state ||
+                candidate.start_open_slice(requested) !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.enter_submitting() !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.record_fill(record->settled_volume) !=
+                    managed_trade::MutationStatus::applied ||
+                candidate.reconcile() != managed_trade::MutationStatus::applied)
+                return std::nullopt;
+            continue;
+        }
+
+        if (pending_found || !journal_at_least_dispatching(record->journal_state) ||
+            record->settled_volume != 0 ||
+            (record->operation_state != OperationState::submitting &&
+             record->operation_state != OperationState::accepted &&
+             record->operation_state != OperationState::reconciling))
+            return std::nullopt;
+
+        if (candidate.start_open_slice(requested) !=
+                managed_trade::MutationStatus::applied ||
+            candidate.enter_submitting() != managed_trade::MutationStatus::applied ||
+            candidate.slice.operation_id != record->key.operation_id)
+            return std::nullopt;
+        pending_found = true;
+    }
+
+    return pending_found ? std::optional<managed_trade::ManagedTradeState>(
+                               std::move(candidate))
+                         : std::nullopt;
 }
 
 std::optional<OperationKey> ManagedTradeOwner::current_key() const {
@@ -1151,6 +1226,25 @@ ManagedTradeOwner::history_deal_attribution_context(
     std::uint64_t order_ticket = 0;
     std::uint64_t position_id = 0;
     bool order_selected = false;
+    std::uint64_t bound_order_ticket = 0;
+    for (const auto &predicate : record.reconciliation_descriptor->predicates) {
+        if (predicate.kind != ReconciliationPredicateKind::active_order_present &&
+            predicate.kind != ReconciliationPredicateKind::history_order_present)
+            continue;
+        std::uint64_t resolved = predicate.ticket;
+        if (resolved == 0) {
+            for (const auto &binding : record.reconciliation_bindings) {
+                if (binding.correlation_id == predicate.correlation_id) {
+                    resolved = binding.broker_ticket;
+                    break;
+                }
+            }
+        }
+        if (resolved == 0 ||
+            (bound_order_ticket != 0 && bound_order_ticket != resolved))
+            return std::nullopt;
+        bound_order_ticket = resolved;
+    }
     const auto deals = worker.graph().history_deals();
     for (const auto anchor : anchor_tickets) {
         const auto found = std::find_if(
@@ -1169,6 +1263,7 @@ ManagedTradeOwner::history_deal_attribution_context(
                 baseline->history_deals_revision() ||
             (found->known_fields & kRequiredDealFields) != kRequiredDealFields ||
             found->order_ticket == 0 ||
+            (bound_order_ticket != 0 && found->order_ticket != bound_order_ticket) ||
             found->position_id == 0 ||
             found->time_msc < requested_window->from_msc ||
             found->time_msc > requested_window->to_msc ||

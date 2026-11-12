@@ -1226,6 +1226,25 @@ ManagedTradeOwner::history_deal_attribution_context(
     std::uint64_t order_ticket = 0;
     std::uint64_t position_id = 0;
     bool order_selected = false;
+    std::uint64_t bound_order_ticket = 0;
+    for (const auto &predicate : record.reconciliation_descriptor->predicates) {
+        if (predicate.kind != ReconciliationPredicateKind::active_order_present &&
+            predicate.kind != ReconciliationPredicateKind::history_order_present)
+            continue;
+        std::uint64_t resolved = predicate.ticket;
+        if (resolved == 0) {
+            for (const auto &binding : record.reconciliation_bindings) {
+                if (binding.correlation_id == predicate.correlation_id) {
+                    resolved = binding.broker_ticket;
+                    break;
+                }
+            }
+        }
+        if (resolved == 0 ||
+            (bound_order_ticket != 0 && bound_order_ticket != resolved))
+            return std::nullopt;
+        bound_order_ticket = resolved;
+    }
     const auto deals = worker.graph().history_deals();
     for (const auto anchor : anchor_tickets) {
         const auto found = std::find_if(
@@ -1244,6 +1263,7 @@ ManagedTradeOwner::history_deal_attribution_context(
                 baseline->history_deals_revision() ||
             (found->known_fields & kRequiredDealFields) != kRequiredDealFields ||
             found->order_ticket == 0 ||
+            (bound_order_ticket != 0 && found->order_ticket != bound_order_ticket) ||
             found->position_id == 0 ||
             found->time_msc < requested_window->from_msc ||
             found->time_msc > requested_window->to_msc ||

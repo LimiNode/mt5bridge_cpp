@@ -75,29 +75,38 @@ mt5bridge::ObservationBatch empty_batch(const mt5bridge::AccountKey &key,
     batch.account = key;
     batch.observed_domains = mt5bridge::ObservationDomain::active_orders |
                              mt5bridge::ObservationDomain::positions |
+                             mt5bridge::ObservationDomain::history_orders |
                              mt5bridge::ObservationDomain::history_deals;
     batch.position_history_order =
         mt5bridge::PositionHistoryOrder::positions_before_history_deals;
     batch.history_deals_window = window;
+    batch.history_orders_window = window;
     return batch;
 }
 
 mt5bridge::ObservationBatch settled_batch(const mt5bridge::AccountKey &key,
-                                          mt5bridge::ObservationWindow window) {
+                                          mt5bridge::ObservationWindow window,
+                                          double volume = 1.0) {
     auto batch = empty_batch(key, window);
-    Mt5OrderSnapshot order{};
+
+    // A market OPEN may already have left the active-order view by the time
+    // reconciliation runs.  The durable history-order/deal pair is the
+    // authoritative identity evidence for this integration fixture.
+    Mt5HistoryOrderSnapshot order{};
     order.ticket = 7001;
     order.position_id = 9001;
+    order.time_done_msc = 2000;
     order.known_fields = MT5BRIDGE_ORDER_KNOWN_TICKET |
-                         MT5BRIDGE_ORDER_KNOWN_POSITION_ID;
-    batch.active_orders.push_back(order);
+                         MT5BRIDGE_ORDER_KNOWN_POSITION_ID |
+                         MT5BRIDGE_ORDER_KNOWN_TIME_DONE;
+    batch.history_orders.push_back(order);
 
     Mt5DealSnapshot deal{};
     deal.ticket = 7002;
     deal.order_ticket = 7001;
     deal.position_id = 9001;
     deal.entry = 0;
-    deal.volume = 1.0;
+    deal.volume = volume;
     deal.time_msc = 2000;
     deal.known_fields = MT5BRIDGE_DEAL_KNOWN_TICKET |
                         MT5BRIDGE_DEAL_KNOWN_ORDER_TICKET |
@@ -109,21 +118,42 @@ mt5bridge::ObservationBatch settled_batch(const mt5bridge::AccountKey &key,
     return batch;
 }
 
+mt5bridge::ObservationBatch late_fill_batch(
+    const mt5bridge::AccountKey &key, mt5bridge::ObservationWindow window) {
+    auto batch = settled_batch(key, window);
+    auto deal = batch.history_deals.front();
+    deal.ticket = 7003;
+    deal.time_msc = 2100;
+    batch.history_deals.push_back(deal);
+    return batch;
+}
+
 mt5bridge::ReconciliationDescriptor descriptor(
     const mt5bridge::AccountKey &key, const mt5bridge::ReconciliationBaseline &baseline,
     mt5bridge::ObservationWindow window) {
     return {key,
             baseline,
             {mt5bridge::expect_reconciliation_transition(
-                 mt5bridge::ReconciliationPredicateKind::active_order_present,
+                 mt5bridge::ReconciliationPredicateKind::history_order_present,
                  std::nullopt, false,
-                 mt5bridge::ReconciliationTransition::absent_to_present, 7001),
+                 mt5bridge::ReconciliationTransition::absent_to_present, 1001,
+                 window),
              mt5bridge::expect_reconciliation_transition(
                  mt5bridge::ReconciliationPredicateKind::history_deal_present,
                  std::nullopt, false,
-                 mt5bridge::ReconciliationTransition::absent_to_present, 7002,
+                 mt5bridge::ReconciliationTransition::absent_to_present, 1002,
                  window)},
             mt5bridge::OperationState::filled, 7, 1};
+}
+
+void require_bindings(const mt5bridge::OperationRecord &record) {
+    require(record.reconciliation_bindings.size() == 2,
+            "broker result bindings were not durably captured");
+    require(record.reconciliation_bindings[0] ==
+                mt5bridge::ReconciliationBinding{1001, 7001} &&
+                record.reconciliation_bindings[1] ==
+                    mt5bridge::ReconciliationBinding{1002, 7002},
+            "durable broker bindings did not match result tickets");
 }
 
 void check_order_calls(PyObject *module) {
@@ -160,6 +190,21 @@ void clear_environment(const char *name) {
 #endif
 }
 
+std::string environment_value(const char *name) {
+#if defined(_WIN32)
+    char *value = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&value, &length, name) != 0 || !value)
+        return {};
+    std::string result(value, length ? length - 1 : 0);
+    std::free(value);
+    return result;
+#else
+    const char *value = std::getenv(name);
+    return value ? std::string(value) : std::string{};
+#endif
+}
+
 int run_uncertain_phase(const std::filesystem::path &root, bool first_phase) {
     Py_Initialize();
     require(Py_IsInitialized() != 0, "CPython initialization failed");
@@ -178,12 +223,14 @@ int run_uncertain_phase(const std::filesystem::path &root, bool first_phase) {
         collection.observe_positions = true;
         collection.position_history_order =
             mt5bridge::PositionHistoryOrder::positions_before_history_deals;
+        collection.history_orders_window = window;
         collection.history_deals_window = window;
         const auto first = coordinator.refresh(collection);
         const auto second = coordinator.refresh(collection);
         require(first.sample && second.sample,
                 "uncertain-process baseline was not accepted");
         mt5bridge::EnvironmentConsistencyRequest consistency_request;
+        consistency_request.history_orders_window = window;
         consistency_request.history_deals_window = window;
         const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
             {*first.sample, *second.sample}, consistency_request);
@@ -212,6 +259,8 @@ int run_uncertain_phase(const std::filesystem::path &root, bool first_phase) {
             mt5bridge::dispatch::ManagedTradeIntent intent{
                 std::vector<std::uint8_t>(request.begin(), request.end()),
                 descriptor(operation_account, coordinator.capture_baseline(), window)};
+            // This separate no-result case retains fixed identities so its
+            // transport-uncertainty assertion is independent of result binding.
             intent.reconciliation_descriptor.predicates = {
                 mt5bridge::require_active_order(7001),
                 mt5bridge::require_history_deal(7002, window)};
@@ -274,11 +323,12 @@ int run_uncertain_phase(const std::filesystem::path &root, bool first_phase) {
         Py_DECREF(module);
         Py_FinalizeEx();
         return 0;
-    } catch (...) {
+    } catch (const std::exception &error) {
+        std::cerr << error.what() << '\n';
         Py_DECREF(module);
         if (Py_IsInitialized())
             Py_FinalizeEx();
-        throw;
+        return 1;
     }
 }
 
@@ -318,18 +368,44 @@ int run_uncertain_restart(const char *executable) {
     return 0;
 }
 
-int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) {
+int run_open_restart_phase(const std::filesystem::path &root,
+                           const std::string &phase) {
     Py_Initialize();
     require(Py_IsInitialized() != 0, "CPython initialization failed");
     PyObject *module = PyImport_ImportModule("MetaTrader5");
     require(module != nullptr, "fake MetaTrader5 module import failed");
     try {
+        const bool first_phase = phase == "first";
+        const auto selected = environment_value("MT5BRIDGE_RESTART_SCENARIO");
+        const std::string scenario = selected.empty() ? "immediate" : selected;
         const auto operation_account = account();
         const mt5bridge::ObservationWindow window{1000, 3000};
         std::vector<mt5bridge::ObservationBatch> batches;
         if (first_phase) {
             batches = {empty_batch(operation_account, window),
                        empty_batch(operation_account, window)};
+        } else if (scenario == "delayed") {
+            batches = {empty_batch(operation_account, window),
+                       settled_batch(operation_account, window)};
+        } else if (scenario == "missing") {
+            batches = {empty_batch(operation_account, window)};
+        } else if (scenario == "wrong_ticket") {
+            auto wrong = settled_batch(operation_account, window);
+            wrong.history_deals.front().ticket = 7999;
+            batches = {std::move(wrong)};
+        } else if (scenario == "wrong_order") {
+            auto wrong = settled_batch(operation_account, window);
+            wrong.history_deals.front().order_ticket = 7999;
+            batches = {std::move(wrong)};
+        } else if (scenario == "wrong_account") {
+            batches = {settled_batch({"Other-Server", 99}, window)};
+        } else if (scenario == "incomplete") {
+            batches = {settled_batch(operation_account, {1500, 2500})};
+        } else if (scenario == "partial") {
+            batches = {settled_batch(operation_account, window),
+                       late_fill_batch(operation_account, window)};
+        } else if (scenario == "third") {
+            batches = {};
         } else {
             batches = {settled_batch(operation_account, window)};
         }
@@ -341,6 +417,7 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
         collection.observe_positions = true;
         collection.position_history_order =
             mt5bridge::PositionHistoryOrder::positions_before_history_deals;
+        collection.history_orders_window = window;
         collection.history_deals_window = window;
 
         mt5bridge::WindowsFileJournalStore store(root / "journal");
@@ -353,7 +430,7 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
 
         mt5bridge::managed_trade::ManagedTradeState initial;
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(
-                    &initial, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),
+                    &initial, mt5bridge::managed_trade::TradeId{7}, 2, 2, 2),
                 "open-restart state initialization failed");
 
         if (first_phase) {
@@ -362,6 +439,7 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
             require(first.sample && second.sample,
                     "open-restart baseline was not accepted");
             mt5bridge::EnvironmentConsistencyRequest consistency_request;
+            consistency_request.history_orders_window = window;
             consistency_request.history_deals_window = window;
             const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
                 {*first.sample, *second.sample}, consistency_request);
@@ -374,11 +452,14 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
                 initial, operation_account, journal, admission, backend, account_probe,
                 lease, transport);
             const std::string request =
-                R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+                scenario == "partial"
+                    ? R"({"action":1,"type":0,"symbol":"EURUSD","volume":2.0})"
+                    : R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
             mt5bridge::dispatch::ManagedTradeIntent intent{
                 std::vector<std::uint8_t>(request.begin(), request.end()),
                 descriptor(operation_account, coordinator.capture_baseline(), window)};
-            const auto prepared = owner.prepare_open(1, std::move(intent));
+            const auto prepared = owner.prepare_open(
+                scenario == "partial" ? 2 : 1, std::move(intent));
             require(prepared.status ==
                         mt5bridge::dispatch::OwnerStepStatus::prepared,
                     "open-restart first process did not prepare OPEN");
@@ -394,10 +475,28 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
                         executed.record->operation_state ==
                             mt5bridge::OperationState::reconciling,
                     "open-restart first process did not persist unresolved result");
+            require(executed.record.has_value(),
+                    "open-restart did not persist a result-bearing record");
+            require_bindings(*executed.record);
             require(owner.state().open_volume == 0 &&
                         owner.state().slice.state ==
                             mt5bridge::managed_trade::OperationState::submitting,
                     "open-restart first process fabricated exposure");
+        } else if (phase == "third") {
+            const auto recovery = journal.recover_all();
+            require(recovery.accepted(), "third-process journal scan failed");
+            const auto durable = journal.find({operation_account, 7, 1});
+            require(durable.has_value(), "third-process OPEN record missing");
+            require_bindings(*durable);
+            require(durable->operation_state == mt5bridge::OperationState::filled &&
+                        durable->settled_volume == 1,
+                    "third-process replay changed settled OPEN");
+            const auto replayed =
+                mt5bridge::dispatch::ManagedTradeOwner::recover_settled_open(
+                    initial, operation_account, recovery);
+            require(replayed && replayed->open_volume == 1,
+                    "third-process replay duplicated or lost OPEN exposure");
+            check_order_calls(module);
         } else {
             mt5bridge::dispatch::PrivateOwnerLoop loop(
                 journal, operation_account, lease);
@@ -419,6 +518,14 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
                         recovered->slice.state ==
                             mt5bridge::managed_trade::OperationState::submitting,
                     "open-restart did not rebuild the unresolved managed slice");
+            const auto durable = journal.find({operation_account, 7, 1});
+            require(durable.has_value(),
+                    "restart did not restore broker result bindings");
+            require_bindings(*durable);
+            require(durable->reconciliation_descriptor &&
+                        durable->reconciliation_descriptor->predicates[0].ticket == 0 &&
+                        durable->reconciliation_descriptor->predicates[1].ticket == 0,
+                    "pre-dispatch descriptor contained a broker ticket");
 
             mt5bridge::DispatchAdmissionBarrier admission(
                 journal, coordinator.graph(), {});
@@ -428,7 +535,42 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
             mt5bridge::OperationReconciliationWorker worker(
                 journal, {operation_account, 7, 1}, coordinator, collection);
             const auto settled = owner.settle_reconciliation(worker);
-            require(settled.status ==
+            if (scenario == "missing" || scenario == "wrong_ticket" ||
+                scenario == "wrong_order" || scenario == "wrong_account" ||
+                scenario == "incomplete") {
+                require(settled.status != mt5bridge::dispatch::OwnerStepStatus::completed &&
+                            owner.state().open_volume == 0,
+                        "foreign or incomplete evidence settled OPEN");
+                const auto unchanged = journal.find({operation_account, 7, 1});
+                require(unchanged && unchanged->settled_volume == 0,
+                        "negative evidence changed durable settled volume");
+            } else if (scenario == "delayed") {
+                require(settled.status ==
+                            mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                            owner.state().open_volume == 0,
+                        "missing deal did not keep restarted OPEN unresolved");
+                const auto later = owner.settle_reconciliation(worker);
+                require(later.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
+                            later.record && later.record->settled_volume == 1 &&
+                            owner.state().open_volume == 1,
+                        "late matching deal did not settle OPEN");
+            } else if (scenario == "partial") {
+                require(settled.status ==
+                            mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
+                            settled.record && settled.record->settled_volume == 1 &&
+                            owner.state().open_volume == 1 &&
+                            owner.state().pending_remainder_volume == 1,
+                        "partial fill did not preserve confirmed volume and remainder");
+                mt5bridge::OperationReconciliationWorker later_worker(
+                    journal, {operation_account, 7, 1}, coordinator, collection);
+                const auto later = owner.settle_pending_remainder(later_worker);
+                require(later.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
+                            later.record && later.record->settled_volume == 2 &&
+                            owner.state().open_volume == 2 &&
+                            owner.state().pending_remainder_volume == 0,
+                        "late fill did not apply only the cumulative delta");
+            } else {
+                require(settled.status ==
                         mt5bridge::dispatch::OwnerStepStatus::completed &&
                         settled.record &&
                         settled.record->operation_state ==
@@ -436,36 +578,48 @@ int run_open_restart_phase(const std::filesystem::path &root, bool first_phase) 
                         owner.state().open_volume == 1 &&
                         owner.state().pending_remainder_volume == 0,
                     "open-restart matching deal did not settle OPEN");
+            }
             check_order_calls(module);
         }
         Py_DECREF(module);
         Py_FinalizeEx();
         return 0;
-    } catch (...) {
+    } catch (const std::exception &error) {
+        std::cerr << error.what() << '\n';
         Py_DECREF(module);
         if (Py_IsInitialized())
             Py_FinalizeEx();
-        throw;
+        return 1;
     }
 }
 
-int run_open_restart(const char *executable) {
+int run_open_restart(const char *executable, const char *scenario = "immediate") {
     TestRoot test_root("mt5bridge-managed-trade-python-open-restart");
     const auto count_file = test_root.path() / "order-calls.txt";
     set_environment("MT5BRIDGE_CALL_COUNT_FILE", count_file);
     set_environment("MT5BRIDGE_ORDER_SEND_MODE", "success");
     set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "0");
+    set_environment("MT5BRIDGE_RESTART_SCENARIO", scenario);
     const auto root_text = test_root.path().string();
     const std::string first_arg = "--open-restart-child=first=" + root_text;
     const std::string second_arg = "--open-restart-child=second=" + root_text;
+    const std::string third_arg = "--open-restart-child=third=" + root_text;
     const char *first_args[] = {executable, first_arg.c_str(), nullptr};
     const char *second_args[] = {executable, second_arg.c_str(), nullptr};
+    const char *third_args[] = {executable, third_arg.c_str(), nullptr};
 #if defined(_WIN32)
-    require(_spawnv(_P_WAIT, executable, first_args) == 0,
-            "open-restart first process failed");
+    const auto first_status = _spawnv(_P_WAIT, executable, first_args);
+    if (first_status != 0)
+        std::cerr << "open-restart first status: " << first_status << '\n';
+    require(first_status == 0, "open-restart first process failed");
     set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "1");
-    require(_spawnv(_P_WAIT, executable, second_args) == 0,
-            "open-restart second process failed");
+    const auto second_status = _spawnv(_P_WAIT, executable, second_args);
+    if (second_status != 0)
+        std::cerr << "open-restart second status: " << second_status << '\n';
+    require(second_status == 0, "open-restart second process failed");
+    if (std::string(scenario) == "immediate")
+        require(_spawnv(_P_WAIT, executable, third_args) == 0,
+                "open-restart third process failed");
 #else
     require(std::system((std::string(executable) + " \"" + first_arg + "\"").c_str()) ==
                 0,
@@ -474,6 +628,10 @@ int run_open_restart(const char *executable) {
     require(std::system((std::string(executable) + " \"" + second_arg + "\"").c_str()) ==
                 0,
             "open-restart second process failed");
+    if (std::string(scenario) == "immediate")
+        require(std::system((std::string(executable) + " \"" + third_arg + "\"").c_str()) ==
+                    0,
+                "open-restart third process failed");
 #endif
     std::ifstream calls(count_file);
     std::string count;
@@ -482,6 +640,7 @@ int run_open_restart(const char *executable) {
     clear_environment("MT5BRIDGE_CALL_COUNT_FILE");
     clear_environment("MT5BRIDGE_ORDER_SEND_MODE");
     clear_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT");
+    clear_environment("MT5BRIDGE_RESTART_SCENARIO");
     return 0;
 }
 
@@ -504,6 +663,26 @@ int main(int argc, char **argv) {
     if (argc == 2 && std::string(argv[1]) == "--open-restart")
         return run_open_restart(argv[0]);
 
+    if (argc == 2 && std::string(argv[1]).rfind("--open-restart-scenario=", 0) == 0)
+        return run_open_restart(argv[0],
+                                std::string(argv[1]).substr(
+                                    std::string("--open-restart-scenario=").size())
+                                    .c_str());
+
+    if (argc == 2 && std::string(argv[1]) == "--open-restart-matrix") {
+        try {
+            for (const auto *scenario : {"delayed", "missing", "wrong_ticket",
+                                         "wrong_order", "wrong_account", "incomplete",
+                                         "partial"}) {
+                run_open_restart(argv[0], scenario);
+            }
+            return 0;
+        } catch (const std::exception &error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
+
     if (argc == 2 && std::string(argv[1]).rfind("--open-restart-child=", 0) == 0) {
         const std::string argument(argv[1]);
         const auto prefix = std::string("--open-restart-child=");
@@ -511,7 +690,7 @@ int main(int argc, char **argv) {
         const auto separator = argument.find('=', phase_start);
         const auto phase = argument.substr(phase_start, separator - phase_start);
         const auto root = std::filesystem::path(argument.substr(separator + 1));
-        return run_open_restart_phase(root, phase == "first");
+        return run_open_restart_phase(root, phase);
     }
 
     TestRoot test_root("mt5bridge-managed-trade-python-integration");
@@ -536,6 +715,7 @@ int main(int argc, char **argv) {
         collection.observe_positions = true;
         collection.position_history_order =
             mt5bridge::PositionHistoryOrder::positions_before_history_deals;
+        collection.history_orders_window = window;
         collection.history_deals_window = window;
         const auto first = coordinator.refresh(collection);
         const auto second = coordinator.refresh(collection);
@@ -543,6 +723,7 @@ int main(int argc, char **argv) {
                 "initial observation baseline was not accepted");
 
         mt5bridge::EnvironmentConsistencyRequest consistency_request;
+        consistency_request.history_orders_window = window;
         consistency_request.history_deals_window = window;
         const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
             {*first.sample, *second.sample}, consistency_request);
@@ -586,6 +767,9 @@ int main(int argc, char **argv) {
                         mt5bridge::runtime::OneShotExecutionStatus::completed &&
                     executed.retcode == 10009,
                 "real Python transport did not complete the durable OPEN");
+        require(executed.record.has_value(),
+                "real Python transport did not return a durable record");
+        require_bindings(*executed.record);
 
         mt5bridge::OperationReconciliationWorker worker(
             journal, *executed.key, coordinator, collection);
@@ -598,6 +782,9 @@ int main(int argc, char **argv) {
         mt5bridge::OperationJournal recovered_journal(store);
         const auto recovery = recovered_journal.recover_all();
         require(recovery.accepted(), "durable restart scan failed");
+        const auto durable = recovered_journal.find({operation_account, 7, 1});
+        require(durable.has_value(), "durable restart lost the OPEN record");
+        require_bindings(*durable);
         mt5bridge::managed_trade::ManagedTradeState empty;
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(
                     &empty, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),

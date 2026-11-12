@@ -39,12 +39,24 @@ performs one `order_send` and exits before the matching deal is visible.
 Process two starts a new owner loop, observes the deal, settles the OPEN, and
 verifies that the durable call counter remains one.
 
+The broker result is the only source of order/deal ticket bindings. The
+pre-dispatch descriptor carries correlation IDs with unknown tickets; the
+validated Python `MqlTradeResult` supplies the order and deal tickets, and the
+journal persists those `ReconciliationBinding` values atomically with the raw
+result. Restart reuses those bindings and rejects evidence for a different
+order, deal, account, direction, or volume. The integration provider is a
+deterministic fake observation source; it models the broker snapshots without
+claiming to be a live-terminal integration.
+
 ## Consequences
 
-- Unresolved OPEN exposure remains zero across restart until authoritative deal
-  evidence is observed.
+- Unresolved reconciliation carries potential broker exposure, but it is not
+  confirmed managed exposure: managed volume remains zero until authoritative
+  deal evidence is observed.
 - A matching post-restart deal settles the original operation without a new
   operation id or resend capability.
+- No resend permission exists after the durable dispatch barrier, including
+  when the result is missing, delayed, or ambiguous.
 - Account mismatch, missing/foreign evidence, event gaps, incomplete history
   coverage, and contradictory observations remain unresolved and fail closed.
 - CLOSE, INOUT, automatic scheduling, and the public ABI remain outside this

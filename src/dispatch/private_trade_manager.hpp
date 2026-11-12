@@ -36,6 +36,11 @@ struct PrivateTradeManagerResult {
 /// All dependencies outlive the manager. It owns no scheduler, interpreter, lease,
 /// or broker transport. A prepared intent still requires the normal admission
 /// barrier and one-shot backend; restart never manufactures a new permit.
+/// \warning This is an internal composition seam. The caller must hold the
+/// account lease, establish the fresh environment proof, and invoke it only
+/// from the trade-critical runtime lane. A Python-backed transport remains
+/// responsible for the GIL, module lifetime, request decoding, and symbol
+/// validation; this class does not grant those capabilities or expose an ABI.
 class PrivateTradeManager final {
 public:
     /// \brief Binds one initially empty managed trade to existing private seams.

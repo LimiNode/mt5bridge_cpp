@@ -55,6 +55,12 @@ PrivateTradeManagerResult PrivateTradeManager::start() {
             return {PrivateTradeManagerStatus::recovery_failed, std::nullopt};
         if (own_record->journal_state == JournalState::dispatch_intent_persisted &&
             own_record->operation_state == OperationState::prechecking) {
+            const auto fresh_baseline = coordinator_.capture_baseline();
+            if (!fresh_baseline.valid() ||
+                journal_.rebase_pre_dispatch_descriptor(
+                    own_record->key, fresh_baseline)
+                        .status != JournalMutationStatus::accepted)
+                return {PrivateTradeManagerStatus::recovery_failed, std::nullopt};
             if (!own_record->result_payload.empty() ||
                 !own_record->reconciliation_bindings.empty() ||
                 own_record->settled_volume != 0 || own_record->fencing_token != 0 ||
@@ -126,6 +132,12 @@ PrivateTradeManagerResult PrivateTradeManager::execute_pending(
     const auto &state = owner_->state();
     const OperationKey key{account_, state.trade_id.value,
                            state.slice.operation_id};
+    const auto eligible = loop_.dispatch_eligibility(key);
+    if (!eligible.accepted())
+        return {eligible.status == PrivateOwnerLoopDispatchStatus::not_ready
+                    ? PrivateTradeManagerStatus::lease_lost
+                    : PrivateTradeManagerStatus::blocked,
+                std::nullopt};
     const auto check = check_action(key,
                                     PrivateOwnerLoopStepStatus::resume_pre_dispatch);
     if (check.status != PrivateTradeManagerStatus::ready)

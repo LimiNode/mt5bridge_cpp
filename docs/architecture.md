@@ -465,6 +465,9 @@ worker process.
    the journal. An incomplete pre-dispatch write or a may-have-sent barrier
    without reconstructable result remains blocked; it never creates resend
    permission. This is internal orchestration, not a public asynchronous API.
+   Its caller remains responsible for the account lease, trade-critical runtime
+   lane, fresh environment proof, and the Python transport's GIL/module and
+   concrete-request (including symbol) validation.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

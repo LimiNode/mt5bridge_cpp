@@ -163,6 +163,12 @@ void check_order_calls(PyObject *module) {
             "Python adapter did not perform exactly one order_send call");
 }
 
+void require_order_calls(PyObject *module, long expected) {
+    mt5bridge::runtime::PyRef calls(PyObject_GetAttrString(module, "order_calls"));
+    require(calls && PyLong_Check(calls.get()) && PyLong_AsLong(calls.get()) == expected,
+            "Python adapter order_send count did not match expectation");
+}
+
 void set_environment(const char *name, const std::filesystem::path &value) {
 #if defined(_WIN32)
     require(_putenv_s(name, value.string().c_str()) == 0,
@@ -385,6 +391,10 @@ int run_open_restart_phase(const std::filesystem::path &root,
         if (first_phase) {
             batches = {empty_batch(operation_account, window),
                        empty_batch(operation_account, window)};
+        } else if (scenario == "prepared") {
+            auto settled = settled_batch(operation_account, window);
+            batches = {empty_batch(operation_account, window),
+                       empty_batch(operation_account, window), std::move(settled)};
         } else if (scenario == "delayed") {
             batches = {empty_batch(operation_account, window),
                        settled_batch(operation_account, window)};
@@ -449,6 +459,30 @@ int run_open_restart_phase(const std::filesystem::path &root,
 
             mt5bridge::DispatchAdmissionBarrier admission(
                 journal, coordinator.graph(), {});
+            if (scenario == "prepared") {
+                mt5bridge::dispatch::PrivateTradeManager manager(
+                    initial, operation_account, journal, admission, backend,
+                    account_probe, lease, transport, coordinator, collection);
+                const std::string request =
+                    R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+                mt5bridge::dispatch::ManagedTradeIntent intent{
+                    std::vector<std::uint8_t>(request.begin(), request.end()),
+                    descriptor(operation_account, coordinator.capture_baseline(), window)};
+                require(manager.start().status ==
+                            mt5bridge::dispatch::PrivateTradeManagerStatus::ready,
+                        "prepared first process did not start manager");
+                const auto prepared = manager.prepare_open(1, std::move(intent));
+                require(prepared.owner &&
+                            prepared.owner->status ==
+                                mt5bridge::dispatch::OwnerStepStatus::prepared,
+                        "prepared first process did not persist OPEN intent");
+                require(manager.state() && manager.state()->open_volume == 0,
+                        "prepared first process fabricated exposure");
+                require_order_calls(module, 0);
+                Py_DECREF(module);
+                Py_FinalizeEx();
+                return 0;
+            }
             mt5bridge::dispatch::ManagedTradeOwner owner(
                 initial, operation_account, journal, admission, backend, account_probe,
                 lease, transport);
@@ -511,6 +545,44 @@ int run_open_restart_phase(const std::filesystem::path &root,
             require(manager.execute_pending(resend).status ==
                         mt5bridge::dispatch::PrivateTradeManagerStatus::blocked,
                     "third-process manager reopened settled dispatch");
+            check_order_calls(module);
+        } else if (scenario == "prepared") {
+            const auto first = coordinator.refresh(collection);
+            const auto second = coordinator.refresh(collection);
+            require(first.sample && second.sample,
+                    "prepared second process did not collect fresh baseline");
+            mt5bridge::EnvironmentConsistencyRequest consistency_request;
+            consistency_request.history_orders_window = window;
+            consistency_request.history_deals_window = window;
+            const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*first.sample, *second.sample}, consistency_request);
+            require(consistency.consistent() && consistency.proof,
+                    "prepared second process did not establish environment proof");
+            mt5bridge::DispatchAdmissionBarrier admission(
+                journal, coordinator.graph(), {});
+            mt5bridge::dispatch::PrivateTradeManager manager(
+                initial, operation_account, journal, admission, backend, account_probe,
+                lease, transport, coordinator, collection);
+            require(manager.start().status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::ready &&
+                        manager.state() &&
+                        manager.state()->slice.state ==
+                            mt5bridge::managed_trade::OperationState::dispatching,
+                    "prepared second process did not restore OPEN intent");
+            mt5bridge::DispatchAdmissionRequest ready;
+            ready.current_account = operation_account;
+            ready.environment_proof = consistency.proof;
+            const auto executed = manager.execute_pending(ready);
+            require(executed.owner &&
+                        executed.owner->status ==
+                            mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation,
+                    "prepared second process did not execute OPEN");
+            const auto settled = manager.reconcile();
+            require(settled.owner &&
+                        settled.owner->status ==
+                            mt5bridge::dispatch::OwnerStepStatus::completed &&
+                        manager.state() && manager.state()->open_volume == 1,
+                    "prepared second process did not reconcile OPEN");
             check_order_calls(module);
         } else {
             mt5bridge::dispatch::PrivateOwnerLoop loop(
@@ -630,6 +702,10 @@ int run_open_restart(const char *executable, const char *scenario = "immediate")
     set_environment("MT5BRIDGE_ORDER_SEND_MODE", "success");
     set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "0");
     set_environment("MT5BRIDGE_RESTART_SCENARIO", scenario);
+    if (std::string(scenario) == "prepared") {
+        std::ofstream initial_count(count_file, std::ios::trunc);
+        initial_count << "0";
+    }
     const auto root_text = test_root.path().string();
     const std::string first_arg = "--open-restart-child=first=" + root_text;
     const std::string second_arg = "--open-restart-child=second=" + root_text;

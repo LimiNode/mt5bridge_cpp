@@ -84,6 +84,29 @@ struct PrivateOwnerLoopIntentResult {
     }
 };
 
+/// \enum PrivateOwnerLoopDispatchStatus
+/// \brief Reports account-wide eligibility for one recovered pre-dispatch record.
+enum class PrivateOwnerLoopDispatchStatus {
+    accepted,         ///< The requested key is the only dispatchable account record.
+    not_ready,        ///< Startup has not completed or the lease was lost.
+    account_mismatch, ///< The key belongs to another account.
+    operation_missing, ///< The key was not found in complete recovery.
+    blocked,          ///< Another record or ambiguous exposure blocks dispatch.
+};
+
+/// \struct PrivateOwnerLoopDispatchResult
+/// \brief Carries the account-wide dispatch eligibility decision.
+struct PrivateOwnerLoopDispatchResult {
+    PrivateOwnerLoopDispatchStatus status =
+        PrivateOwnerLoopDispatchStatus::not_ready;
+
+    /// \brief Tests whether the caller may invoke the normal admission barrier.
+    /// \return True only when no other account record can block dispatch.
+    bool accepted() const {
+        return status == PrivateOwnerLoopDispatchStatus::accepted;
+    }
+};
+
 /// \class PrivateOwnerLoop
 /// \brief Coordinates account lease, durable recovery, and explicit owner steps.
 ///
@@ -116,6 +139,11 @@ public:
     /// \param key Account-scoped operation identity to prepare.
     /// \return Fail-closed admission decision; no durable record is created.
     PrivateOwnerLoopIntentResult intent_admission(const OperationKey &key);
+
+    /// \brief Checks dispatch eligibility across the complete account journal.
+    /// \param key Recovered pre-dispatch operation that requests a send.
+    /// \return Fail-closed account-wide decision; never creates a permit.
+    PrivateOwnerLoopDispatchResult dispatch_eligibility(const OperationKey &key);
 
     /// \brief Tests whether startup completed and the lease remains held.
     /// \return True while normal caller-driven steps may proceed.

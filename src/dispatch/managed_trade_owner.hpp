@@ -252,6 +252,10 @@ private:
         const OperationReconciliationWorker &worker, const OperationKey &key,
         const OperationRecord &record) const;
 
+    /// \brief Verifies the account fence immediately before settlement commit.
+    /// \return True only while this owner still holds its original lease.
+    bool lease_held() const;
+
     /// \brief Validates the authoritative history-deal attribution context.
     /// \param cycle Confirmed observation cycle carrying the graph sample.
     /// \param worker Worker that produced the cycle and its baseline.

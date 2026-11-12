@@ -386,7 +386,8 @@ if(BUILD_TESTING)
                                ${PROJECT_SOURCE_DIR}/src/dispatch
                                ${PROJECT_SOURCE_DIR}/src/trade)
     target_link_libraries(mt5bridge_managed_trade_owner_test PRIVATE
-                          mt5bridge::managed_trade_owner)
+                          mt5bridge::managed_trade_owner
+                          mt5bridge::private_trade_manager)
     add_test(NAME mt5bridge_managed_trade_owner
              COMMAND mt5bridge_managed_trade_owner_test)
     add_executable(mt5bridge_private_owner_loop_test
@@ -563,6 +564,18 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                     "--open-restart-matrix"
         )
         set_tests_properties(mt5bridge_managed_trade_python_open_restart_matrix PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
+        add_test(
+            NAME mt5bridge_managed_trade_python_prepared_restart
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_owner_mt5_module"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
+                    "PATH=${MT5BRIDGE_PYTHON_HOME};$<TARGET_FILE_DIR:mt5bridge_managed_trade_python_integration_test>;$ENV{PATH}"
+                    "$<TARGET_FILE:mt5bridge_managed_trade_python_integration_test>"
+                    "--open-restart-scenario=prepared"
+        )
+        set_tests_properties(mt5bridge_managed_trade_python_prepared_restart PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
         add_executable(mt5bridge_managed_trade_python_negative_test

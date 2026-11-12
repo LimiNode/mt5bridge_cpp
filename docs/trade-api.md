@@ -323,6 +323,11 @@ dispatch barrier is blocked, including after process restart. Prepared intent
 recovery requires the complete persisted descriptor; ambiguous/incomplete
 records fail closed. The current manager does not schedule work, expose a
 public ABI, admit another OPEN slice, or activate CLOSE/INOUT settlement.
+It is not a capability provider: the caller must already hold the account
+lease, enter through the trade-critical runtime lane, and supply a fresh
+environment proof. The injected Python transport owns CPython/GIL and module
+lifetime plus decoding and validation of the concrete broker request (including
+its symbol); the manager grants no public permission or ABI.
 
 The current owner-loop slice is exposed by
 [`dispatch/operation_worker.hpp`](../include/mt5bridge/dispatch/operation_worker.hpp).

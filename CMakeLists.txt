@@ -104,6 +104,18 @@ target_include_directories(mt5bridge_private_owner_loop PRIVATE
 target_link_libraries(mt5bridge_private_owner_loop PRIVATE mt5bridge::journal)
 add_library(mt5bridge::private_owner_loop ALIAS mt5bridge_private_owner_loop)
 
+# Private caller-driven OPEN composition. No exported ABI or broker-call surface.
+add_library(mt5bridge_private_trade_manager STATIC
+            src/dispatch/private_trade_manager.cpp)
+target_include_directories(mt5bridge_private_trade_manager PRIVATE
+                           ${PROJECT_SOURCE_DIR}/include
+                           ${PROJECT_SOURCE_DIR}/src/dispatch
+                           ${PROJECT_SOURCE_DIR}/src/trade)
+target_link_libraries(mt5bridge_private_trade_manager PRIVATE
+                      mt5bridge::managed_trade_owner
+                      mt5bridge::private_owner_loop)
+add_library(mt5bridge::private_trade_manager ALIAS mt5bridge_private_trade_manager)
+
 if(BUILD_TESTING)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
@@ -374,7 +386,8 @@ if(BUILD_TESTING)
                                ${PROJECT_SOURCE_DIR}/src/dispatch
                                ${PROJECT_SOURCE_DIR}/src/trade)
     target_link_libraries(mt5bridge_managed_trade_owner_test PRIVATE
-                          mt5bridge::managed_trade_owner)
+                          mt5bridge::managed_trade_owner
+                          mt5bridge::private_trade_manager)
     add_test(NAME mt5bridge_managed_trade_owner
              COMMAND mt5bridge_managed_trade_owner_test)
     add_executable(mt5bridge_private_owner_loop_test
@@ -504,7 +517,8 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                                    ${PROJECT_SOURCE_DIR}/src/trade)
         target_link_libraries(mt5bridge_managed_trade_python_integration_test PRIVATE
                               mt5bridge::managed_trade_owner
-                              mt5bridge::private_owner_loop Python3::Python)
+                              mt5bridge::private_owner_loop
+                              mt5bridge::private_trade_manager Python3::Python)
         add_test(
             NAME mt5bridge_managed_trade_python_integration
             COMMAND ${CMAKE_COMMAND} -E env
@@ -550,6 +564,18 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                     "--open-restart-matrix"
         )
         set_tests_properties(mt5bridge_managed_trade_python_open_restart_matrix PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        )
+        add_test(
+            NAME mt5bridge_managed_trade_python_prepared_restart
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_owner_mt5_module"
+                    "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
+                    "PATH=${MT5BRIDGE_PYTHON_HOME};$<TARGET_FILE_DIR:mt5bridge_managed_trade_python_integration_test>;$ENV{PATH}"
+                    "$<TARGET_FILE:mt5bridge_managed_trade_python_integration_test>"
+                    "--open-restart-scenario=prepared"
+        )
+        set_tests_properties(mt5bridge_managed_trade_python_prepared_restart PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         )
         add_executable(mt5bridge_managed_trade_python_negative_test

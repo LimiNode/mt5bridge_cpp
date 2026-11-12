@@ -755,6 +755,8 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
                     managed_trade::MutationStatus::applied ||
                 candidate.reconcile() != managed_trade::MutationStatus::applied)
                 break;
+            if (!lease_held())
+                break;
             const auto transitioned =
                 journal_.transition_operation(*key, target_state, *executed);
             if (!transitioned.accepted())
@@ -840,6 +842,8 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
             auto candidate = state_;
             if (candidate.observe_pending_remainder(delta) !=
                 managed_trade::MutationStatus::applied)
+                break;
+            if (!lease_held())
                 break;
             const auto target_state = candidate.slice.state ==
                                               managed_trade::OperationState::filled
@@ -1157,6 +1161,11 @@ bool ManagedTradeOwner::has_observation_provenance(
            durable->revision == record.revision &&
            durable->journal_state == record.journal_state &&
            durable->operation_state == record.operation_state;
+}
+
+bool ManagedTradeOwner::lease_held() const {
+    const auto token = lease_.held_fencing_token(account_);
+    return token && *token != 0;
 }
 
 std::optional<ManagedTradeOwner::HistoryDealAttributionContext>

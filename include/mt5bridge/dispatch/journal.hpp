@@ -429,6 +429,40 @@ public:
         return {JournalMutationStatus::accepted, std::move(candidate)};
     }
 
+    /// \brief Rebinds a pre-dispatch descriptor to a fresh graph baseline.
+    /// \param key Account and managed-operation identity.
+    /// \param baseline Fresh observation baseline from the current process.
+    /// \return Mutation status and the rebased descriptor-bearing record.
+    /// \note Only the baseline may change before the dispatch barrier. Predicates,
+    /// identity, request payload, and settlement mode remain immutable.
+    JournalMutationResult rebase_pre_dispatch_descriptor(
+        const OperationKey &key, ReconciliationBaseline baseline) {
+        const auto it = records_.find(key);
+        if (it == records_.end() ||
+            it->second.journal_state != JournalState::dispatch_intent_persisted ||
+            it->second.operation_state != OperationState::prechecking ||
+            !it->second.reconciliation_descriptor || !baseline.valid() ||
+            baseline.account() != key.account ||
+            it->second.reconciliation_descriptor->account != key.account)
+            return {JournalMutationStatus::invalid_transition, std::nullopt};
+        if (it->second.revision == (std::numeric_limits<std::uint64_t>::max)())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+
+        OperationRecord candidate = it->second;
+        candidate.reconciliation_descriptor->baseline = std::move(baseline);
+        candidate.revision += 1;
+        if (!candidate.valid())
+            return {JournalMutationStatus::invalid_record, std::nullopt};
+        const auto commit_status = store_.commit(candidate, it->second.revision);
+        if (commit_status != StoreCommitStatus::committed)
+            return {commit_status == StoreCommitStatus::conflict
+                        ? JournalMutationStatus::conflict
+                        : JournalMutationStatus::not_durable,
+                    std::nullopt};
+        it->second = candidate;
+        return {JournalMutationStatus::accepted, std::move(candidate)};
+    }
+
     /// \brief Atomically persists a backend result without identity bindings.
     /// \param key Account and managed-operation identity.
     /// \param result_payload Exact opaque backend result bytes.

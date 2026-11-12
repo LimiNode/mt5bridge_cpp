@@ -457,6 +457,14 @@ worker process.
    the non-resendable submitting edge. A fresh private owner loop and a new
    observation graph can settle that same operation only after matching
    history-deal evidence; the transport call is never repeated.
+   A private, caller-driven `PrivateTradeManager` now composes this path for
+   exactly one OPEN slice and one managed `TradeId`: lease-checked startup,
+   durable intent preparation, fresh dispatch admission, one-shot execution,
+   read-only state, observation-only reconciliation, and local shutdown. It
+   reconstructs a complete prepared intent or a dispatched/settled OPEN from
+   the journal. An incomplete pre-dispatch write or a may-have-sent barrier
+   without reconstructable result remains blocked; it never creates resend
+   permission. This is internal orchestration, not a public asynchronous API.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

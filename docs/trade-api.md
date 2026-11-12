@@ -313,6 +313,17 @@ workers rather than inferred from one broker result.
 
 ## Journal-aware recovery and reconciliation
 
+The private `PrivateTradeManager` in `src/dispatch/` composes the existing
+startup loop, managed owner, dispatch barrier, one-shot backend, and observation
+worker for a single account and one OPEN operation. Its caller invokes
+`start()`, `prepare_open()`, `execute_pending()`, and repeated `reconcile()`
+steps; `state()` is read-only and `shutdown()` discards only local state, not
+the caller-owned lease. A second `execute_pending()` after the durable
+dispatch barrier is blocked, including after process restart. Prepared intent
+recovery requires the complete persisted descriptor; ambiguous/incomplete
+records fail closed. The current manager does not schedule work, expose a
+public ABI, admit another OPEN slice, or activate CLOSE/INOUT settlement.
+
 The current owner-loop slice is exposed by
 [`dispatch/operation_worker.hpp`](../include/mt5bridge/dispatch/operation_worker.hpp).
 `OperationRecoveryCoordinator::recover()` discovers every durable record after

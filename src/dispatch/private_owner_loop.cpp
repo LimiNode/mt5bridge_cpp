@@ -124,6 +124,13 @@ PrivateOwnerLoopDispatchResult PrivateOwnerLoop::dispatch_eligibility(
     return {PrivateOwnerLoopDispatchStatus::accepted};
 }
 
+bool PrivateOwnerLoop::with_dispatch_capability(
+    const std::function<void()> &publication) const {
+    if (!ready() || !publication || !fencing_token_)
+        return false;
+    return lease_.with_fencing_capability(account_, *fencing_token_, publication);
+}
+
 bool PrivateOwnerLoop::ready() const {
     return started_ && lease_held();
 }

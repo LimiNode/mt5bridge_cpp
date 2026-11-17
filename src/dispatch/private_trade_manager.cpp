@@ -55,18 +55,22 @@ PrivateTradeManagerResult PrivateTradeManager::start() {
             return {PrivateTradeManagerStatus::recovery_failed, std::nullopt};
         if (own_record->journal_state == JournalState::dispatch_intent_persisted &&
             own_record->operation_state == OperationState::prechecking) {
+            const auto requested =
+                own_record->reconciliation_descriptor->requested_volume;
+            if (!own_record->result_payload.empty() ||
+                !own_record->reconciliation_bindings.empty() ||
+                own_record->settled_volume != 0 || own_record->fencing_token != 0 ||
+                own_record->reconciliation_descriptor->account != account_ ||
+                restored.start_open_slice(requested) !=
+                    managed_trade::MutationStatus::applied ||
+                !restored.valid())
+                return {PrivateTradeManagerStatus::recovery_failed, std::nullopt};
+
             const auto fresh_baseline = coordinator_.capture_baseline();
             if (!fresh_baseline.valid() ||
                 journal_.rebase_pre_dispatch_descriptor(
                     own_record->key, fresh_baseline)
                         .status != JournalMutationStatus::accepted)
-                return {PrivateTradeManagerStatus::recovery_failed, std::nullopt};
-            if (!own_record->result_payload.empty() ||
-                !own_record->reconciliation_bindings.empty() ||
-                own_record->settled_volume != 0 || own_record->fencing_token != 0 ||
-                restored.start_open_slice(
-                    own_record->reconciliation_descriptor->requested_volume) !=
-                    managed_trade::MutationStatus::applied)
                 return {PrivateTradeManagerStatus::recovery_failed, std::nullopt};
         } else {
             auto pending = ManagedTradeOwner::recover_pending_open(initial_, account_,
@@ -129,21 +133,32 @@ PrivateTradeManagerResult PrivateTradeManager::execute_pending(
     const DispatchAdmissionRequest &request) {
     if (!owner_)
         return {PrivateTradeManagerStatus::stopped, std::nullopt};
-    const auto &state = owner_->state();
-    const OperationKey key{account_, state.trade_id.value,
-                           state.slice.operation_id};
-    const auto eligible = loop_.dispatch_eligibility(key);
-    if (!eligible.accepted())
-        return {eligible.status == PrivateOwnerLoopDispatchStatus::not_ready
-                    ? PrivateTradeManagerStatus::lease_lost
-                    : PrivateTradeManagerStatus::blocked,
-                std::nullopt};
-    const auto check = check_action(key,
-                                    PrivateOwnerLoopStepStatus::resume_pre_dispatch);
-    if (check.status != PrivateTradeManagerStatus::ready)
-        return check;
-    return {PrivateTradeManagerStatus::owner_result,
-            owner_->execute_pending(request)};
+    std::optional<PrivateTradeManagerResult> result;
+    const bool fenced = loop_.with_dispatch_capability([&] {
+        const auto &state = owner_->state();
+        const OperationKey key{account_, state.trade_id.value,
+                               state.slice.operation_id};
+        const auto eligible = loop_.dispatch_eligibility(key);
+        if (!eligible.accepted()) {
+            result = {eligible.status == PrivateOwnerLoopDispatchStatus::not_ready
+                          ? PrivateTradeManagerStatus::lease_lost
+                          : PrivateTradeManagerStatus::blocked,
+                      std::nullopt};
+            return;
+        }
+        const auto check = check_action(
+            key, PrivateOwnerLoopStepStatus::resume_pre_dispatch);
+        if (check.status != PrivateTradeManagerStatus::ready) {
+            result = check;
+            return;
+        }
+        result = {PrivateTradeManagerStatus::owner_result,
+                  owner_->execute_pending(request)};
+    });
+    if (!fenced)
+        return {PrivateTradeManagerStatus::lease_lost, std::nullopt};
+    return result.value_or(
+        PrivateTradeManagerResult{PrivateTradeManagerStatus::lease_lost, std::nullopt});
 }
 
 PrivateTradeManagerResult PrivateTradeManager::reconcile(bool trade_event_gap,

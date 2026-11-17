@@ -95,7 +95,8 @@ ManagedTradeOwner::ManagedTradeOwner(
     runtime::DispatchTransport &transport)
     : state_(std::move(initial_state)), account_(std::move(account)), journal_(journal),
       admission_(admission), backend_(backend), account_probe_(account_probe),
-      lease_(lease), transport_(transport) {}
+      lease_(lease), transport_(transport),
+      session_fencing_token_(lease_.held_fencing_token(account_).value_or(0)) {}
 
 std::optional<managed_trade::ManagedTradeState>
 ManagedTradeOwner::recover_settled_open(
@@ -594,6 +595,12 @@ OwnerStepResult ManagedTradeOwner::execute_pending(
     const auto key = current_key();
     if (!key)
         return result_for(OwnerStepStatus::invalid_request);
+    if (!lease_held()) {
+        auto result = result_for(OwnerStepStatus::admission_rejected, key,
+                                 journal_.find(*key));
+        result.admission_status = DispatchAdmissionStatus::lease_not_held;
+        return result;
+    }
     auto admitted = admission_.admit(*key, request, lease_);
     if (!admitted.admitted()) {
         auto result = result_for(OwnerStepStatus::admission_rejected, key,
@@ -755,14 +762,12 @@ OwnerStepResult ManagedTradeOwner::settle_reconciliation(
                     managed_trade::MutationStatus::applied ||
                 candidate.reconcile() != managed_trade::MutationStatus::applied)
                 break;
-            if (!lease_held())
-                break;
             const auto transitioned =
-                journal_.transition_operation(*key, target_state, *executed);
-            if (!transitioned.accepted())
+                fenced_settlement_transition(*key, target_state, *executed);
+            if (!transitioned || !transitioned->accepted())
                 break;
             state_ = std::move(candidate);
-            result.record = transitioned.record;
+            result.record = transitioned->record;
             result.status = target_state == OperationState::filled
                                  ? OwnerStepStatus::completed
                                  : OwnerStepStatus::partially_filled;
@@ -843,18 +848,16 @@ OwnerStepResult ManagedTradeOwner::settle_pending_remainder(
             if (candidate.observe_pending_remainder(delta) !=
                 managed_trade::MutationStatus::applied)
                 break;
-            if (!lease_held())
-                break;
             const auto target_state = candidate.slice.state ==
                                               managed_trade::OperationState::filled
                                           ? OperationState::filled
                                           : OperationState::partially_filled;
             const auto transitioned =
-                journal_.transition_operation(*key, target_state, *cumulative);
-            if (!transitioned.accepted())
+                fenced_settlement_transition(*key, target_state, *cumulative);
+            if (!transitioned || !transitioned->accepted())
                 break;
             state_ = std::move(candidate);
-            result.record = transitioned.record;
+            result.record = transitioned->record;
             result.status = target_state == OperationState::filled
                                 ? OwnerStepStatus::completed
                                 : OwnerStepStatus::partially_filled;
@@ -1165,7 +1168,25 @@ bool ManagedTradeOwner::has_observation_provenance(
 
 bool ManagedTradeOwner::lease_held() const {
     const auto token = lease_.held_fencing_token(account_);
-    return token && *token != 0;
+    return session_fencing_token_ != 0 && token && *token == session_fencing_token_;
+}
+
+std::optional<JournalMutationResult>
+ManagedTradeOwner::fenced_settlement_transition(
+    const OperationKey &key, OperationState target_state,
+    std::uint64_t settled_volume) const {
+    if (!lease_held())
+        return std::nullopt;
+
+    std::optional<JournalMutationResult> transitioned;
+    const bool fenced = lease_.with_fencing_capability(
+        account_, session_fencing_token_, [&] {
+            transitioned = journal_.transition_operation(key, target_state,
+                                                         settled_volume);
+        });
+    if (!fenced || !transitioned)
+        return std::nullopt;
+    return transitioned;
 }
 
 std::optional<ManagedTradeOwner::HistoryDealAttributionContext>

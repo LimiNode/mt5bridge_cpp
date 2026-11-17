@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
 
@@ -114,6 +115,9 @@ struct PrivateOwnerLoopDispatchResult {
 /// transport or Python; reconcile_only is handed to the caller's observation
 /// worker. Every fresh step rescans the durable journal, so a worker's
 /// terminal transition is visible without a second scheduler or event bus.
+/// Account-wide dispatch must execute its scan and barrier through
+/// `with_dispatch_capability`; the lease capability serializes that sequence
+/// for supported owners.
 class PrivateOwnerLoop final {
 public:
     /// \brief Binds one account to one durable journal and lease.
@@ -144,6 +148,13 @@ public:
     /// \param key Recovered pre-dispatch operation that requests a send.
     /// \return Fail-closed account-wide decision; never creates a permit.
     PrivateOwnerLoopDispatchResult dispatch_eligibility(const OperationKey &key);
+
+    /// \brief Serializes one account-wide admission sequence under the lease.
+    /// \param publication Complete eligibility, barrier, and owner callback.
+    /// \return False when the owner lost its lease generation before entry.
+    /// \note The callback must perform the final durable admission while this
+    /// capability is held; a scan followed by an unrelated CAS is insufficient.
+    bool with_dispatch_capability(const std::function<void()> &publication) const;
 
     /// \brief Tests whether startup completed and the lease remains held.
     /// \return True while normal caller-driven steps may proceed.

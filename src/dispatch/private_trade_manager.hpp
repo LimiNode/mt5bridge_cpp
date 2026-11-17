@@ -39,8 +39,10 @@ struct PrivateTradeManagerResult {
 /// \warning This is an internal composition seam. The caller must hold the
 /// account lease, establish the fresh environment proof, and invoke it only
 /// from the trade-critical runtime lane. A Python-backed transport remains
-/// responsible for the GIL, module lifetime, request decoding, and symbol
-/// validation; this class does not grant those capabilities or expose an ABI.
+/// responsible for the GIL, module lifetime, request decoding, and the
+/// bounded pre-send request-shape gate. This class does not grant those
+/// capabilities or expose an ABI; managed symbol/side authority remains a
+/// future owner-factory responsibility.
 class PrivateTradeManager final {
 public:
     /// \brief Binds one initially empty managed trade to existing private seams.

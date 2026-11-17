@@ -326,8 +326,11 @@ public ABI, admit another OPEN slice, or activate CLOSE/INOUT settlement.
 It is not a capability provider: the caller must already hold the account
 lease, enter through the trade-critical runtime lane, and supply a fresh
 environment proof. The injected Python transport owns CPython/GIL and module
-lifetime plus decoding and validation of the concrete broker request (including
-its symbol); the manager grants no public permission or ABI.
+lifetime plus decoding and a bounded pre-send request-shape gate (DEAL action,
+valid order type, positive volume, symbol, and no position-targeted OPEN).
+This MVP does not bind caller-selected symbol/side/volume to a typed managed
+request; that authority belongs to the future owner factory. The manager grants
+no public permission or ABI.
 
 The current owner-loop slice is exposed by
 [`dispatch/operation_worker.hpp`](../include/mt5bridge/dispatch/operation_worker.hpp).

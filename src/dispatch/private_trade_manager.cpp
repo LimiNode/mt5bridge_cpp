@@ -103,13 +103,23 @@ PrivateTradeManagerResult PrivateTradeManager::prepare_open(
         return {PrivateTradeManagerStatus::invalid_state, std::nullopt};
     const OperationKey key{account_, current.trade_id.value,
                            current.slice.operation_id + 1};
-    const auto admission = loop_.intent_admission(key);
-    if (admission.status != PrivateOwnerLoopIntentStatus::accepted)
-        return {admission.status == PrivateOwnerLoopIntentStatus::not_ready
-                    ? PrivateTradeManagerStatus::lease_lost
-                    : PrivateTradeManagerStatus::blocked, std::nullopt};
-    return {PrivateTradeManagerStatus::owner_result,
-            owner_->prepare_open(volume, std::move(intent))};
+    std::optional<PrivateTradeManagerResult> result;
+    const bool fenced = loop_.with_dispatch_capability([&] {
+        const auto admission = loop_.intent_admission(key);
+        if (admission.status != PrivateOwnerLoopIntentStatus::accepted) {
+            result = {admission.status == PrivateOwnerLoopIntentStatus::not_ready
+                          ? PrivateTradeManagerStatus::lease_lost
+                          : PrivateTradeManagerStatus::blocked,
+                      std::nullopt};
+            return;
+        }
+        result = {PrivateTradeManagerStatus::owner_result,
+                  owner_->prepare_open(volume, std::move(intent))};
+    });
+    if (!fenced)
+        return {PrivateTradeManagerStatus::lease_lost, std::nullopt};
+    return result.value_or(
+        PrivateTradeManagerResult{PrivateTradeManagerStatus::lease_lost, std::nullopt});
 }
 
 PrivateTradeManagerResult PrivateTradeManager::check_action(

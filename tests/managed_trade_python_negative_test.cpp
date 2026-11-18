@@ -124,7 +124,7 @@ const char *mode_name(NegativeMode mode) {
     return "unknown";
 }
 
-void run_case(NegativeMode mode) {
+void run_case(NegativeMode mode, std::uint64_t request_type = 99) {
     TestRoot root((std::string("mt5bridge-python-negative-") + mode_name(mode)).c_str());
     const auto count_file = root.path() / "order-calls.txt";
     const auto operation_account = account();
@@ -183,10 +183,16 @@ void run_case(NegativeMode mode) {
         mt5bridge::dispatch::ManagedTradeOwner owner(
             initial, operation_account, journal, admission, backend, account_probe, lease,
             transport);
-        const std::string request =
-            mode == NegativeMode::contradictory_request
-                ? R"({"action":0,"type":99,"symbol":"EURUSD","volume":1.0})"
-                : R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+        std::string request =
+            R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+        if (mode == NegativeMode::contradictory_request) {
+            request = request_type == 99
+                          ? std::string(
+                                R"({"action":0,"type":99,"symbol":"EURUSD","volume":1.0})")
+                          : std::string(R"({"action":1,"type":)") +
+                                std::to_string(request_type) +
+                                R"(,"symbol":"EURUSD","volume":1.0})";
+        }
         mt5bridge::dispatch::ManagedTradeIntent intent{
             std::vector<std::uint8_t>(request.begin(), request.end()),
             descriptor(operation_account, coordinator.capture_baseline(), window)};
@@ -259,6 +265,8 @@ int main() {
     try {
         run_case(NegativeMode::account_mismatch);
         run_case(NegativeMode::contradictory_request);
+        for (std::uint64_t pending_type = 2; pending_type <= 5; ++pending_type)
+            run_case(NegativeMode::contradictory_request, pending_type);
         run_case(NegativeMode::none);
         run_case(NegativeMode::exception);
         run_case(NegativeMode::malformed);

@@ -390,6 +390,17 @@ if(BUILD_TESTING)
                           mt5bridge::private_trade_manager)
     add_test(NAME mt5bridge_managed_trade_owner
              COMMAND mt5bridge_managed_trade_owner_test)
+    add_executable(mt5bridge_private_trade_manager_concurrency_test
+                   tests/private_trade_manager_concurrency_test.cpp)
+    target_include_directories(mt5bridge_private_trade_manager_concurrency_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/include
+                               ${PROJECT_SOURCE_DIR}/src/dispatch
+                               ${PROJECT_SOURCE_DIR}/src/trade)
+    target_link_libraries(mt5bridge_private_trade_manager_concurrency_test PRIVATE
+                          mt5bridge::managed_trade_owner
+                          mt5bridge::private_trade_manager)
+    add_test(NAME mt5bridge_private_trade_manager_concurrency
+             COMMAND mt5bridge_private_trade_manager_concurrency_test)
     add_executable(mt5bridge_private_owner_loop_test
                    tests/private_owner_loop_test.cpp)
     target_include_directories(mt5bridge_private_owner_loop_test PRIVATE

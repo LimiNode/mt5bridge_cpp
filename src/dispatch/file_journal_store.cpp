@@ -839,6 +839,7 @@ std::optional<std::uint64_t> WindowsSingleWriterLease::held_fencing_token(
 bool WindowsSingleWriterLease::with_fencing_capability(
     const AccountKey &account, std::uint64_t token,
     const std::function<void()> &publication) const {
+    std::lock_guard<std::recursive_mutex> guard(capability_mutex_);
     if (!ready_ || token_ == 0 || token != token_ || account != account_ || !publication)
         return false;
     publication();

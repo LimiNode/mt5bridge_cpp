@@ -252,9 +252,13 @@ bool validate_request_shape(PyObject *request, const OperationRecord &record) {
 
     std::uint64_t action = 0;
     std::uint64_t type = 0;
-    if (!read_uint64(request, "action", &action) || action != 1 ||
+    if (!read_uint64(request, "action", &action) ||
         !read_uint64(request, "type", &type) || type > 5 ||
         !read_positive_double(request, "volume") || !read_text(request, "symbol"))
+        return false;
+
+    if (record.operation_kind == OperationKind::open &&
+        (action != 1 || (type != 0 && type != 1)))
         return false;
 
     PyRef symbol(field(request, "symbol"));

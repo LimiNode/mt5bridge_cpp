@@ -469,6 +469,11 @@ worker process.
    lane, and fresh environment proof. The Python transport owns GIL/module
    lifetime and a bounded request-shape gate; managed symbol/side/volume
    authority remains with the future owner factory and is not implied here.
+   The separate [typed OPEN owner-factory plan](typed-managed-open-owner-factory-plan.md)
+   defines the next review slices: exact quantity/policy admission, runtime-owned
+   source authority with a versioned immutable binding, then private integration
+   before the existing barrier. It is a proposed plan, not an implemented factory
+   or a live-trading permission; fractional managed settlement remains separate.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

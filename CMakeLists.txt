@@ -117,6 +117,7 @@ target_link_libraries(mt5bridge_private_trade_manager PRIVATE
 add_library(mt5bridge::private_trade_manager ALIAS mt5bridge_private_trade_manager)
 
 if(BUILD_TESTING)
+    target_compile_definitions(mt5bridge_journal PRIVATE MT5BRIDGE_LEASE_TEST_HOOKS)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
     target_link_libraries(mt5bridge_reconciliation_graph_test PRIVATE mt5bridge::client)
     add_test(NAME mt5bridge_reconciliation_graph
@@ -401,6 +402,7 @@ if(BUILD_TESTING)
                           mt5bridge::private_trade_manager)
     add_test(NAME mt5bridge_private_trade_manager_concurrency
              COMMAND mt5bridge_private_trade_manager_concurrency_test)
+    set_tests_properties(mt5bridge_private_trade_manager_concurrency PROPERTIES TIMEOUT 30)
     add_executable(mt5bridge_private_owner_loop_test
                    tests/private_owner_loop_test.cpp)
     target_include_directories(mt5bridge_private_owner_loop_test PRIVATE

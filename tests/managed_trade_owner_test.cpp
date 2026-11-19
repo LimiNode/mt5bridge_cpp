@@ -2,6 +2,7 @@
 /// \brief Exercises the private managed-trade owner-loop composition seam.
 
 #include "managed_trade_owner.hpp"
+#include "private_trade_manager.hpp"
 
 #include <mt5bridge/dispatch/operation_recovery.hpp>
 #include <mt5bridge.hpp>
@@ -9,6 +10,7 @@
 #include "support/fake_observation_provider.hpp"
 
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -136,8 +138,26 @@ public:
         return token;
     }
 
+    bool with_fencing_capability(
+        const mt5bridge::AccountKey &requested, std::uint64_t expected,
+        const std::function<void()> &publication) const override {
+        if (requested != owned_account || expected == 0 || expected != token ||
+            !publication)
+            return false;
+        if (transfer_during_capability) {
+            token = 88;
+            return false;
+        }
+        publication();
+        return token == expected;
+    }
+
     mt5bridge::AccountKey owned_account;
-    std::uint64_t token = 77;
+    mutable std::uint64_t token = 77;
+    mutable bool transfer_during_capability = false;
+
+    void revoke() { token = 0; }
+    void transfer() { token = 88; }
 };
 
 class FakeAccountProbe final : public mt5bridge::runtime::CurrentAccountProbe {
@@ -172,10 +192,322 @@ public:
     std::size_t calls = 0;
 };
 
+class RevokingObservationProvider final : public mt5bridge::ObservationProvider {
+public:
+    RevokingObservationProvider(std::vector<mt5bridge::ObservationBatch> batches,
+                                FakeLease &lease, bool transfer = false,
+                                bool change_lease = true)
+        : batches_(std::move(batches)), lease_(lease), transfer_(transfer),
+          change_lease_(change_lease) {}
+
+    mt5bridge::ObservationBatch collect(
+        const mt5bridge::ObservationCollectionRequest &) override {
+        if (next_ == batches_.size())
+            throw std::runtime_error("revoking observation provider exhausted");
+        if (next_ == 2 && change_lease_) {
+            if (transfer_)
+                lease_.transfer();
+            else
+                lease_.revoke();
+        }
+        return std::move(batches_[next_++]);
+    }
+
+private:
+    std::vector<mt5bridge::ObservationBatch> batches_;
+    FakeLease &lease_;
+    bool transfer_ = false;
+    bool change_lease_ = true;
+    std::size_t next_ = 0;
+};
+
+void test_private_trade_manager_account_block() {
+    const auto operation_account = account();
+    auto provider = std::make_unique<FakeObservationProvider>(
+        std::vector<mt5bridge::ObservationBatch>{
+            observation_batch(operation_account), observation_batch(operation_account)});
+    mt5bridge::ObservationCoordinator coordinator(*provider, operation_account);
+    mt5bridge::ObservationCollectionRequest collection;
+    const auto first = coordinator.refresh(collection);
+    const auto second = coordinator.refresh(collection);
+    require(first.sample && second.sample, "manager blocker baseline failed");
+
+    MemoryStore store;
+    mt5bridge::OperationJournal journal(store);
+    mt5bridge::DispatchAdmissionBarrier admission(journal, coordinator.graph(), {});
+    mt5bridge::runtime::OneShotDispatchBackend backend;
+    FakeLease lease{operation_account};
+    FakeTransport transport;
+    FakeAccountProbe account_probe({operation_account});
+    mt5bridge::managed_trade::ManagedTradeState initial;
+    require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                &initial, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),
+            "manager blocker state initialization failed");
+    mt5bridge::dispatch::PrivateTradeManager manager(
+        initial, operation_account, journal, admission, backend, account_probe, lease,
+        transport, coordinator, collection);
+    require(manager.start().status ==
+                mt5bridge::dispatch::PrivateTradeManagerStatus::ready,
+            "manager blocker startup failed");
+    const std::vector<std::uint8_t> request{'{', '}'};
+    mt5bridge::dispatch::ManagedTradeIntent intent{
+        request,
+        {operation_account, coordinator.capture_baseline(),
+         {mt5bridge::require_active_order(7001)},
+         mt5bridge::OperationState::filled, 7, 1, 1}};
+    require(manager.prepare_open(1, std::move(intent)).owner &&
+                manager.state() && manager.state()->slice.operation_id == 1,
+            "manager blocker did not prepare own OPEN");
+
+    const mt5bridge::OperationKey other_key{operation_account, 8, 1};
+    require(journal.create(other_key, request, mt5bridge::OperationKind::open).accepted() &&
+                journal.transition_operation(other_key,
+                                             mt5bridge::OperationState::prechecking)
+                    .accepted() &&
+                journal.transition_journal(other_key,
+                                           mt5bridge::JournalState::prechecked)
+                    .accepted() &&
+                journal.transition_journal(
+                    other_key, mt5bridge::JournalState::dispatch_intent_persisted)
+                    .accepted() &&
+                journal.persist_reconciliation_descriptor(
+                    other_key,
+                    {operation_account, coordinator.capture_baseline(),
+                     {mt5bridge::require_active_order(7002)},
+                     mt5bridge::OperationState::filled, 8, 1, 1})
+                    .accepted() &&
+                journal.transition_journal(other_key,
+                                           mt5bridge::JournalState::dispatching, 77)
+                    .accepted(),
+            "manager blocker setup did not persist other unresolved OPEN");
+
+    const auto before_rebase = journal.find(other_key);
+    const auto rejected_rebase = journal.rebase_pre_dispatch_descriptor(
+        other_key, coordinator.capture_baseline());
+    const auto after_rebase = journal.find(other_key);
+    require(rejected_rebase.status == mt5bridge::JournalMutationStatus::invalid_transition &&
+                before_rebase && after_rebase &&
+                after_rebase->revision == before_rebase->revision &&
+                after_rebase->journal_state == mt5bridge::JournalState::dispatching,
+            "dispatching record was rebased or mutated during recovery");
+
+    mt5bridge::DispatchAdmissionRequest ready;
+    ready.current_account = operation_account;
+    const auto result = manager.execute_pending(ready);
+    require(result.status ==
+                mt5bridge::dispatch::PrivateTradeManagerStatus::blocked &&
+                transport.calls == 0,
+            "manager dispatched despite an unresolved same-account operation");
+    const auto own = journal.find({operation_account, 7, 1});
+    const auto other = journal.find(other_key);
+    require(own && other &&
+                own->journal_state == mt5bridge::JournalState::dispatch_intent_persisted &&
+                other->journal_state == mt5bridge::JournalState::dispatching,
+            "account-wide blocker changed durable records");
+}
+
+void test_settlement_refuses_lease_change(bool transfer) {
+    const auto operation_account = account();
+    const mt5bridge::ObservationWindow window{1000, 2000};
+    FakeLease lease{operation_account};
+    auto provider = std::make_unique<RevokingObservationProvider>(
+        std::vector<mt5bridge::ObservationBatch>{
+            history_deals_batch(operation_account, window, {}),
+            history_deals_batch(operation_account, window, {}),
+            history_deals_batch(operation_account, window,
+                                {history_deal(700, 900, 901, 1.0)})},
+        lease, transfer);
+    mt5bridge::ObservationCoordinator coordinator(*provider, operation_account);
+    mt5bridge::ObservationCollectionRequest collection;
+    collection.history_deals_window = window;
+    const auto first = coordinator.refresh(collection);
+    const auto second = coordinator.refresh(collection);
+    require(first.sample && second.sample,
+            "revoking lease observation baseline failed");
+    mt5bridge::EnvironmentConsistencyRequest consistency_request;
+    consistency_request.history_deals_window = window;
+    const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+        {*first.sample, *second.sample}, consistency_request);
+    require(consistency.consistent() && consistency.proof,
+            "revoking lease environment proof failed");
+
+    MemoryStore store;
+    mt5bridge::OperationJournal journal(store);
+    mt5bridge::DispatchAdmissionBarrier admission(journal, coordinator.graph(), {});
+    mt5bridge::runtime::OneShotDispatchBackend backend;
+    FakeTransport transport;
+    transport.next.reconciliation_bindings = {{501, 700}};
+    FakeAccountProbe account_probe({operation_account, operation_account});
+    mt5bridge::managed_trade::ManagedTradeState state;
+    require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                &state, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),
+            "revoking lease state initialization failed");
+    mt5bridge::dispatch::ManagedTradeOwner owner(
+        state, operation_account, journal, admission, backend, account_probe, lease,
+        transport);
+    const auto predicate = mt5bridge::expect_reconciliation_transition(
+        mt5bridge::ReconciliationPredicateKind::history_deal_present,
+        std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+        501, window);
+    const std::string request =
+        R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+    mt5bridge::dispatch::ManagedTradeIntent intent{
+        std::vector<std::uint8_t>(request.begin(), request.end()),
+        {operation_account, coordinator.capture_baseline(), {predicate},
+         mt5bridge::OperationState::filled, 7, 1, 1}};
+    require(owner.prepare_open(1, std::move(intent)).status ==
+                mt5bridge::dispatch::OwnerStepStatus::prepared,
+            "revoking lease owner did not prepare OPEN");
+    mt5bridge::DispatchAdmissionRequest ready;
+    ready.current_account = operation_account;
+    ready.environment_proof = consistency.proof;
+    require(owner.execute_pending(ready).status ==
+                mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation,
+            "revoking lease owner did not execute OPEN");
+    mt5bridge::OperationReconciliationWorker worker(
+        journal, {operation_account, 7, 1}, coordinator, collection);
+    const auto settled = owner.settle_reconciliation(worker);
+    require(settled.status ==
+                mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                owner.state().open_volume == 0 && transport.calls == 1,
+            "changed lease published managed exposure");
+    const auto record = journal.find({operation_account, 7, 1});
+    require(record && record->operation_state == mt5bridge::OperationState::reconciling &&
+                record->settled_volume == 0,
+            "changed lease changed durable settlement frontier");
+}
+
+void test_prepared_recovery_validates_before_rebase() {
+    const auto operation_account = account();
+    auto provider = std::make_unique<FakeObservationProvider>(
+        std::vector<mt5bridge::ObservationBatch>{
+            observation_batch(operation_account), observation_batch(operation_account)});
+    mt5bridge::ObservationCoordinator coordinator(*provider, operation_account);
+    mt5bridge::ObservationCollectionRequest collection;
+    require(coordinator.refresh(collection).sample &&
+                coordinator.refresh(collection).sample,
+            "rebase-order observation setup failed");
+
+    MemoryStore store;
+    mt5bridge::OperationJournal journal(store);
+    const mt5bridge::OperationKey key{operation_account, 70, 1};
+    const auto descriptor = mt5bridge::ReconciliationDescriptor{
+        operation_account, coordinator.capture_baseline(),
+        {mt5bridge::require_active_order(7001)}, mt5bridge::OperationState::filled,
+        70, 1, 10};
+    require(journal.create(key, {0x70}, mt5bridge::OperationKind::open).accepted() &&
+                journal.transition_operation(key,
+                                             mt5bridge::OperationState::prechecking)
+                    .accepted() &&
+                journal.transition_journal(key, mt5bridge::JournalState::prechecked)
+                    .accepted() &&
+                journal.transition_journal(
+                    key, mt5bridge::JournalState::dispatch_intent_persisted)
+                    .accepted() &&
+                journal.persist_reconciliation_descriptor(key, descriptor).accepted(),
+            "rebase-order fixture setup failed");
+    const auto before = journal.find(key);
+    mt5bridge::DispatchAdmissionBarrier admission(journal, coordinator.graph(), {});
+    mt5bridge::runtime::OneShotDispatchBackend backend;
+    FakeLease lease{operation_account};
+    FakeTransport transport;
+    FakeAccountProbe account_probe({operation_account});
+    mt5bridge::managed_trade::ManagedTradeState initial;
+    require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                &initial, mt5bridge::managed_trade::TradeId{70}, 5, 5, 2),
+            "rebase-order state initialization failed");
+    mt5bridge::dispatch::PrivateTradeManager manager(
+        initial, operation_account, journal, admission, backend, account_probe, lease,
+        transport, coordinator, collection);
+    require(manager.start().status ==
+                mt5bridge::dispatch::PrivateTradeManagerStatus::recovery_failed,
+            "invalid prepared volume was rebased instead of rejected");
+    const auto after = journal.find(key);
+    require(before && after && after->revision == before->revision &&
+                after->reconciliation_descriptor && before->reconciliation_descriptor &&
+                after->reconciliation_descriptor->baseline.graph_revision() ==
+                    before->reconciliation_descriptor->baseline.graph_revision(),
+            "rejected prepared recovery mutated durable descriptor");
+}
+
+void test_settlement_refuses_transfer_at_publication_boundary() {
+    const auto operation_account = account();
+    const mt5bridge::ObservationWindow window{1000, 2000};
+    FakeLease lease{operation_account};
+    auto provider = std::make_unique<RevokingObservationProvider>(
+        std::vector<mt5bridge::ObservationBatch>{
+            history_deals_batch(operation_account, window, {}),
+            history_deals_batch(operation_account, window, {}),
+            history_deals_batch(operation_account, window,
+                                {history_deal(700, 900, 901, 1.0)})},
+        lease, false, false);
+    mt5bridge::ObservationCoordinator coordinator(*provider, operation_account);
+    mt5bridge::ObservationCollectionRequest collection;
+    collection.history_deals_window = window;
+    const auto first = coordinator.refresh(collection);
+    const auto second = coordinator.refresh(collection);
+    require(first.sample && second.sample, "boundary baseline failed");
+    mt5bridge::EnvironmentConsistencyRequest consistency_request;
+    consistency_request.history_deals_window = window;
+    const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+        {*first.sample, *second.sample}, consistency_request);
+    require(consistency.consistent() && consistency.proof,
+            "boundary environment proof failed");
+
+    MemoryStore store;
+    mt5bridge::OperationJournal journal(store);
+    mt5bridge::DispatchAdmissionBarrier admission(journal, coordinator.graph(), {});
+    mt5bridge::runtime::OneShotDispatchBackend backend;
+    FakeTransport transport;
+    transport.next.reconciliation_bindings = {{501, 700}};
+    FakeAccountProbe account_probe({operation_account, operation_account});
+    mt5bridge::managed_trade::ManagedTradeState state;
+    require(mt5bridge::managed_trade::ManagedTradeState::initialize(
+                &state, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),
+            "boundary state initialization failed");
+    mt5bridge::dispatch::ManagedTradeOwner owner(
+        state, operation_account, journal, admission, backend, account_probe, lease,
+        transport);
+    const auto predicate = mt5bridge::expect_reconciliation_transition(
+        mt5bridge::ReconciliationPredicateKind::history_deal_present,
+        std::nullopt, false, mt5bridge::ReconciliationTransition::absent_to_present,
+        501, window);
+    const std::string request =
+        R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+    mt5bridge::dispatch::ManagedTradeIntent intent{
+        std::vector<std::uint8_t>(request.begin(), request.end()),
+        {operation_account, coordinator.capture_baseline(), {predicate},
+         mt5bridge::OperationState::filled, 7, 1, 1}};
+    require(owner.prepare_open(1, std::move(intent)).status ==
+                mt5bridge::dispatch::OwnerStepStatus::prepared,
+            "boundary owner did not prepare OPEN");
+    mt5bridge::DispatchAdmissionRequest ready;
+    ready.current_account = operation_account;
+    ready.environment_proof = consistency.proof;
+    require(owner.execute_pending(ready).status ==
+                mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation,
+            "boundary owner did not execute OPEN");
+    lease.transfer_during_capability = true;
+    mt5bridge::OperationReconciliationWorker worker(
+        journal, {operation_account, 7, 1}, coordinator, collection);
+    const auto settled = owner.settle_reconciliation(worker);
+    const auto record = journal.find({operation_account, 7, 1});
+    require(settled.status ==
+                mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
+                record && record->operation_state == mt5bridge::OperationState::reconciling &&
+                record->settled_volume == 0 && owner.state().open_volume == 0,
+            "lease transfer at publication boundary committed settlement");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_private_trade_manager_account_block();
+        test_settlement_refuses_lease_change(false);
+        test_settlement_refuses_lease_change(true);
+        test_prepared_recovery_validates_before_rebase();
+        test_settlement_refuses_transfer_at_publication_boundary();
         const auto operation_account = account();
         auto provider = std::make_unique<FakeObservationProvider>(
             std::vector<mt5bridge::ObservationBatch>{

@@ -4,6 +4,7 @@
 #include "managed_trade_owner.hpp"
 #include "python_dispatch_transport.hpp"
 #include "private_owner_loop.hpp"
+#include "private_trade_manager.hpp"
 
 #include "python_ref.hpp"
 
@@ -160,6 +161,12 @@ void check_order_calls(PyObject *module) {
     mt5bridge::runtime::PyRef calls(PyObject_GetAttrString(module, "order_calls"));
     require(calls && PyLong_Check(calls.get()) && PyLong_AsLong(calls.get()) == 1,
             "Python adapter did not perform exactly one order_send call");
+}
+
+void require_order_calls(PyObject *module, long expected) {
+    mt5bridge::runtime::PyRef calls(PyObject_GetAttrString(module, "order_calls"));
+    require(calls && PyLong_Check(calls.get()) && PyLong_AsLong(calls.get()) == expected,
+            "Python adapter order_send count did not match expectation");
 }
 
 void set_environment(const char *name, const std::filesystem::path &value) {
@@ -384,6 +391,10 @@ int run_open_restart_phase(const std::filesystem::path &root,
         if (first_phase) {
             batches = {empty_batch(operation_account, window),
                        empty_batch(operation_account, window)};
+        } else if (scenario == "prepared") {
+            auto settled = settled_batch(operation_account, window);
+            batches = {empty_batch(operation_account, window),
+                       empty_batch(operation_account, window), std::move(settled)};
         } else if (scenario == "delayed") {
             batches = {empty_batch(operation_account, window),
                        settled_batch(operation_account, window)};
@@ -448,6 +459,30 @@ int run_open_restart_phase(const std::filesystem::path &root,
 
             mt5bridge::DispatchAdmissionBarrier admission(
                 journal, coordinator.graph(), {});
+            if (scenario == "prepared") {
+                mt5bridge::dispatch::PrivateTradeManager manager(
+                    initial, operation_account, journal, admission, backend,
+                    account_probe, lease, transport, coordinator, collection);
+                const std::string request =
+                    R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+                mt5bridge::dispatch::ManagedTradeIntent intent{
+                    std::vector<std::uint8_t>(request.begin(), request.end()),
+                    descriptor(operation_account, coordinator.capture_baseline(), window)};
+                require(manager.start().status ==
+                            mt5bridge::dispatch::PrivateTradeManagerStatus::ready,
+                        "prepared first process did not start manager");
+                const auto prepared = manager.prepare_open(1, std::move(intent));
+                require(prepared.owner &&
+                            prepared.owner->status ==
+                                mt5bridge::dispatch::OwnerStepStatus::prepared,
+                        "prepared first process did not persist OPEN intent");
+                require(manager.state() && manager.state()->open_volume == 0,
+                        "prepared first process fabricated exposure");
+                require_order_calls(module, 0);
+                Py_DECREF(module);
+                Py_FinalizeEx();
+                return 0;
+            }
             mt5bridge::dispatch::ManagedTradeOwner owner(
                 initial, operation_account, journal, admission, backend, account_probe,
                 lease, transport);
@@ -496,6 +531,58 @@ int run_open_restart_phase(const std::filesystem::path &root,
                     initial, operation_account, recovery);
             require(replayed && replayed->open_volume == 1,
                     "third-process replay duplicated or lost OPEN exposure");
+            mt5bridge::DispatchAdmissionBarrier admission(
+                journal, coordinator.graph(), {});
+            mt5bridge::dispatch::PrivateTradeManager manager(
+                initial, operation_account, journal, admission, backend, account_probe,
+                lease, transport, coordinator, collection);
+            require(manager.start().status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::ready &&
+                        manager.state() && manager.state()->open_volume == 1,
+                    "third-process manager did not restore settled exposure");
+            mt5bridge::DispatchAdmissionRequest resend;
+            resend.current_account = operation_account;
+            require(manager.execute_pending(resend).status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::blocked,
+                    "third-process manager reopened settled dispatch");
+            check_order_calls(module);
+        } else if (scenario == "prepared") {
+            const auto first = coordinator.refresh(collection);
+            const auto second = coordinator.refresh(collection);
+            require(first.sample && second.sample,
+                    "prepared second process did not collect fresh baseline");
+            mt5bridge::EnvironmentConsistencyRequest consistency_request;
+            consistency_request.history_orders_window = window;
+            consistency_request.history_deals_window = window;
+            const auto consistency = mt5bridge::EnvironmentConsistencyPolicy::evaluate(
+                {*first.sample, *second.sample}, consistency_request);
+            require(consistency.consistent() && consistency.proof,
+                    "prepared second process did not establish environment proof");
+            mt5bridge::DispatchAdmissionBarrier admission(
+                journal, coordinator.graph(), {});
+            mt5bridge::dispatch::PrivateTradeManager manager(
+                initial, operation_account, journal, admission, backend, account_probe,
+                lease, transport, coordinator, collection);
+            require(manager.start().status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::ready &&
+                        manager.state() &&
+                        manager.state()->slice.state ==
+                            mt5bridge::managed_trade::OperationState::dispatching,
+                    "prepared second process did not restore OPEN intent");
+            mt5bridge::DispatchAdmissionRequest ready;
+            ready.current_account = operation_account;
+            ready.environment_proof = consistency.proof;
+            const auto executed = manager.execute_pending(ready);
+            require(executed.owner &&
+                        executed.owner->status ==
+                            mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation,
+                    "prepared second process did not execute OPEN");
+            const auto settled = manager.reconcile();
+            require(settled.owner &&
+                        settled.owner->status ==
+                            mt5bridge::dispatch::OwnerStepStatus::completed &&
+                        manager.state() && manager.state()->open_volume == 1,
+                    "prepared second process did not reconcile OPEN");
             check_order_calls(module);
         } else {
             mt5bridge::dispatch::PrivateOwnerLoop loop(
@@ -529,54 +616,69 @@ int run_open_restart_phase(const std::filesystem::path &root,
 
             mt5bridge::DispatchAdmissionBarrier admission(
                 journal, coordinator.graph(), {});
-            mt5bridge::dispatch::ManagedTradeOwner owner(
-                *recovered, operation_account, journal, admission, backend, account_probe,
-                lease, transport);
-            mt5bridge::OperationReconciliationWorker worker(
-                journal, {operation_account, 7, 1}, coordinator, collection);
-            const auto settled = owner.settle_reconciliation(worker);
+            mt5bridge::dispatch::PrivateTradeManager manager(
+                initial, operation_account, journal, admission, backend, account_probe,
+                lease, transport, coordinator, collection);
+            require(manager.start().status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::ready &&
+                        manager.state() && manager.state()->open_volume == 0,
+                    "private manager did not reconstruct unresolved OPEN");
+            mt5bridge::DispatchAdmissionRequest resend;
+            resend.current_account = operation_account;
+            require(manager.execute_pending(resend).status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::blocked,
+                    "restarted manager tried to reopen durable dispatch");
+            const auto settled = manager.reconcile();
+            require(settled.owner.has_value(),
+                    "restarted manager did not return reconciliation outcome");
             if (scenario == "missing" || scenario == "wrong_ticket" ||
                 scenario == "wrong_order" || scenario == "wrong_account" ||
                 scenario == "incomplete") {
-                require(settled.status != mt5bridge::dispatch::OwnerStepStatus::completed &&
-                            owner.state().open_volume == 0,
+                require(settled.owner->status !=
+                            mt5bridge::dispatch::OwnerStepStatus::completed &&
+                            manager.state() && manager.state()->open_volume == 0,
                         "foreign or incomplete evidence settled OPEN");
                 const auto unchanged = journal.find({operation_account, 7, 1});
                 require(unchanged && unchanged->settled_volume == 0,
                         "negative evidence changed durable settled volume");
             } else if (scenario == "delayed") {
-                require(settled.status ==
+                require(settled.owner->status ==
                             mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
-                            owner.state().open_volume == 0,
+                            manager.state() && manager.state()->open_volume == 0,
                         "missing deal did not keep restarted OPEN unresolved");
-                const auto later = owner.settle_reconciliation(worker);
-                require(later.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
-                            later.record && later.record->settled_volume == 1 &&
-                            owner.state().open_volume == 1,
+                const auto later = manager.reconcile();
+                require(later.owner &&
+                            later.owner->status ==
+                                mt5bridge::dispatch::OwnerStepStatus::completed &&
+                            later.owner->record &&
+                            later.owner->record->settled_volume == 1 &&
+                            manager.state() && manager.state()->open_volume == 1,
                         "late matching deal did not settle OPEN");
             } else if (scenario == "partial") {
-                require(settled.status ==
+                require(settled.owner->status ==
                             mt5bridge::dispatch::OwnerStepStatus::partially_filled &&
-                            settled.record && settled.record->settled_volume == 1 &&
-                            owner.state().open_volume == 1 &&
-                            owner.state().pending_remainder_volume == 1,
+                            settled.owner->record &&
+                            settled.owner->record->settled_volume == 1 &&
+                            manager.state() && manager.state()->open_volume == 1 &&
+                            manager.state()->pending_remainder_volume == 1,
                         "partial fill did not preserve confirmed volume and remainder");
-                mt5bridge::OperationReconciliationWorker later_worker(
-                    journal, {operation_account, 7, 1}, coordinator, collection);
-                const auto later = owner.settle_pending_remainder(later_worker);
-                require(later.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
-                            later.record && later.record->settled_volume == 2 &&
-                            owner.state().open_volume == 2 &&
-                            owner.state().pending_remainder_volume == 0,
+                const auto later = manager.reconcile();
+                require(later.owner &&
+                            later.owner->status ==
+                                mt5bridge::dispatch::OwnerStepStatus::completed &&
+                            later.owner->record &&
+                            later.owner->record->settled_volume == 2 &&
+                            manager.state() && manager.state()->open_volume == 2 &&
+                            manager.state()->pending_remainder_volume == 0,
                         "late fill did not apply only the cumulative delta");
             } else {
-                require(settled.status ==
+                require(settled.owner->status ==
                         mt5bridge::dispatch::OwnerStepStatus::completed &&
-                        settled.record &&
-                        settled.record->operation_state ==
+                        settled.owner->record &&
+                        settled.owner->record->operation_state ==
                             mt5bridge::OperationState::filled &&
-                        owner.state().open_volume == 1 &&
-                        owner.state().pending_remainder_volume == 0,
+                        manager.state() && manager.state()->open_volume == 1 &&
+                        manager.state()->pending_remainder_volume == 0,
                     "open-restart matching deal did not settle OPEN");
             }
             check_order_calls(module);
@@ -600,6 +702,10 @@ int run_open_restart(const char *executable, const char *scenario = "immediate")
     set_environment("MT5BRIDGE_ORDER_SEND_MODE", "success");
     set_environment("MT5BRIDGE_EXPECT_EXISTING_COUNT", "0");
     set_environment("MT5BRIDGE_RESTART_SCENARIO", scenario);
+    if (std::string(scenario) == "prepared") {
+        std::ofstream initial_count(count_file, std::ios::trunc);
+        initial_count << "0";
+    }
     const auto root_text = test_root.path().string();
     const std::string first_arg = "--open-restart-child=first=" + root_text;
     const std::string second_arg = "--open-restart-child=second=" + root_text;
@@ -746,37 +852,64 @@ int main(int argc, char **argv) {
         require(mt5bridge::managed_trade::ManagedTradeState::initialize(
                     &initial, mt5bridge::managed_trade::TradeId{7}, 1, 1, 2),
                 "managed state initialization failed");
-        mt5bridge::dispatch::ManagedTradeOwner owner(
-            initial, operation_account, journal, admission, backend, account_probe, lease,
-            transport);
+        mt5bridge::dispatch::PrivateTradeManager manager(
+            initial, operation_account, journal, admission, backend, account_probe,
+            lease, transport, coordinator, collection);
+        require(manager.state() == nullptr &&
+                    manager.start().status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::ready,
+                "private manager did not complete durable startup");
         const std::string request =
             R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
         mt5bridge::dispatch::ManagedTradeIntent intent{
             std::vector<std::uint8_t>(request.begin(), request.end()),
             descriptor(operation_account, coordinator.capture_baseline(), window)};
-        const auto prepared = owner.prepare_open(1, std::move(intent));
-        require(prepared.status == mt5bridge::dispatch::OwnerStepStatus::prepared,
+        const auto prepared = manager.prepare_open(1, std::move(intent));
+        require(prepared.owner &&
+                    prepared.owner->status ==
+                        mt5bridge::dispatch::OwnerStepStatus::prepared,
                 "owner did not durably prepare OPEN");
+        manager.shutdown();
+        require(manager.start().status ==
+                    mt5bridge::dispatch::PrivateTradeManagerStatus::ready &&
+                    manager.state() &&
+                    manager.state()->slice.state ==
+                        mt5bridge::managed_trade::OperationState::dispatching,
+                "manager did not restore the pre-dispatch OPEN intent");
         mt5bridge::DispatchAdmissionRequest ready;
         ready.current_account = operation_account;
         ready.environment_proof = consistency.proof;
-        const auto executed = owner.execute_pending(ready);
-        require(executed.status ==
+        const auto executed = manager.execute_pending(ready);
+        require(executed.owner && executed.owner->status ==
                     mt5bridge::dispatch::OwnerStepStatus::awaiting_reconciliation &&
-                    executed.execution_status ==
+                    executed.owner->execution_status ==
                         mt5bridge::runtime::OneShotExecutionStatus::completed &&
-                    executed.retcode == 10009,
+                    executed.owner->retcode == 10009,
                 "real Python transport did not complete the durable OPEN");
-        require(executed.record.has_value(),
+        require(executed.owner->record.has_value(),
                 "real Python transport did not return a durable record");
-        require_bindings(*executed.record);
+        require_bindings(*executed.owner->record);
+        require(manager.execute_pending(ready).status ==
+                    mt5bridge::dispatch::PrivateTradeManagerStatus::blocked,
+                "manager reopened a durable dispatch barrier");
 
-        mt5bridge::OperationReconciliationWorker worker(
-            journal, *executed.key, coordinator, collection);
-        const auto settled = owner.settle_reconciliation(worker);
-        require(settled.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
-                    owner.state().open_volume == 1,
+        const auto settled = manager.reconcile();
+        require(settled.owner &&
+                    settled.owner->status ==
+                        mt5bridge::dispatch::OwnerStepStatus::completed &&
+                    manager.state() && manager.state()->open_volume == 1,
                 "authoritative history evidence did not settle OPEN");
+        mt5bridge::dispatch::ManagedTradeIntent another_intent{
+            std::vector<std::uint8_t>(request.begin(), request.end()),
+            descriptor(operation_account, coordinator.capture_baseline(), window)};
+        require(manager.prepare_open(1, std::move(another_intent)).status ==
+                    mt5bridge::dispatch::PrivateTradeManagerStatus::invalid_state,
+                "single-slice manager admitted a second OPEN");
+        manager.shutdown();
+        require(manager.state() == nullptr &&
+                    manager.execute_pending(ready).status ==
+                        mt5bridge::dispatch::PrivateTradeManagerStatus::stopped,
+                "shutdown retained an executable owner");
         check_order_calls(module);
 
         mt5bridge::OperationJournal recovered_journal(store);

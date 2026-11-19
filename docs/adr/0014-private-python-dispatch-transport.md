@@ -37,6 +37,16 @@ For one `OperationRecord` it performs:
    and `deal` tickets for the durable descriptor's unknown identities; and
 7. JSON serialization of the complete result as opaque `raw_result` bytes.
 
+The request-shape gate runs after the durable dispatch barrier has already
+advanced the operation to the submitting edge. A locally invalid JSON shape is
+therefore an unresolved, non-resendable transport failure: it must not grant an
+automatic resend permission. This is distinct from a broker rejection, which
+returns durable broker evidence and may become terminal, and from an uncertain
+transport failure, which follows the same observation-only recovery path without
+claiming that the broker did or did not receive the request. Typed managed
+symbol, side, and volume authority remains outside this adapter and belongs to
+the future owner factory.
+
 The adapter maps an unknown active/history-order predicate to the validated
 `order` ticket and an unknown history-deal predicate to the validated `deal`
 ticket. A position ticket is not present in `MqlTradeResult`; durable unknown

@@ -69,6 +69,9 @@ struct OwnerStepResult {
 /// receives that permit. Broker result payloads remain owned by the journal;
 /// the owner does not accept caller-supplied settlement evidence. Authoritative
 /// managed settlement is delegated to provenance-bearing reconciliation.
+/// Each instance captures the lease generation it acquired; a restarted owner
+/// captures the new generation and is never compared against the historical
+/// broker-dispatch token stored in the record.
 class ManagedTradeOwner {
 public:
     /// \brief Binds one managed state to the dispatch/reconciliation seams.
@@ -252,6 +255,19 @@ private:
         const OperationReconciliationWorker &worker, const OperationKey &key,
         const OperationRecord &record) const;
 
+    /// \brief Verifies the account fence for this owner's reconciliation session.
+    /// \return True only while this owner still holds its original lease generation.
+    bool lease_held() const;
+
+    /// \brief Commits one settlement transition under the session fence.
+    /// \param key Operation whose durable frontier is being advanced.
+    /// \param target_state Settled logical state to persist.
+    /// \param settled_volume Authoritative cumulative managed volume.
+    /// \return The fenced durable transition, or empty when ownership moved.
+    std::optional<JournalMutationResult> fenced_settlement_transition(
+        const OperationKey &key, OperationState target_state,
+        std::uint64_t settled_volume) const;
+
     /// \brief Validates the authoritative history-deal attribution context.
     /// \param cycle Confirmed observation cycle carrying the graph sample.
     /// \param worker Worker that produced the cycle and its baseline.
@@ -293,6 +309,7 @@ private:
     runtime::CurrentAccountProbe &account_probe_;
     const SingleWriterLease &lease_;
     runtime::DispatchTransport &transport_;
+    std::uint64_t session_fencing_token_ = 0;
 };
 
 } // namespace mt5bridge::dispatch

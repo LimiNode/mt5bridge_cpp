@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -99,6 +100,9 @@ public:
     /// \param token Fencing token previously acquired for the account.
     /// \param publication Atomic durable publication callback.
     /// \return False when this lease does not authorize the callback.
+    /// \note Calls through one lease object are serialized in-process, including
+    /// nested callbacks from the owning thread. B3D verification composes B3B
+    /// verification under the same capability; nested calls recheck account/token.
     bool with_fencing_capability(
         const AccountKey &account, std::uint64_t token,
         const std::function<void()> &publication) const override;
@@ -120,6 +124,7 @@ public:
     const AccountKey &account() const { return account_; }
 
 private:
+    friend struct WindowsSingleWriterLeaseTestAccess;
     struct State;
 
     std::filesystem::path directory_;
@@ -128,6 +133,7 @@ private:
     bool ready_ = false;
     std::uint64_t token_ = 0;
     std::string last_error_;
+    mutable std::recursive_mutex capability_mutex_;
 };
 
 } // namespace mt5bridge

@@ -97,12 +97,21 @@ void clear_environment(const char *name) {
 #endif
 }
 
-enum class NegativeMode { account_mismatch, none, exception, malformed, market_closed };
+enum class NegativeMode {
+    account_mismatch,
+    contradictory_request,
+    none,
+    exception,
+    malformed,
+    market_closed
+};
 
 const char *mode_name(NegativeMode mode) {
     switch (mode) {
     case NegativeMode::account_mismatch:
         return "account-mismatch";
+    case NegativeMode::contradictory_request:
+        return "contradictory-request";
     case NegativeMode::none:
         return "none";
     case NegativeMode::exception:
@@ -115,7 +124,7 @@ const char *mode_name(NegativeMode mode) {
     return "unknown";
 }
 
-void run_case(NegativeMode mode) {
+void run_case(NegativeMode mode, std::uint64_t request_type = 99) {
     TestRoot root((std::string("mt5bridge-python-negative-") + mode_name(mode)).c_str());
     const auto count_file = root.path() / "order-calls.txt";
     const auto operation_account = account();
@@ -124,7 +133,8 @@ void run_case(NegativeMode mode) {
                                       : operation_account;
     set_environment("MT5BRIDGE_CALL_COUNT_FILE", count_file.string());
     set_environment("MT5BRIDGE_ORDER_SEND_MODE",
-                    mode == NegativeMode::account_mismatch
+                    mode == NegativeMode::account_mismatch ||
+                            mode == NegativeMode::contradictory_request
                         ? "success"
                         : (mode == NegativeMode::market_closed ? "market_closed"
                                                                 : mode_name(mode)));
@@ -173,8 +183,16 @@ void run_case(NegativeMode mode) {
         mt5bridge::dispatch::ManagedTradeOwner owner(
             initial, operation_account, journal, admission, backend, account_probe, lease,
             transport);
-        const std::string request =
+        std::string request =
             R"({"action":1,"type":0,"symbol":"EURUSD","volume":1.0})";
+        if (mode == NegativeMode::contradictory_request) {
+            request = request_type == 99
+                          ? std::string(
+                                R"({"action":0,"type":99,"symbol":"EURUSD","volume":1.0})")
+                          : std::string(R"({"action":1,"type":)") +
+                                std::to_string(request_type) +
+                                R"(,"symbol":"EURUSD","volume":1.0})";
+        }
         mt5bridge::dispatch::ManagedTradeIntent intent{
             std::vector<std::uint8_t>(request.begin(), request.end()),
             descriptor(operation_account, coordinator.capture_baseline(), window)};
@@ -200,6 +218,15 @@ void run_case(NegativeMode mode) {
                     "account mismatch was not rejected before dispatch");
             require(call_count.empty(),
                     "account mismatch unexpectedly reached Python order_send");
+        } else if (mode == NegativeMode::contradictory_request) {
+            require(executed.status == mt5bridge::dispatch::OwnerStepStatus::ambiguous &&
+                        executed.execution_status ==
+                            mt5bridge::runtime::OneShotExecutionStatus::transport_failure &&
+                        record->journal_state == mt5bridge::JournalState::reconciling &&
+                        record->operation_state == mt5bridge::OperationState::submitting,
+                    "contradictory request was not rejected before order_send");
+            require(call_count.empty(),
+                    "contradictory request unexpectedly reached Python order_send");
         } else if (mode == NegativeMode::market_closed) {
             require(executed.status == mt5bridge::dispatch::OwnerStepStatus::completed &&
                         executed.retcode == 10018 &&
@@ -237,6 +264,9 @@ void run_case(NegativeMode mode) {
 int main() {
     try {
         run_case(NegativeMode::account_mismatch);
+        run_case(NegativeMode::contradictory_request);
+        for (std::uint64_t pending_type = 2; pending_type <= 5; ++pending_type)
+            run_case(NegativeMode::contradictory_request, pending_type);
         run_case(NegativeMode::none);
         run_case(NegativeMode::exception);
         run_case(NegativeMode::malformed);

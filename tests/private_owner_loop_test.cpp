@@ -77,7 +77,8 @@ private:
 };
 
 mt5bridge::ReconciliationDescriptor descriptor(
-    const mt5bridge::AccountKey &key, std::uint64_t operation_id) {
+    const mt5bridge::AccountKey &key, std::uint64_t operation_id,
+    std::uint64_t trade_id = 7) {
     const auto baseline = mt5bridge::ReconciliationBaseline::restore(
         key, 1, 1, 1, 1, 1, 1);
     require(baseline.has_value(), "test baseline was not valid");
@@ -85,7 +86,7 @@ mt5bridge::ReconciliationDescriptor descriptor(
             *baseline,
             {mt5bridge::require_active_order(7001)},
             mt5bridge::OperationState::filled,
-            7,
+            trade_id,
             operation_id,
             1};
 }
@@ -107,7 +108,7 @@ void prepare_record(mt5bridge::OperationJournal &journal,
                 .accepted(),
             "could not persist dispatch intent");
     require(journal.persist_reconciliation_descriptor(
-                key, descriptor(key.account, key.operation_id))
+                key, descriptor(key.account, key.operation_id, key.trade_id))
                 .accepted(),
             "could not persist recovery descriptor");
     if (dispatching)
@@ -115,6 +116,46 @@ void prepare_record(mt5bridge::OperationJournal &journal,
                                            17)
                     .accepted(),
                 "could not persist dispatch barrier");
+}
+
+void settle_open(mt5bridge::WindowsFileJournalStore &store,
+                 mt5bridge::OperationJournal &journal,
+                 const mt5bridge::OperationKey &key);
+
+void mark_ambiguous(mt5bridge::OperationJournal &journal,
+                    const mt5bridge::OperationKey &key);
+
+void test_account_wide_dispatch_eligibility() {
+    TestRoot root("private-owner-dispatch-eligibility");
+    mt5bridge::WindowsFileJournalStore store(root.path() / "journal");
+    ToggleLease lease(account());
+    mt5bridge::OperationJournal journal(store);
+    const mt5bridge::OperationKey prepared{account(), 7, 1};
+    const mt5bridge::OperationKey unresolved{account(), 8, 1};
+    prepare_record(journal, prepared, false);
+    prepare_record(journal, unresolved, true);
+
+    mt5bridge::dispatch::PrivateOwnerLoop loop(journal, account(), lease);
+    require(loop.start().ready(), "dispatch eligibility owner did not start");
+    require(loop.dispatch_eligibility(prepared).status ==
+                mt5bridge::dispatch::PrivateOwnerLoopDispatchStatus::blocked,
+            "unresolved same-account operation did not block dispatch");
+
+    settle_open(store, journal, unresolved);
+    require(loop.dispatch_eligibility(prepared).accepted(),
+            "settled same-account operation kept blocking dispatch");
+
+    const mt5bridge::AccountKey foreign{"Other-Server", 99};
+    prepare_record(journal, {foreign, 9, 1}, true);
+    require(loop.dispatch_eligibility(prepared).accepted(),
+            "foreign-account operation blocked dispatch");
+
+    const mt5bridge::OperationKey ambiguous{account(), 8, 2};
+    prepare_record(journal, ambiguous, true);
+    mark_ambiguous(journal, ambiguous);
+    require(loop.dispatch_eligibility(prepared).status ==
+                mt5bridge::dispatch::PrivateOwnerLoopDispatchStatus::blocked,
+            "ambiguous same-account exposure did not block dispatch");
 }
 
 void settle_open(mt5bridge::WindowsFileJournalStore &store,
@@ -445,6 +486,7 @@ int main() {
         test_terminal_open_is_replayed_without_blocking();
         test_unresolved_open_is_reconcile_only_and_blocks_intent();
         test_pre_dispatch_resume_remains_admission_gated();
+        test_account_wide_dispatch_eligibility();
         test_account_isolation();
         test_ambiguous_exposure_remains_blocked_after_restart();
         test_multiple_pending_operations_make_progress();

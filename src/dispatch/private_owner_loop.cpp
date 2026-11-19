@@ -96,6 +96,41 @@ PrivateOwnerLoopIntentResult PrivateOwnerLoop::intent_admission(
     return {PrivateOwnerLoopIntentStatus::accepted};
 }
 
+PrivateOwnerLoopDispatchResult PrivateOwnerLoop::dispatch_eligibility(
+    const OperationKey &key) {
+    if (!ready())
+        return {PrivateOwnerLoopDispatchStatus::not_ready};
+    if (!key.valid() || key.account != account_)
+        return {PrivateOwnerLoopDispatchStatus::account_mismatch};
+
+    const auto recovered = refresh_recovery();
+    if (recovered.status != JournalMutationStatus::accepted || !lease_held())
+        return {PrivateOwnerLoopDispatchStatus::not_ready};
+
+    const RecoveredOperation *requested = nullptr;
+    for (const auto &operation : recovered.operations) {
+        if (operation.record.key.account != account_)
+            continue;
+        if (operation.record.key == key) {
+            requested = &operation;
+            continue;
+        }
+        if (blocks_scope(operation))
+            return {PrivateOwnerLoopDispatchStatus::blocked};
+    }
+    if (!requested || requested->action != OperationRecoveryAction::resume_pre_dispatch)
+        return {requested ? PrivateOwnerLoopDispatchStatus::blocked
+                          : PrivateOwnerLoopDispatchStatus::operation_missing};
+    return {PrivateOwnerLoopDispatchStatus::accepted};
+}
+
+bool PrivateOwnerLoop::with_dispatch_capability(
+    const std::function<void()> &publication) const {
+    if (!ready() || !publication || !fencing_token_)
+        return false;
+    return lease_.with_fencing_capability(account_, *fencing_token_, publication);
+}
+
 bool PrivateOwnerLoop::ready() const {
     return started_ && lease_held();
 }

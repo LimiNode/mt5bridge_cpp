@@ -114,6 +114,25 @@ bool read_double(PyObject *object, const char *name) {
     return true;
 }
 
+/// \brief Validates one finite, strictly positive broker volume.
+/// \param object Borrowed Python request mapping.
+/// \param name Request field name.
+/// \return True when the field is a positive finite number.
+bool read_positive_double(PyObject *object, const char *name) {
+    PyRef item(field(object, name));
+    if (!item || item.get() == Py_None ||
+        (!PyFloat_Check(item.get()) && !PyLong_Check(item.get()))) {
+        PyErr_Clear();
+        return false;
+    }
+    const double converted = PyFloat_AsDouble(item.get());
+    if (PyErr_Occurred() || !std::isfinite(converted) || converted <= 0.0) {
+        PyErr_Clear();
+        return false;
+    }
+    return true;
+}
+
 /// \brief Validates one required UTF-8 text field.
 /// \param object Borrowed Python result object.
 /// \param name Field name to read.
@@ -218,6 +237,40 @@ bool validate_request_echo(PyObject *result) {
         return false;
     PyRef normalized(json_compatible(request.get()));
     return normalized && PyDict_Check(normalized.get());
+}
+
+/// \brief Validates the bounded broker-request shape before `order_send`.
+/// \param request Decoded Python request mapping.
+/// \param record Durable operation carrying the managed contract.
+/// \return True for a bounded request shape.
+/// \note This is deliberately not a managed symbol/side authority. That
+/// binding belongs to the future owner factory; this gate rejects malformed,
+/// non-DEAL, and close-only OPEN payloads before any broker call.
+bool validate_request_shape(PyObject *request, const OperationRecord &record) {
+    if (!request || !PyDict_Check(request))
+        return false;
+
+    std::uint64_t action = 0;
+    std::uint64_t type = 0;
+    if (!read_uint64(request, "action", &action) ||
+        !read_uint64(request, "type", &type) || type > 5 ||
+        !read_positive_double(request, "volume") || !read_text(request, "symbol"))
+        return false;
+
+    if (record.operation_kind == OperationKind::open &&
+        (action != 1 || (type != 0 && type != 1)))
+        return false;
+
+    PyRef symbol(field(request, "symbol"));
+    const char *symbol_text = symbol ? PyUnicode_AsUTF8(symbol.get()) : nullptr;
+    if (!symbol_text || *symbol_text == '\0')
+        return false;
+
+    // A private OPEN must not smuggle a position-targeted close/reversal.
+    if (record.operation_kind == OperationKind::open &&
+        (field(request, "position") || field(request, "position_by")))
+        return false;
+    return true;
 }
 
 /// \brief Validates the durable subset of one `MqlTradeResult`.
@@ -386,6 +439,8 @@ BackendCallResult Mt5PythonDispatchTransport::submit_once(const OperationRecord 
             reinterpret_cast<const char *>(record.request_payload.data()),
             static_cast<Py_ssize_t>(record.request_payload.size())));
         if (!request || !PyDict_Check(request.get()))
+            return transport_failure();
+        if (!validate_request_shape(request.get(), record))
             return transport_failure();
 
         PyRef order_send(PyObject_GetAttrString(reinterpret_cast<PyObject *>(mt5_), "order_send"));

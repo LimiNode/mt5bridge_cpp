@@ -18,6 +18,9 @@
 #include <mt5bridge/dispatch/file_broker_reversal_store.hpp>
 
 #include "file_store_support.hpp"
+#if defined(MT5BRIDGE_LEASE_TEST_HOOKS)
+#include "file_journal_store_test_support.hpp"
+#endif
 
 namespace mt5bridge {
 namespace {
@@ -723,6 +726,9 @@ void set_error(std::string &target, std::string value) { target = std::move(valu
 #if defined(_WIN32)
 struct WindowsSingleWriterLease::State {
     HANDLE lock = INVALID_HANDLE_VALUE;
+#if defined(MT5BRIDGE_LEASE_TEST_HOOKS)
+    std::function<void()> contention_hook;
+#endif
 
     ~State() {
         if (lock != INVALID_HANDLE_VALUE)
@@ -731,6 +737,19 @@ struct WindowsSingleWriterLease::State {
 };
 #else
 struct WindowsSingleWriterLease::State {};
+#endif
+
+#if defined(MT5BRIDGE_LEASE_TEST_HOOKS)
+void WindowsSingleWriterLeaseTestAccess::set_contention_hook(
+    WindowsSingleWriterLease &lease, std::function<void()> hook) {
+#if defined(_WIN32)
+    if (lease.state_)
+        lease.state_->contention_hook = std::move(hook);
+#else
+    (void)lease;
+    (void)hook;
+#endif
+}
 #endif
 
 WindowsFileJournalStore::WindowsFileJournalStore(std::filesystem::path directory)
@@ -839,6 +858,14 @@ std::optional<std::uint64_t> WindowsSingleWriterLease::held_fencing_token(
 bool WindowsSingleWriterLease::with_fencing_capability(
     const AccountKey &account, std::uint64_t token,
     const std::function<void()> &publication) const {
+    std::unique_lock<std::recursive_mutex> guard(capability_mutex_, std::defer_lock);
+    if (!guard.try_lock()) {
+#if defined(MT5BRIDGE_LEASE_TEST_HOOKS) && defined(_WIN32)
+        if (state_ && state_->contention_hook)
+            state_->contention_hook();
+#endif
+        guard.lock();
+    }
     if (!ready_ || token_ == 0 || token != token_ || account != account_ || !publication)
         return false;
     publication();

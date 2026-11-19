@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
 
@@ -84,6 +85,29 @@ struct PrivateOwnerLoopIntentResult {
     }
 };
 
+/// \enum PrivateOwnerLoopDispatchStatus
+/// \brief Reports account-wide eligibility for one recovered pre-dispatch record.
+enum class PrivateOwnerLoopDispatchStatus {
+    accepted,         ///< The requested key is the only dispatchable account record.
+    not_ready,        ///< Startup has not completed or the lease was lost.
+    account_mismatch, ///< The key belongs to another account.
+    operation_missing, ///< The key was not found in complete recovery.
+    blocked,          ///< Another record or ambiguous exposure blocks dispatch.
+};
+
+/// \struct PrivateOwnerLoopDispatchResult
+/// \brief Carries the account-wide dispatch eligibility decision.
+struct PrivateOwnerLoopDispatchResult {
+    PrivateOwnerLoopDispatchStatus status =
+        PrivateOwnerLoopDispatchStatus::not_ready;
+
+    /// \brief Tests whether the caller may invoke the normal admission barrier.
+    /// \return True only when no other account record can block dispatch.
+    bool accepted() const {
+        return status == PrivateOwnerLoopDispatchStatus::accepted;
+    }
+};
+
 /// \class PrivateOwnerLoop
 /// \brief Coordinates account lease, durable recovery, and explicit owner steps.
 ///
@@ -91,6 +115,9 @@ struct PrivateOwnerLoopIntentResult {
 /// transport or Python; reconcile_only is handed to the caller's observation
 /// worker. Every fresh step rescans the durable journal, so a worker's
 /// terminal transition is visible without a second scheduler or event bus.
+/// Account-wide dispatch must execute its scan and barrier through
+/// `with_dispatch_capability`; the lease capability serializes that sequence
+/// for supported owners.
 class PrivateOwnerLoop final {
 public:
     /// \brief Binds one account to one durable journal and lease.
@@ -116,6 +143,18 @@ public:
     /// \param key Account-scoped operation identity to prepare.
     /// \return Fail-closed admission decision; no durable record is created.
     PrivateOwnerLoopIntentResult intent_admission(const OperationKey &key);
+
+    /// \brief Checks dispatch eligibility across the complete account journal.
+    /// \param key Recovered pre-dispatch operation that requests a send.
+    /// \return Fail-closed account-wide decision; never creates a permit.
+    PrivateOwnerLoopDispatchResult dispatch_eligibility(const OperationKey &key);
+
+    /// \brief Serializes one account-wide admission sequence under the lease.
+    /// \param publication Complete eligibility, barrier, and owner callback.
+    /// \return False when the owner lost its lease generation before entry.
+    /// \note The callback must perform the final durable admission while this
+    /// capability is held; a scan followed by an unrelated CAS is insufficient.
+    bool with_dispatch_capability(const std::function<void()> &publication) const;
 
     /// \brief Tests whether startup completed and the lease remains held.
     /// \return True while normal caller-driven steps may proceed.

@@ -15,6 +15,12 @@ backend. No second journal, scheduler, request framework or observation store
 is needed. Public asynchronous TradeManager, production CLOSE/INOUT and B3E
 ownership activation remain separate.
 
+`SYMBOL_TRADE_EXECUTION_MARKET` is a temporary restriction of the first slice,
+not a permanent MT5Bridge execution-mode restriction. Do not broaden PR #85:
+complete its native validation/tests and independent review first. The approved
+follow-up order is collector, execution-mode expansion, serialization/binding,
+then manager integration; each remains independently reviewed.
+
 ## Existing seams and gaps
 
 - `src/dispatch/private_trade_manager.hpp` composes one account, TradeId and
@@ -155,18 +161,94 @@ bindings; it never regenerates request bytes or resends an old operation.
    pure numeric/policy helper using the existing exact quantity primitives.
    Supplied metadata remains explicitly unauthenticated; no manager wiring,
    request serialization or broker transport is enabled at this stage.
-2. **Runtime source and durable binding:** add the narrow authenticated
-   account/symbol collector and versioned journal binding/CAS rules. Test
-   changed symbol/account/quantity fields and legacy/unknown-version restart
-   rejection. No live broker is used to establish these contracts.
-3. **Private manager integration:** consume only the factory-admitted value
+2. **Runtime-owned capability collector:** reliably collect account/symbol
+   identity, permissions, reported execution mode, filling capabilities and
+   volume limits with required-field completeness, account/lease continuity
+   and freshness checks. Missing, changed or stale values fail closed. Capture
+   the reported execution mode without interpreting Market as the only valid
+   MT5 mode; collection is not request-policy selection or dispatch admission.
+3. **Execution-mode expansion:** after the collector, implement and review
+   INSTANT, then REQUEST, then EXCHANGE policy slices, including correct
+   mode-specific price, deviation and filling rules and RETURN where allowed.
+   Each newly supported mode needs native positive/negative policy tests and
+   authenticated quote inputs where required; other modes remain rejected.
+   Do this before serializer/binding and manager integration, not by enabling
+   another branch in an already wired trading pipeline.
+4. **Canonical request serialization and immutable journal binding:** encode
+   all supported mode-specific policies into the same deterministic request
+   and versioned operation-journal tuple. Specify immutable CAS comparisons,
+   bounded/unknown-version decoding and legacy/prepared/post-barrier replay.
+   Test actual Python decoding and tampering with account, symbol, quantity,
+   execution mode, price, deviation and filling; no legacy authority upgrade.
+5. **Private manager integration:** consume only the factory-admitted value
    on the typed path, revalidate before the existing barrier and exercise the
-   real Python decoder plus fake terminal. Keep the old raw seam internal;
-   it must not be an alternate entry point into typed authority.
+   existing dispatch/reconciliation pipeline with fake-Python end-to-end and
+   file-store restart tests. Keep the old raw seam internal; it must not be an
+   alternate entry point into typed authority.
 
 Each slice needs independent review before the next expands its trust boundary.
 This Draft implements only slice 1 as described below; the source producer,
 canonical request serializer and versioned binding do not yet exist.
+
+## Extensible execution-policy model (design only)
+
+Keep these responsibilities separate; none requires another journal, broker
+backend, class hierarchy or general policy framework:
+
+- **Collected facts:** runtime-owned account/symbol capabilities retain the
+  reported execution mode and filling flags, exact quantity domain, limits,
+  source identity and freshness/lease scope. An unknown numeric mode must
+  never become Market by default. A capability snapshot alone grants neither
+  ownership nor permission to send.
+- **Mode-specific policy:** the future private typed policy is a tagged value
+  with distinct Market, Instant, Request and Exchange alternatives, not a
+  Market flag plus unrelated optional request fields. Bind its tag to the
+  collector's reported mode, not a caller attempt to change the symbol's
+  execution mode. Keep filling explicitly requested and validated; reject
+  irrelevant/missing fields rather than silently ignoring or inventing them.
+  Share account/symbol and exact volume checks across alternatives.
+- **Price/deviation contract:** Instant and Request must establish the correct
+  side-specific price from authenticated, sufficiently fresh quote evidence,
+  its supported price/tick domain, and explicit bounded deviation in points.
+  Explicit zero deviation is not a missing policy. For Request, a last-tick
+  snapshot is not evidence of a dealer-accepted quote; requote/price-change
+  outcomes do not authorize resending an operation past the durable barrier.
+  Specify Exchange's price/deviation requirements independently for the
+  supported DEAL policy; do not borrow either Market's omission rules or
+  Instant/Request assumptions. Quote collection uses the same runtime-owned
+  source/freshness boundary, never a caller-authored price proof. No silent price
+  rounding, stale-quote fallback or silent execution-mode substitution.
+- **Filling compatibility:** evaluate execution mode and requested filling
+  using the MT5 per-mode compatibility rules, not a universal Market mask
+  test. In particular, ORDER_FILLING enum values are not SYMBOL_FILLING bits,
+  RETURN has no corresponding symbol bit, and RETURN remains forbidden for
+  Market execution. Instant/Request do not inherit Market's symbol-flag gate;
+  test their FOK/IOC/RETURN rules separately against the upstream table.
+  Exchange FOK/IOC require their symbol flags; RETURN also needs reviewed
+  residual-order/partial-fill lifecycle handling, not just enum admission.
+  BOC and pending orders remain outside typed
+  managed market-order OPEN even after execution-mode expansion.
+- **Immutable hand-off:** after policy expansion, the serializer and durable
+  binding retain the execution tag and all meaningful mode-specific fields
+  together with source identity, account/symbol, side, exact quantity and
+  canonical bytes. Unknown/inconsistent tags fail closed; a capability change
+  blocks before the barrier, never rewrites or downgrades a prepared policy.
+  The manager consumes this one binding through the existing admission and
+  one-shot path; it does not implement a separate pipeline per execution mode.
+
+The current `ManagedOpenFilling` and Market-only `supported_policy()` are
+slice-local private validation details, not an exhaustive public policy model
+or a durable encoding. Their extension belongs to slice 3, before any typed
+request is serialized, journaled or wired. PR #85 adds no new execution tag,
+price/deviation fields, RETURN handling or mode implementation.
+
+Mode expansion must use the upstream
+[execution/filling compatibility rules](https://www.mql5.com/en/docs/constants/tradingconstants/orderproperties#enum_order_type_filling)
+and [trade-request field contract](https://www.mql5.com/en/docs/constants/structures/mqltraderequest)
+as implementation references and pin the chosen interpretation in tests.
+Across every slice retain fail-closed admission, exact volume mapping,
+pre-barrier revalidation and post-barrier no-blind-resend semantics. Production
+CLOSE/INOUT and ownership activation still require separate authorization.
 
 ## Implemented first validation slice
 
@@ -183,7 +265,8 @@ opening semantics, change exposure or manufacture a dispatch permit.
 - Supplied account server/login, symbol account scope and exact symbol name
   must match. Required known-field bits and both account trading permissions
   are checked. This is consistency checking, not authenticated collection.
-- Only `SYMBOL_TRADE_EXECUTION_MARKET` is supported. FOK/IOC use their distinct
+- In this first slice only `SYMBOL_TRADE_EXECUTION_MARKET` is supported. This is
+  temporary, not the final bridge policy. FOK/IOC use their distinct
   `SYMBOL_FILLING_*` bits, not `ORDER_FILLING_*` enum values. Missing/unknown
   policy, disabled/close-only or incompatible directional trade mode, absent
   market-order support, RETURN/BOC and all other execution modes are rejected.

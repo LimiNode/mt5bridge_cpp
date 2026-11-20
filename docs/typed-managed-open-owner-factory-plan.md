@@ -2,9 +2,11 @@
 
 ## Status and scope
 
-Draft follow-up to merged PR #84. This document is a plan, not an implemented
-factory, a new dispatch permission, or evidence of live-terminal readiness.
-It changes no production code or durable format.
+Draft follow-up to merged PR #84: an implementation plan plus the first
+Python-free numeric/policy validation slice. The owner factory, runtime source
+authority, request serialization and durable binding are not implemented.
+This does not grant dispatch permission or establish live-terminal readiness;
+no existing production path or durable format changes.
 
 The next implementation should replace caller-authored OPEN JSON at the private
 manager boundary with a typed intent and a factory-owned, immutable request.
@@ -149,10 +151,10 @@ bindings; it never regenerates request bytes or resends an old operation.
 
 ## Reviewable implementation slices
 
-1. **Quantity and policy admission, Python-free:** a private typed intent and
-   pure validation/serialization helper using the existing exact quantity
-   primitives. Test source metadata remains explicitly unauthenticated; no
-   manager wiring or broker transport is enabled at this stage.
+1. **Quantity and policy validation, Python-free:** a private typed intent and
+   pure numeric/policy helper using the existing exact quantity primitives.
+   Supplied metadata remains explicitly unauthenticated; no manager wiring,
+   request serialization or broker transport is enabled at this stage.
 2. **Runtime source and durable binding:** add the narrow authenticated
    account/symbol collector and versioned journal binding/CAS rules. Test
    changed symbol/account/quantity fields and legacy/unknown-version restart
@@ -163,8 +165,54 @@ bindings; it never regenerates request bytes or resends an old operation.
    it must not be an alternate entry point into typed authority.
 
 Each slice needs independent review before the next expands its trust boundary.
-This Draft proposes the sequence; it does not claim those producers or the
-versioned binding already exist.
+This Draft implements only slice 1 as described below; the source producer,
+canonical request serializer and versioned binding do not yet exist.
+
+## Implemented first validation slice
+
+`src/dispatch/typed_managed_open_validation.{hpp,cpp}` and the private native
+`mt5bridge_typed_managed_open_validation` target have no manager, journal,
+transport or Python dependency. The result is a freely copyable/editable
+`ManagedOpenCandidate`, intentionally not a sealed proof. No production caller
+consumes it. Passing these checks cannot prepare an operation, establish pure
+opening semantics, change exposure or manufacture a dispatch permit.
+
+- Intent contains only AccountKey, bounded UTF-8 symbol, BUY/SELL, positive
+  integer whole lots and explicit FOK/IOC. No pending order type, position,
+  position_by, mutable JSON or fractional logical quantity is representable.
+- Supplied account server/login, symbol account scope and exact symbol name
+  must match. Required known-field bits and both account trading permissions
+  are checked. This is consistency checking, not authenticated collection.
+- Only `SYMBOL_TRADE_EXECUTION_MARKET` is supported. FOK/IOC use their distinct
+  `SYMBOL_FILLING_*` bits, not `ORDER_FILLING_*` enum values. Missing/unknown
+  policy, disabled/close-only or incompatible directional trade mode, absent
+  market-order support, RETURN/BOC and all other execution modes are rejected.
+  No price/deviation or session-open policy is inferred.
+- An explicit supplied scale/step is validated against the raw symbol step by
+  B2. Redundant trailing decimal zeros are removed for a canonical domain.
+  The legacy whole-lot mapper determines requested broker units; B2 checks
+  step-aligned min/max, quantity uniqueness and binary64 round trip. B2's
+  temporary one-unit-per-step map never becomes the owner's logical volume.
+  Non-grid bounds/limits are conservatively rejected as unsupported metadata;
+  this does not claim support for every broker's sizing policy.
+- A known finite zero `volume_limit` means no directional numeric cap. A
+  positive limit requires a supplied complete same-direction positions/orders
+  aggregate (including explicit zero), exact step conversion and checked
+  remaining capacity. The supplied aggregate is an assertion, not evidence
+  of complete coverage, ownership or absence of opposite netting exposure.
+
+Native Release tests cover this pure boundary. They do not replace the planned
+runtime freshness/lease tests, authenticated source collection, complete netting
+guard, immutable file-store restart, actual Python request decoding or no-resend
+integration tests. Those remain prerequisites for wiring, not claims of slice 1.
+
+Reproduce the isolated native Release check without finding/linking Python:
+
+```powershell
+cmake -S . -B build_typed_open_native -G "Visual Studio 17 2022" -A x64 -DMT5BRIDGE_BUILD_RUNTIME=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=ON "-DCMAKE_CXX_FLAGS=/W4 /WX /EHsc"
+cmake --build build_typed_open_native --config Release --target mt5bridge_typed_managed_open_validation_test --parallel 4
+ctest --test-dir build_typed_open_native -C Release -R "^mt5bridge_typed_managed_open_validation$" --output-on-failure
+```
 
 ## Acceptance matrix
 

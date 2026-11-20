@@ -470,9 +470,12 @@ worker process.
    lifetime and a bounded request-shape gate; managed symbol/side/volume
    authority remains with the future owner factory and is not implied here.
    The separate [typed OPEN owner-factory plan](typed-managed-open-owner-factory-plan.md)
-   defines the next review slices: exact quantity/policy admission, runtime-owned
-   source authority with a versioned immutable binding, then private integration
-   before the existing barrier. It is a proposed plan, not an implemented factory
+   defines the review slices. Its first Python-free typed numeric/policy validator
+   now checks supplied account/symbol consistency, whole-lot quantity and Market
+   FOK/IOC compatibility. The candidate grants no authority and is not wired to
+   the manager/runtime. Runtime-owned source collection, canonical request
+   serialization and a versioned immutable journal binding must precede private
+   integration before the existing barrier. This is not an implemented factory
    or a live-trading permission; fractional managed settlement remains separate.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).

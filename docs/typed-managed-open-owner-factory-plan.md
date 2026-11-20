@@ -75,12 +75,18 @@ Selection of that domain from symbol metadata is an implementation gate, not
 an existing authority claim. Equivalent decimal encodings must canonicalize
 identically; ambiguous or unsupported encodings must be rejected.
 
-Given an admitted mapping, the requested logical quantity must be divisible
-by logical-units-per-step. Compute the integer step count and broker numerator
-with checked arithmetic. Validate min/max and any applicable directional
-volume limit in the same exact domain, using fresh positions/orders for an
-aggregate limit. Unknown required limits or incomplete coverage cannot mean
-unlimited capacity. Never clamp or silently round the requested quantity.
+The first wired factory retains the legacy whole-lot logical domain and uses
+`map_managed_logical_units_to_broker_volume()` with the admitted symbol
+normalization. Thus one logical unit remains one lot even when the broker step
+is 0.01 lots. A B2 domain with one unit per step may validate broker quantities,
+but its step count must not become the legacy owner's logical volume. A future
+non-legacy mapping must separately prove divisibility by logical-units-per-step
+and checked numerator arithmetic before it can be wired.
+
+Validate min/max and any applicable directional volume limit in the same exact
+broker domain, using fresh positions/orders for an aggregate limit. Unknown
+required limits or incomplete coverage cannot mean unlimited capacity. Never
+clamp or silently round the requested quantity.
 
 Serialize a deterministic decimal broker volume and validate the value decoded
 by the actual Python request path against the same canonical quantity, using

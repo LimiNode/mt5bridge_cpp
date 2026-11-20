@@ -15,3 +15,10 @@ re-enter the manager from a transport callback. Each manager/journal instance
 still belongs to one caller lane; sharing a lease is not permission to share
 mutable owner state concurrently. Do not hold one account capability while
 acquiring another account's capability.
+
+`typed_managed_open_validation` is a pure numeric/policy check of explicitly
+supplied, unauthenticated metadata. Its candidate is not sealed source evidence,
+ownership, a journal binding, or dispatch permission. Keep it disconnected from
+the manager/runtime until the runtime-owned collector and versioned immutable
+binding have independent review. Its quantity adapter retains whole-lot logical
+units and reuses B2 exact conversion; a B2 step count must not enter owner state.

@@ -116,6 +116,13 @@ target_link_libraries(mt5bridge_private_trade_manager PRIVATE
                       mt5bridge::private_owner_loop)
 add_library(mt5bridge::private_trade_manager ALIAS mt5bridge_private_trade_manager)
 
+# Pure consistency checks only; intentionally not linked into the manager/runtime.
+add_library(mt5bridge_typed_managed_open_validation STATIC
+            src/dispatch/typed_managed_open_validation.cpp)
+target_include_directories(mt5bridge_typed_managed_open_validation PRIVATE
+                           ${PROJECT_SOURCE_DIR}/src/dispatch)
+target_link_libraries(mt5bridge_typed_managed_open_validation PRIVATE mt5bridge::client)
+
 if(BUILD_TESTING)
     target_compile_definitions(mt5bridge_journal PRIVATE MT5BRIDGE_LEASE_TEST_HOOKS)
     add_executable(mt5bridge_reconciliation_graph_test tests/reconciliation_graph_test.cpp)
@@ -254,6 +261,14 @@ if(BUILD_TESTING)
                           mt5bridge::client)
     add_test(NAME mt5bridge_managed_opening_quantity_contract
              COMMAND mt5bridge_managed_opening_quantity_contract_test)
+    add_executable(mt5bridge_typed_managed_open_validation_test
+                   tests/typed_managed_open_validation_test.cpp)
+    target_include_directories(mt5bridge_typed_managed_open_validation_test PRIVATE
+                               ${PROJECT_SOURCE_DIR}/src/dispatch)
+    target_link_libraries(mt5bridge_typed_managed_open_validation_test PRIVATE
+                          mt5bridge_typed_managed_open_validation mt5bridge::client)
+    add_test(NAME mt5bridge_typed_managed_open_validation
+             COMMAND mt5bridge_typed_managed_open_validation_test)
     add_executable(mt5bridge_managed_opening_execution_evidence_test
                    tests/managed_opening_execution_evidence_test.cpp)
     target_include_directories(mt5bridge_managed_opening_execution_evidence_test PRIVATE

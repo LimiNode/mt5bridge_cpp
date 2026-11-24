@@ -469,6 +469,18 @@ worker process.
    lane, and fresh environment proof. The Python transport owns GIL/module
    lifetime and a bounded request-shape gate; managed symbol/side/volume
    authority remains with the future owner factory and is not implied here.
+   The separate [typed OPEN owner-factory plan](typed-managed-open-owner-factory-plan.md)
+   defines the review slices. Its first Python-free typed numeric/policy validator
+   now checks supplied account/symbol consistency, whole-lot quantity and Market
+   FOK/IOC compatibility. The candidate grants no authority and is not wired to
+   the manager/runtime. Market-only support is a temporary first-slice boundary,
+   not a permanent bridge restriction. The next reviewed slices are runtime-owned
+   capability collection, then INSTANT -> REQUEST -> EXCHANGE policy expansion
+   (mode-specific price/deviation/filling, including RETURN where allowed), then
+   canonical serialization with a versioned immutable journal binding covering
+   all supported modes, and finally private manager integration before the
+   existing barrier. This is not an implemented factory
+   or a live-trading permission; fractional managed settlement remains separate.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced

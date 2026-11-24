@@ -5,6 +5,7 @@
 #include <mt5bridge/market.h>
 #include <mt5bridge/trade.h>
 #include "python_dispatch_transport.hpp"
+#include "managed_open_capability_collector.hpp"
 #include "python_ref.hpp"
 #include "runtime_lane.hpp"
 
@@ -194,6 +195,7 @@ public:
                 return;
             }
             ++g_active_runtime_calls;
+            generation_ = g_runtime_generation;
             counted_ = true;
         }
         try {
@@ -228,6 +230,9 @@ public:
     /// \return True when the in-flight admission and interpreter mutex are held.
     explicit operator bool() const noexcept { return acquired_; }
 
+    /// \brief Returns the lifecycle generation captured under the state mutex.
+    std::uint64_t generation() const { return generation_; }
+
     /// \brief Temporarily releases the lane and interpreter mutexes.
     ///
     /// The in-flight lifecycle count remains held, so shutdown still waits for
@@ -253,6 +258,7 @@ private:
     std::unique_lock<std::mutex> python_lock_;
     bool counted_ = false;
     bool acquired_ = false;
+    std::uint64_t generation_ = 0;
 };
 
 /// \brief Converts the active C++ exception into a non-throwing ABI diagnostic.
@@ -2628,6 +2634,73 @@ void realtime_poller() try {
 }
 
 } // namespace
+
+namespace mt5bridge::trade {
+namespace {
+/// \brief Maximum collection duration and retained local age, not broker atomicity.
+constexpr auto kManagedOpenCapabilityLifetime = std::chrono::milliseconds{1000};
+} // namespace
+
+ManagedOpenCollectionResult collect_managed_open_capabilities(
+    const AccountKey &expected, const std::string &symbol,
+    const WindowsSingleWriterLease &lease) {
+    using Status = ManagedOpenCollectionStatus;
+    ManagedOpenCollectionResult result{Status::lease_lost, std::nullopt};
+    if (!expected.valid() || symbol.empty())
+        return {Status::invalid_request, std::nullopt};
+    const auto token = lease.held_fencing_token(expected);
+    if (!token)
+        return result;
+    const bool held = lease.with_fencing_capability(expected, *token, [&] {
+        const auto started = std::chrono::steady_clock::now();
+        RuntimeCallAdmission call(RuntimeCallLane::trade_critical);
+        if (!call) {
+            result.status = Status::runtime_unavailable;
+            return;
+        }
+        GilScope gil(true);
+        PyRef mt5(PyImport_ImportModule("MetaTrader5"));
+        if (!mt5) {
+            PyErr_Clear();
+            result.status = Status::python_error;
+            return;
+        }
+        auto read = detail::read_managed_open_capabilities(mt5.get(), expected, symbol);
+        result.status = read.status;
+        if (!read.data)
+            return;
+        if (std::chrono::steady_clock::now() - started > kManagedOpenCapabilityLifetime) {
+            result.status = Status::stale_observation;
+            return;
+        }
+        if (lease.held_fencing_token(expected) != token) {
+            result.status = Status::lease_lost;
+            return;
+        }
+        result.snapshot = ManagedOpenCapabilitySnapshot(
+            std::move(*read.data), *token, call.generation(), started);
+    });
+    if (!held)
+        return {Status::lease_lost, std::nullopt};
+    return result;
+}
+
+bool managed_open_capabilities_current(const ManagedOpenCapabilitySnapshot &snapshot,
+                                       const WindowsSingleWriterLease &lease) {
+    bool current = false;
+    const auto account = make_account_key(snapshot.data_.account);
+    const bool held = lease.with_fencing_capability(account, snapshot.token_, [&] {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto age = std::chrono::steady_clock::now() - snapshot.captured_;
+        current = g_runtime_state == RuntimeState::running &&
+                  g_runtime_generation == snapshot.generation_ &&
+                  age >= std::chrono::steady_clock::duration::zero() &&
+                  age <= kManagedOpenCapabilityLifetime;
+    });
+    return held && current;
+}
+
+} // namespace mt5bridge::trade
 
 extern "C" {
 

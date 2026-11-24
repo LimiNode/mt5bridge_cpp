@@ -2678,7 +2678,7 @@ ManagedOpenCollectionResult collect_managed_open_capabilities(
             return;
         }
         result.snapshot = ManagedOpenCapabilitySnapshot(
-            std::move(*read.data), *token, call.generation(), started);
+            std::move(*read.data), lease.directory(), *token, call.generation(), started);
     });
     if (!held)
         return {Status::lease_lost, std::nullopt};
@@ -2687,6 +2687,8 @@ ManagedOpenCollectionResult collect_managed_open_capabilities(
 
 bool managed_open_capabilities_current(const ManagedOpenCapabilitySnapshot &snapshot,
                                        const WindowsSingleWriterLease &lease) {
+    if (snapshot.lease_directory_ != lease.directory())
+        return false;
     bool current = false;
     const auto account = make_account_key(snapshot.data_.account);
     const bool held = lease.with_fencing_capability(account, snapshot.token_, [&] {

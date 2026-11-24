@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <utility>
@@ -75,7 +76,8 @@ MT5BRIDGE_COLLECTOR_TEST_API ManagedOpenCollectionResult collect_managed_open_ca
 /// \brief Checks local age, runtime lifecycle and fencing scope of retained facts.
 /// \param snapshot Runtime-created observation, not caller-authored data.
 /// \param lease Actual account lease that must retain the captured epoch.
-/// \return False after age expiry, shutdown/reinitialize or ownership transfer.
+/// \return False after age expiry, shutdown/reinitialize, ownership transfer or
+/// a different anchored lease namespace, even when its numeric epoch matches.
 /// \warning This is not a fresh broker observation, netting/exposure authority or
 /// dispatch permit. Future pre-barrier admission must recollect live capabilities.
 MT5BRIDGE_COLLECTOR_TEST_API bool managed_open_capabilities_current(
@@ -99,11 +101,14 @@ public:
     }
 
 private:
-    ManagedOpenCapabilitySnapshot(ManagedOpenCapabilityData data, std::uint64_t token,
+    ManagedOpenCapabilitySnapshot(ManagedOpenCapabilityData data,
+                                 std::filesystem::path lease_directory, std::uint64_t token,
                                  std::uint64_t generation,
                                  std::chrono::steady_clock::time_point captured)
-        : data_(std::move(data)), token_(token), generation_(generation), captured_(captured) {}
+        : data_(std::move(data)), lease_directory_(std::move(lease_directory)),
+          token_(token), generation_(generation), captured_(captured) {}
     ManagedOpenCapabilityData data_;
+    std::filesystem::path lease_directory_;
     std::uint64_t token_;
     std::uint64_t generation_;
     std::chrono::steady_clock::time_point captured_;

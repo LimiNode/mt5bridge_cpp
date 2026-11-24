@@ -56,17 +56,25 @@ position, existing same-side position, external residue or pending order cannot
 be treated as a new unencumbered OPEN. Collection itself can succeed with a
 nonempty book so facts and directional exposure remain inspectable; successful
 collection must not be interpreted as an OPEN admission decision.
+This is the initial empty-symbol boundary, not a permanent policy for adding to
+owned positions or sharing a symbol across strategies. Those uses require a
+separately reviewed ownership/exposure policy.
 
 The only snapshot constructor belongs to the runtime collection function. Plain
 decoded data, copies of PODs and the low-level Python decoder cannot construct
 one. There is no restore/deserialization seam. Data getters are const.
 
 The held account capability covers the whole capture. The immutable result
-retains its actual fencing epoch, runtime lifecycle generation and monotonic
-start time. Collection and retained local age are bounded to 1000 ms.
+retains its anchored lease metadata directory, actual fencing epoch, runtime
+lifecycle generation and monotonic start time. Collection and retained local
+age are bounded to 1000 ms.
 `managed_open_capabilities_current(snapshot, concrete_lease)` rejects age expiry,
-shutdown/reinitialize and account/epoch mismatch. It is a local freshness/scope
-check, **not** a new broker query. Do not call collection while already owning
+shutdown/reinitialize and lease-directory/account/epoch mismatch. Numeric epochs
+are scoped to a metadata directory, not globally unique: an equal token in
+another directory cannot validate the retained snapshot. The directory comparison
+uses captured anchored paths and fails closed on a different spelling; it does
+not infer namespace equivalence through a new filesystem lookup. This is a local
+freshness/scope check, **not** a new broker query. Do not call collection while already owning
 the runtime lane or GIL, or acquire another account capability inside it.
 
 MT5's calls are not an atomic broker snapshot. Count checks and two matching
@@ -76,6 +84,9 @@ not manual/other-terminal trading. A future wired factory must recollect before
 the durable barrier and retain normal environment admission, final account and
 fencing checks, and fail-closed reconciliation. Empty observed sets are not a
 permanent pure-OPEN proof or an exclusion lock.
+The 1000 ms age bound, 100000-row cap and duplicate full-book scans have not been
+benchmarked on a real terminal. Fake-module tests establish neither broker-side
+behavior nor real-terminal latency or usability at these bounds.
 
 ## Verification boundary
 
@@ -85,8 +96,10 @@ all four execution modes, zero versus missing filling, exact domain derivation,
 non-finite/near-grid/overflow cases, complete empty and nonempty books, count
 mismatch, duplicate/malformed rows and same-count replacement. Check directional
 pending-order remainder and the conservative guard on both netting and hedging
-accounts; check age expiry, runtime restart and new lease generation. Require
-zero `order_send` calls and no operation journal records.
+accounts; check age expiry, runtime restart and new lease generation. Check two
+independent directories for the same account with equal tokens: neither lease
+may validate the other's snapshot, including after the original lease is released.
+Require zero `order_send` calls and no operation journal records.
 
 Repository-test-only private C++ exports permit native tests to invoke this
 otherwise internal entry point. They are absent with `BUILD_TESTING=OFF`; the

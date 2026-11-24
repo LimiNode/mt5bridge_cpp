@@ -28,7 +28,7 @@ using Status = ManagedOpenCollectionStatus;
 static_assert(!std::is_default_constructible_v<ManagedOpenCapabilitySnapshot>,
               "source snapshots cannot be default-created");
 static_assert(!std::is_constructible_v<ManagedOpenCapabilitySnapshot,
-                                      ManagedOpenCapabilityData, std::uint64_t,
+                                      ManagedOpenCapabilityData, std::filesystem::path, std::uint64_t,
                                       std::uint64_t, std::chrono::steady_clock::time_point>,
               "plain facts cannot construct a source snapshot");
 
@@ -292,6 +292,37 @@ void test_rejections(const AccountKey &account, const WindowsSingleWriterLease &
     require_read_only(journal);
 }
 
+/// \brief Rejects equal account epochs from independent anchored lease namespaces.
+void test_lease_namespaces(const AccountKey &account) {
+    TemporaryDirectory first_directory;
+    TemporaryDirectory second_directory;
+    WindowsFileJournalStore first_journal(first_directory.path());
+    WindowsFileJournalStore second_journal(second_directory.path());
+    require(first_journal.ready() && second_journal.ready(),
+            "cannot create isolated fencing namespaces");
+    WindowsSingleWriterLease second(second_directory.path(), account);
+    require(second.ready(), "cannot acquire independent account lease");
+    std::optional<ManagedOpenCapabilitySnapshot> first_snapshot;
+    {
+        WindowsSingleWriterLease first(first_directory.path(), account);
+        require(first.ready() && first.directory() != second.directory() &&
+                    first.held_fencing_token(account) == second.held_fencing_token(account),
+                "independent fresh namespaces did not reproduce equal fencing tokens");
+        first_snapshot = collect("empty", account, first, first_journal);
+        const auto second_snapshot = collect("empty", account, second, second_journal);
+        require(!managed_open_capabilities_current(*first_snapshot, second) &&
+                    !managed_open_capabilities_current(second_snapshot, first),
+                "equal tokens allowed a snapshot to cross lease namespaces");
+        require(managed_open_capabilities_current(*first_snapshot, first) &&
+                    managed_open_capabilities_current(second_snapshot, second),
+                "originating namespace lost a fresh snapshot");
+    }
+    require(!managed_open_capabilities_current(*first_snapshot, second),
+            "foreign namespace revived a snapshot after its original lease was destroyed");
+    require_read_only(first_journal);
+    require_read_only(second_journal);
+}
+
 /// \brief Runs lifecycle and concrete-lease freshness tests on the real runtime.
 void run() {
     require(mt5bridge_abi_version() == MT5BRIDGE_ABI_VERSION, "ABI version mismatch");
@@ -300,6 +331,7 @@ void run() {
     require(journal.ready(), "cannot open empty durable journal");
     const AccountKey account{"Collector-Demo", 424242};
     Runtime runtime;
+    test_lease_namespaces(account);
     std::optional<ManagedOpenCapabilitySnapshot> prior_owner;
     {
         WindowsSingleWriterLease lease(directory.path(), account);

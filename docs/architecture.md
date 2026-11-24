@@ -475,11 +475,12 @@ worker process.
    FOK/IOC compatibility. The candidate grants no authority and is not wired to
    the manager/runtime. Market-only support is a temporary first-slice boundary,
    not a permanent bridge restriction. The next reviewed slices are runtime-owned
-   capability collection, then INSTANT -> REQUEST -> EXCHANGE policy expansion
-   (mode-specific price/deviation/filling, including RETURN where allowed), then
-   canonical serialization with a versioned immutable journal binding covering
-   all supported modes, and finally private manager integration before the
-   existing barrier. This is not an implemented factory
+   capability collection, then canonical Market FOK/IOC serialization with a
+   versioned immutable journal binding, and private manager integration before
+   the existing barrier to prove the first fake-MT5 end-to-end OPEN. INSTANT ->
+   REQUEST -> EXCHANGE policy expansion follows that first vertical path with
+   mode-specific price/deviation/filling, including RETURN where allowed, using
+   the same journal, transport and reconciliation. This is not an implemented factory
    or a live-trading permission; fractional managed settlement remains separate.
    The separate [runtime-owned capability collector](runtime-owned-open-capability-collector.md)
    now reads strict, bracketed account/symbol and complete account-wide position/

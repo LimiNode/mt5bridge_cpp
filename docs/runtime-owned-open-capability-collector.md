@@ -105,6 +105,9 @@ Repository-test-only private C++ exports permit native tests to invoke this
 otherwise internal entry point. They are absent with `BUILD_TESTING=OFF`; the
 installed/public headers and stable C exports do not change.
 
-After independent review, the order remains INSTANT -> REQUEST -> EXCHANGE
-policy expansion, then canonical serialization + immutable journal binding,
-then manager integration and end-to-end restart/no-resend coverage.
+After independent review and merge, the next separate Draft PR implements
+canonical Market FOK/IOC request serialization + immutable journal binding.
+A following Draft PR integrates that path with the existing private manager
+and proves fake-MT5 end-to-end restart/no-resend behavior. Only then expand
+INSTANT -> REQUEST -> EXCHANGE policy through the same journal and transport.
+This revised priority does not enable any of those stages in this collector.

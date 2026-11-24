@@ -285,6 +285,13 @@ successor before its `alloc-*` record is durable, current lookup remains
 `unavailable` until publication catches up. Until the producer and its
 restart/fencing regressions are verified, the opening provenance source and
 managed `INOUT` path remain fail-closed.
+[ADR-0045](adr/0045-managed-opening-ownership-authority.md) defines the next
+C3A B3E boundary: a verified OPEN allocation is not yet managed ownership.
+Live exposure mutation requires a complete durable position-ownership frontier,
+explicit consumption history, current position evidence, and an account-fenced
+idempotent publication protocol. Until those facts exist, the ownership gate
+returns `unavailable`; B3D proofs cannot be wired directly to
+`ManagedTradeOwner`.
 Progressive deep tick synchronization is specified in
 [ADR-0015](adr/0015-progressive-tick-history-bootstrap.md); it is bounded and
 does not alter the fixed C data-plane ABI. The caller-driven reconciliation

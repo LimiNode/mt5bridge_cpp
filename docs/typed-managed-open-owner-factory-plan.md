@@ -273,6 +273,10 @@ opening semantics, change exposure or manufacture a dispatch permit.
   No price/deviation or session-open policy is inferred.
 - An explicit supplied scale/step is validated against the raw symbol step by
   B2. Redundant trailing decimal zeros are removed for a canonical domain.
+  `BrokerVolumeNormalization` is still an untrusted caller-supplied input in
+  slice 1; matching the supplied step does not authenticate its provenance.
+  The next runtime-owned collector must derive it from observed symbol data,
+  rather than accepting a caller's normalization as source authority.
   The legacy whole-lot mapper determines requested broker units; B2 checks
   step-aligned min/max, quantity uniqueness and binary64 round trip. B2's
   temporary one-unit-per-step map never becomes the owner's logical volume.
@@ -299,20 +303,45 @@ ctest --test-dir build_typed_open_native -C Release -R "^mt5bridge_typed_managed
 
 ## Acceptance matrix
 
-| Case | Required result |
-| --- | --- |
-| Valid BUY and SELL under supported capabilities | Exact canonical request; no implicit dispatch permission |
-| Missing/foreign account, changed lease or mismatched symbol | Rejected before preparation/barrier; zero sends |
-| Forged caller capability POD or edited admitted payload | No typed authority; no durable mutation |
-| Zero/negative/non-finite, non-step or out-of-range volume | No clamp/rounding, no prepare and zero sends |
-| Overflow, ambiguous binary64 step, changed quantity domain | Fail closed using the shared exact quantity contract |
-| Missing permissions, unknown execution/filling or incompatible side | Explicit unsupported/rejected outcome; zero sends |
-| Pending/position-targeted request or opposite netting exposure | No OPEN admission; production CLOSE/INOUT remains disabled |
-| Capability changes between prepare and execute | Block before barrier; retain immutable intent, no auto-replacement |
-| Changed durable binding field or unsupported version | CAS/load/recovery fails closed; no permit |
-| Prepared restart with matching binding and fresh policy | Only the original operation may undergo normal admission |
-| Post-barrier restart, timeout or malformed result | Reconcile-only; durable call count never increases |
+### Implemented slice 1: supplied-value validation only
 
-Verification must include Windows Release full CTest, focused `/W4 /WX`, exact
-head Push/PR CI, real file-store restart and fake-Python decoding. Live/demo
-orders, new public ABI and B3E ownership mutations are not acceptance tools.
+These are native validator guarantees, not runtime authority, canonical request
+serialization, journal binding or dispatch guarantees. Every input observation,
+including `BrokerVolumeNormalization` and the directional aggregate, remains
+untrusted. There is no production consumer of the candidate.
+
+| Case | Implemented result |
+| --- | --- |
+| BUY/SELL with consistent supplied Market FOK/IOC capabilities | Owned numeric candidate with canonical whole-lot broker units/step; no request bytes or permission |
+| Missing/foreign supplied account or mismatched symbol | Explicit rejection, no candidate; no live-account or lease check is claimed |
+| Caller-authored capability POD, normalization or aggregate | Consistency checks only; even a successful candidate is not authenticated evidence |
+| Zero logical units, invalid/non-finite/non-grid supplied sizing or out-of-range quantity | Rejected without clamping or epsilon rounding |
+| Overflow, ambiguous binary64 quantity or incompatible supplied domain | Rejected using the existing exact quantity helpers |
+| Missing permissions, unknown/unsupported execution/filling or incompatible side | Explicit rejection; absent side/filling never defaults to a trading policy |
+| Positive supplied directional limit | Exact numeric capacity check requires an explicit supplied aggregate; completeness/ownership is not proven |
+| Pending-like side or RETURN/BOC selection | Rejected; position/position_by and raw request JSON are not fields of this intent |
+| Edited candidate | Remains plain data; no authority, preparation, journal mutation or dispatch capability is created |
+
+Slice 1 verification: Windows Release full CTest, focused native `/W4 /WX`,
+exact-head Push/PR CI and diff checks. No file-store restart or Python request
+decoding claim follows from these pure-validation tests.
+
+### Future slices: requirements, not implemented guarantees
+
+| Stage / case | Required future result |
+| --- | --- |
+| Collector: live account/symbol, lease generation, known fields and freshness | Runtime-owned observations bound to the expected scope; missing/changed/stale input fails closed |
+| Collector: volume normalization provenance | Derive the canonical domain from runtime-observed symbol data; caller-supplied normalization cannot establish authority |
+| Collector: complete positions/active orders and directional limit | Prove collection coverage and compute the exact directional aggregate rather than trusting a caller's number |
+| Collector: opposite/ambiguous netting exposure | Block an apparent OPEN that could close/reverse existing exposure; snapshot collection is not a lock against external trading |
+| Policy expansion: INSTANT, REQUEST, then EXCHANGE | Review mode-specific price/deviation/filling, including RETURN where allowed, before wiring |
+| Serialization: valid admitted policy | Produce deterministic canonical request bytes and check actual Python decoding |
+| Binding: changed field or unsupported version | Versioned immutable journal CAS/load/recovery fails closed; legacy records acquire no new authority |
+| Integration: capability changes between preparation and execution | Block before the barrier; retain immutable intent, no rewriting or auto-replacement |
+| Integration: prepared restart with matching binding and fresh policy | Only the original operation may undergo normal admission |
+| Integration: post-barrier restart, timeout or malformed result | Reconcile-only; no blind resend or manufactured replacement permit |
+
+Future wired slices additionally require real file-store restart, actual
+fake-Python request decoding and end-to-end no-resend tests. None is implemented
+by slice 1. Production CLOSE/INOUT, live/demo orders, new public ABI and B3E
+ownership mutations remain outside this plan's current implementation scope.

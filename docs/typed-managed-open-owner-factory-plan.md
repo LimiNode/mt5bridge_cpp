@@ -2,9 +2,11 @@
 
 ## Status and scope
 
-Draft follow-up to merged PR #84: an implementation plan plus the first
-Python-free numeric/policy validation slice. The owner factory, runtime source
-authority, request serialization and durable binding are not implemented.
+Follow-up to merged PR #84: an implementation plan plus the first
+Python-free numeric/policy validation slice, merged in #85. The separate
+[runtime-owned collector](runtime-owned-open-capability-collector.md) is
+implemented in #86, under independent review. The owner factory, request
+serialization, durable binding and typed manager wiring are not implemented.
 This does not grant dispatch permission or establish live-terminal readiness;
 no existing production path or durable format changes.
 
@@ -16,10 +18,11 @@ is needed. Public asynchronous TradeManager, production CLOSE/INOUT and B3E
 ownership activation remain separate.
 
 `SYMBOL_TRADE_EXECUTION_MARKET` is a temporary restriction of the first slice,
-not a permanent MT5Bridge execution-mode restriction. Do not broaden PR #85:
-complete its native validation/tests and independent review first. The approved
-follow-up order is collector, execution-mode expansion, serialization/binding,
-then manager integration; each remains independently reviewed.
+not a permanent MT5Bridge execution-mode restriction. Following review of #86,
+the revised priority is canonical Market FOK/IOC serialization/binding, then
+the first fake-MT5 manager end-to-end OPEN, then INSTANT -> REQUEST -> EXCHANGE
+policy expansion. Each stage remains independently reviewed; do not delay the
+first complete Market path until every execution mode is implemented.
 
 ## Existing seams and gaps
 
@@ -167,28 +170,30 @@ bindings; it never regenerates request bytes or resends an old operation.
    and freshness checks. Missing, changed or stale values fail closed. Capture
    the reported execution mode without interpreting Market as the only valid
    MT5 mode; collection is not request-policy selection or dispatch admission.
-3. **Execution-mode expansion:** after the collector, implement and review
-   INSTANT, then REQUEST, then EXCHANGE policy slices, including correct
-   mode-specific price, deviation and filling rules and RETURN where allowed.
-   Each newly supported mode needs native positive/negative policy tests and
-   authenticated quote inputs where required; other modes remain rejected.
-   Do this before serializer/binding and manager integration, not by enabling
-   another branch in an already wired trading pipeline.
-4. **Canonical request serialization and immutable journal binding:** encode
-   all supported mode-specific policies into the same deterministic request
+3. **Canonical request serialization and immutable journal binding:** encode
+   the currently supported Market FOK/IOC policy into a deterministic request
    and versioned operation-journal tuple. Specify immutable CAS comparisons,
    bounded/unknown-version decoding and legacy/prepared/post-barrier replay.
    Test actual Python decoding and tampering with account, symbol, quantity,
-   execution mode, price, deviation and filling; no legacy authority upgrade.
-5. **Private manager integration:** consume only the factory-admitted value
+   execution mode and filling; no legacy authority upgrade. Reserve reviewed
+   versioned encoding for future mode-specific price/deviation, but reject
+   unsupported modes and fields now. No manager integration in this slice.
+4. **Private manager integration:** consume only the factory-admitted value
    on the typed path, revalidate before the existing barrier and exercise the
    existing dispatch/reconciliation pipeline with fake-Python end-to-end and
    file-store restart tests. Keep the old raw seam internal; it must not be an
    alternate entry point into typed authority.
+5. **Execution-mode expansion:** after the first fake-MT5 Market end-to-end
+   path is verified, implement and review INSTANT, then REQUEST, then EXCHANGE
+   policies, with correct mode-specific price, deviation and filling rules and
+   RETURN where allowed. Each new mode needs authenticated quote inputs where
+   required and independent tests before activation. Extend the same typed
+   request, journal and transport, not a separate pipeline per mode.
 
 Each slice needs independent review before the next expands its trust boundary.
-This Draft implements only slice 1 as described below; the source producer,
-canonical request serializer and versioned binding do not yet exist.
+Slice 1 is implemented as described below; #86 supplies the separate source
+collector. The canonical request serializer, versioned binding and typed
+manager integration remain future stages, not guarantees of the validator.
 
 ## Extensible execution-policy model (design only)
 
@@ -228,7 +233,7 @@ backend, class hierarchy or general policy framework:
   residual-order/partial-fill lifecycle handling, not just enum admission.
   BOC and pending orders remain outside typed
   managed market-order OPEN even after execution-mode expansion.
-- **Immutable hand-off:** after policy expansion, the serializer and durable
+- **Immutable hand-off:** the serializer and durable
   binding retain the execution tag and all meaningful mode-specific fields
   together with source identity, account/symbol, side, exact quantity and
   canonical bytes. Unknown/inconsistent tags fail closed; a capability change
@@ -238,8 +243,8 @@ backend, class hierarchy or general policy framework:
 
 The current `ManagedOpenFilling` and Market-only `supported_policy()` are
 slice-local private validation details, not an exhaustive public policy model
-or a durable encoding. Their extension belongs to slice 3, before any typed
-request is serialized, journaled or wired. PR #85 adds no new execution tag,
+or a durable encoding. Their extension belongs to slice 5, after the first
+Market end-to-end path and before any additional mode is activated. PR #85 adds no new execution tag,
 price/deviation fields, RETURN handling or mode implementation.
 
 Mode expansion must use the upstream
@@ -334,7 +339,7 @@ decoding claim follows from these pure-validation tests.
 | Collector: volume normalization provenance | Derive the canonical domain from runtime-observed symbol data; caller-supplied normalization cannot establish authority |
 | Collector: complete positions/active orders and directional limit | Prove collection coverage and compute the exact directional aggregate rather than trusting a caller's number |
 | Collector: opposite/ambiguous netting exposure | Block an apparent OPEN that could close/reverse existing exposure; snapshot collection is not a lock against external trading |
-| Policy expansion: INSTANT, REQUEST, then EXCHANGE | Review mode-specific price/deviation/filling, including RETURN where allowed, before wiring |
+| Policy expansion: INSTANT, REQUEST, then EXCHANGE after the first Market end-to-end path | Review mode-specific price/deviation/filling, including RETURN where allowed, before activating each new mode |
 | Serialization: valid admitted policy | Produce deterministic canonical request bytes and check actual Python decoding |
 | Binding: changed field or unsupported version | Versioned immutable journal CAS/load/recovery fails closed; legacy records acquire no new authority |
 | Integration: capability changes between preparation and execution | Block before the barrier; retain immutable intent, no rewriting or auto-replacement |

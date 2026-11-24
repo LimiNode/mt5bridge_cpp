@@ -454,6 +454,7 @@ if(MT5BRIDGE_BUILD_RUNTIME)
 
     add_library(mt5_bridge SHARED
                 src/bridge/mt5_bridge.cpp
+                src/trade/managed_open_capability_collector.cpp
                 src/trade/python_dispatch_transport.cpp)
     target_include_directories(mt5_bridge PRIVATE
                                ${PROJECT_SOURCE_DIR}/include
@@ -462,7 +463,12 @@ if(MT5BRIDGE_BUILD_RUNTIME)
                                ${PROJECT_SOURCE_DIR}/src/runtime
                                ${PROJECT_SOURCE_DIR}/src/trade)
     target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_BUILD_DLL)
-    target_link_libraries(mt5_bridge PRIVATE Python3::Python mt5bridge::runtime_lane)
+    target_link_libraries(mt5_bridge PRIVATE Python3::Python mt5bridge::runtime_lane
+                                            mt5bridge::journal)
+    if(MSVC)
+        set_source_files_properties(src/trade/managed_open_capability_collector.cpp
+                                    PROPERTIES COMPILE_OPTIONS "/W4;/WX")
+    endif()
     set(MT5BRIDGE_PYTHON_RUNTIME_RELEASE
         "${MT5BRIDGE_PYTHON_HOME}/python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.dll")
     if(NOT EXISTS "${MT5BRIDGE_PYTHON_RUNTIME_RELEASE}")
@@ -483,6 +489,26 @@ if(MT5BRIDGE_BUILD_RUNTIME)
 
     if(BUILD_TESTING)
         target_compile_definitions(mt5_bridge PRIVATE MT5BRIDGE_INTERNAL_TESTING)
+        add_executable(mt5bridge_managed_open_capability_collector_test
+                       tests/managed_open_capability_collector_test.cpp)
+        target_compile_definitions(mt5bridge_managed_open_capability_collector_test PRIVATE
+                                   MT5BRIDGE_INTERNAL_TESTING)
+        target_include_directories(mt5bridge_managed_open_capability_collector_test PRIVATE
+                                   ${PROJECT_SOURCE_DIR}/src/trade
+                                   ${PROJECT_SOURCE_DIR}/src/runtime)
+        target_link_libraries(mt5bridge_managed_open_capability_collector_test PRIVATE
+                              mt5_bridge mt5bridge::journal Python3::Python)
+        if(MSVC)
+            target_compile_options(mt5bridge_managed_open_capability_collector_test PRIVATE /W4 /WX)
+        endif()
+        add_test(NAME mt5bridge_managed_open_capability_collector
+                 COMMAND ${CMAKE_COMMAND} -E env
+                         "PYTHONPATH=${PROJECT_SOURCE_DIR}/tests/fake_capability_mt5_module"
+                         "PYTHONHOME=${MT5BRIDGE_PYTHON_HOME}"
+                         "PATH=${MT5BRIDGE_PYTHON_HOME};$<TARGET_FILE_DIR:mt5_bridge>;$ENV{PATH}"
+                         "$<TARGET_FILE:mt5bridge_managed_open_capability_collector_test>")
+        set_tests_properties(mt5bridge_managed_open_capability_collector PROPERTIES
+                             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 60)
         add_executable(mt5bridge_c_header_compile tests/abi_compile_test.c)
         target_include_directories(mt5bridge_c_header_compile PRIVATE ${PROJECT_SOURCE_DIR}/include)
         add_test(NAME mt5bridge_c_header_compile COMMAND mt5bridge_c_header_compile)

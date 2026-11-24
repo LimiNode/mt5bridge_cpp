@@ -475,12 +475,21 @@ worker process.
    FOK/IOC compatibility. The candidate grants no authority and is not wired to
    the manager/runtime. Market-only support is a temporary first-slice boundary,
    not a permanent bridge restriction. The next reviewed slices are runtime-owned
-   capability collection, then INSTANT -> REQUEST -> EXCHANGE policy expansion
-   (mode-specific price/deviation/filling, including RETURN where allowed), then
-   canonical serialization with a versioned immutable journal binding covering
-   all supported modes, and finally private manager integration before the
-   existing barrier. This is not an implemented factory
+   capability collection, then canonical Market FOK/IOC serialization with a
+   versioned immutable journal binding, and private manager integration before
+   the existing barrier to prove the first fake-MT5 end-to-end OPEN. INSTANT ->
+   REQUEST -> EXCHANGE policy expansion follows that first vertical path with
+   mode-specific price/deviation/filling, including RETURN where allowed, using
+   the same journal, transport and reconciliation. This is not an implemented factory
    or a live-trading permission; fractional managed settlement remains separate.
+   The separate [runtime-owned capability collector](runtime-owned-open-capability-collector.md)
+   now reads strict, bracketed account/symbol and complete account-wide position/
+   active-order observations through the existing trade-critical runtime lane.
+   It derives volume normalization from observed symbol step, retains local
+   age/runtime-generation/fencing scope, and conservatively blocks an
+   unencumbered OPEN on any existing symbol exposure. Collection success and
+   empty observed books are not dispatch permission or an external-trading lock.
+   No request serializer, journal binding or manager integration is added here.
    The next public-facing layer is the high-level asynchronous `TradeManager`;
    its side-effecting methods must follow [ADR-0004](adr/0004-trade-reconciliation.md).
 9. Add timed close obligations, then a separate execution planner for sliced
